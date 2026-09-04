@@ -1,0 +1,16 @@
+// Data only until the Commander milestone: the engine refuses to start a game
+// with FormatRules it does not implement.
+Format(
+    name: "Commander",
+    players: (min: 2, max: 6),
+    starting_life: 40,
+    starting_hand: 7,
+    mulligan: London(free_first: true),      // house-rule toggle
+    deck: Deck(size: Exact(100), singleton: true, includes_commander: true),
+    rules: [Commander, CommanderDamage(21), ColorIdentity],
+    legality: Legality(
+        pool: Scryfall(format: "commander"),  // uses Scryfall's per-card `legalities.commander`
+        banned: [],                           // additions on top of the pool
+        allowed: [],                          // exceptions on top of the pool
+    ),
+)

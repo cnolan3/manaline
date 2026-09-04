@@ -1,0 +1,11 @@
+// M0 starter: mono-white vanilla creatures. 40 cards.
+Deck
+17 Plains
+3 Savannah Lions
+3 Devoted Hero
+2 Eager Cadet
+4 Glory Seeker
+3 Oreskos Swiftclaw
+3 Pearled Unicorn
+3 Regal Unicorn
+2 Alaborn Trooper

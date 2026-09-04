@@ -1,0 +1,11 @@
+// The starter cube: two-player, 20 life, 40–60 card decks from the built-in "core" set.
+Format(
+    name: "Starter Cube",
+    players: (min: 2, max: 2),
+    starting_life: 20,
+    starting_hand: 7,
+    mulligan: London(free_first: false),
+    deck: Deck(size: Range(40, 60), singleton: false, includes_commander: false),
+    rules: [],
+    legality: Legality(pool: Builtin("core"), banned: [], allowed: []),
+)

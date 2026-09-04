@@ -1,0 +1,810 @@
+//! The rules engine state machine (§3). Everything else in the project is a
+//! consequence of this interface: `new`, `legal_actions`, `must_act`, `apply`,
+//! `view`, `is_over`.
+
+use crate::action::{Action, AttackTarget, DamageTarget, Target};
+use crate::card::{CardDb, CardDef, CardId};
+use crate::objects::Objects;
+use crate::error::RulesError;
+use crate::event::Event;
+use crate::format::Format;
+use crate::types::{ManaPool, ObjectId, Phase, Seat, Zone};
+use crate::view::{GameView, HandView, LibraryView, ObjectView, PlayerView, StackObjectView};
+use rand::seq::SliceRandom;
+use rand::{Rng, SeedableRng};
+use rand_chacha::ChaCha8Rng;
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
+
+#[derive(Clone, Debug)]
+pub struct PlayerSetup {
+    pub name: String,
+    /// Already validated against the format; `Game::new` checks again.
+    pub deck: Vec<CardId>,
+}
+
+#[derive(Clone)]
+pub struct GameConfig {
+    pub format: Format,
+    /// One per seat, in seat order.
+    pub players: Vec<PlayerSetup>,
+    pub cards: Arc<CardDb>,
+    /// `None` chooses at random from the seed (rule 103.1).
+    pub starting_player: Option<Seat>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Elimination {
+    LifeZero,
+    Poison,
+    DrewFromEmptyLibrary,
+    Conceded,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Outcome {
+    Winner(Seat),
+    Draw,
+}
+
+/// Why a seat must act right now. Computed once by the engine and carried
+/// unchanged to the daemon's watch channel, the TUI header, and the MCP tool.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActReason {
+    Priority,
+    DeclareAttackers,
+    DeclareBlockers,
+    AssignDamage,
+    Mulligan,
+    BottomCards,
+    Discard,
+    Choice,
+}
+
+/// A decision the game is waiting on that is not "someone has priority".
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PendingChoice {
+    Mulligan { seat: Seat },
+    BottomCards { seat: Seat, count: u8 },
+    DeclareAttackers { seat: Seat },
+    /// `seat` declares now; `remaining` declare afterwards, in APNAP order.
+    DeclareBlockers { seat: Seat, remaining: Vec<Seat> },
+    /// `attacker` needs a damage division now; `queue` holds the rest.
+    AssignDamage { seat: Seat, attacker: ObjectId, queue: Vec<ObjectId> },
+    Discard { seat: Seat, count: u8 },
+}
+
+impl PendingChoice {
+    pub fn seat(&self) -> Seat {
+        match self {
+            PendingChoice::Mulligan { seat }
+            | PendingChoice::BottomCards { seat, .. }
+            | PendingChoice::DeclareAttackers { seat }
+            | PendingChoice::DeclareBlockers { seat, .. }
+            | PendingChoice::AssignDamage { seat, .. }
+            | PendingChoice::Discard { seat, .. } => *seat,
+        }
+    }
+
+    pub fn reason(&self) -> ActReason {
+        match self {
+            PendingChoice::Mulligan { .. } => ActReason::Mulligan,
+            PendingChoice::BottomCards { .. } => ActReason::BottomCards,
+            PendingChoice::DeclareAttackers { .. } => ActReason::DeclareAttackers,
+            PendingChoice::DeclareBlockers { .. } => ActReason::DeclareBlockers,
+            PendingChoice::AssignDamage { .. } => ActReason::AssignDamage,
+            PendingChoice::Discard { .. } => ActReason::Discard,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StackObject {
+    pub object: ObjectId,
+    pub controller: Seat,
+    pub targets: Vec<Target>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Counters {
+    pub plus1: u8,
+    pub minus1: u8,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ModifierKind {
+    Pt { power: i32, toughness: i32 },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Expiry {
+    EndOfTurn,
+}
+
+/// An "until end of turn" style effect stored on the object it modifies (§3.4).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Modifier {
+    pub kind: ModifierKind,
+    pub expires: Expiry,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GameObject {
+    pub id: ObjectId,
+    pub card: CardId,
+    pub owner: Seat,
+    pub controller: Seat,
+    pub zone: Zone,
+    pub tapped: bool,
+    pub summoning_sick: bool,
+    pub damage: i32,
+    pub counters: Counters,
+    pub attached_to: Option<ObjectId>,
+    pub attacking: Option<AttackTarget>,
+    /// Attackers this creature is blocking.
+    pub blocking: Vec<ObjectId>,
+    /// Once blocked, an attacker stays blocked even if its blockers leave (rule 509.1h).
+    pub blocked: bool,
+    /// Blockers in the order they were declared.
+    pub blocked_by: Vec<ObjectId>,
+    pub modifiers: Vec<Modifier>,
+}
+
+impl GameObject {
+    pub(crate) fn new(id: ObjectId, card: CardId, owner: Seat) -> GameObject {
+        GameObject {
+            id,
+            card,
+            owner,
+            controller: owner,
+            zone: Zone::Library,
+            tapped: false,
+            summoning_sick: false,
+            damage: 0,
+            counters: Counters::default(),
+            attached_to: None,
+            attacking: None,
+            blocking: Vec::new(),
+            blocked: false,
+            blocked_by: Vec::new(),
+            modifiers: Vec::new(),
+        }
+    }
+
+    /// An object that changes zones becomes a new object: nothing carries over.
+    pub(crate) fn reset_zone_state(&mut self) {
+        self.tapped = false;
+        self.summoning_sick = false;
+        self.damage = 0;
+        self.counters = Counters::default();
+        self.attached_to = None;
+        self.attacking = None;
+        self.blocking.clear();
+        self.blocked = false;
+        self.blocked_by.clear();
+        self.modifiers.clear();
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlayerState {
+    pub name: String,
+    pub life: i32,
+    pub eliminated: Option<Elimination>,
+    /// Index 0 is the bottom of the library; the last element is the top.
+    pub library: Vec<ObjectId>,
+    pub hand: Vec<ObjectId>,
+    pub graveyard: Vec<ObjectId>,
+    pub exile: Vec<ObjectId>,
+    pub battlefield: Vec<ObjectId>,
+    /// Command zone; empty outside commander formats.
+    pub command: Vec<ObjectId>,
+    /// Damage taken from each commander (rule 903.10a).
+    pub commander_damage: BTreeMap<ObjectId, i32>,
+    pub commander_casts: BTreeMap<ObjectId, u8>,
+    pub mana_pool: ManaPool,
+    pub lands_played_this_turn: u8,
+    pub poison: u8,
+    pub mulligans: u8,
+    /// Set when a draw from an empty library was attempted; checked as a state-based action.
+    pub drew_from_empty: bool,
+}
+
+/// Full game state, including every player's hidden information. Never leaves
+/// the engine except through [`Game::view`] and [`Game::view_spectator`].
+#[derive(Clone)]
+pub struct Game {
+    pub format: Format,
+    pub turn: u32,
+    /// Every seat in turn order from the starting player, eliminated seats included.
+    pub seating: Vec<Seat>,
+    /// Seats still in the game, in turn order from the starting player.
+    pub turn_order: Vec<Seat>,
+    pub active_player: Seat,
+    pub phase: Phase,
+    /// `None` during untap and cleanup, and while a `PendingChoice` is open.
+    pub priority: Option<Seat>,
+    /// Equals `turn_order.len()` with an empty stack → advance the step.
+    pub passed_in_succession: u8,
+    /// Bottom to top.
+    pub stack: Vec<StackObject>,
+    /// Indexed by seat; eliminated players stay (their objects still reference them).
+    pub players: Vec<PlayerState>,
+    pub objects: Objects,
+    pub pending: Option<PendingChoice>,
+    pub log: Vec<Event>,
+    pub(crate) rng: ChaCha8Rng,
+    pub(crate) cards: Arc<CardDb>,
+    pub(crate) seed: u64,
+    pub(crate) state_version: u64,
+    pub(crate) history: Vec<(Seat, Action)>,
+    pub(crate) outcome: Option<Outcome>,
+    pub(crate) started: bool,
+    /// Set when the active player leaves the game: the turn ends at the next opportunity.
+    pub(crate) turn_aborted: bool,
+    pub(crate) damage_assignments: BTreeMap<ObjectId, Vec<(DamageTarget, i32)>>,
+}
+
+impl std::fmt::Debug for Game {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Game")
+            .field("seed", &self.seed)
+            .field("turn", &self.turn)
+            .field("active_player", &self.active_player)
+            .field("phase", &self.phase)
+            .field("priority", &self.priority)
+            .field("pending", &self.pending)
+            .field("turn_order", &self.turn_order)
+            .field("outcome", &self.outcome)
+            .field("state_version", &self.state_version)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Game {
+    pub fn new(config: GameConfig, seed: u64) -> Result<Game, RulesError> {
+        let GameConfig { format, players, cards, starting_player } = config;
+        let n = players.len();
+        if !format.allows_player_count(n) {
+            return Err(RulesError::setup(format!(
+                "{} needs {}–{} players, got {n}",
+                format.name, format.players.min, format.players.max
+            )));
+        }
+        let unsupported = format.unsupported_rules();
+        if !unsupported.is_empty() {
+            let list: Vec<String> = unsupported.iter().map(ToString::to_string).collect();
+            return Err(RulesError::setup(list.join("; ")));
+        }
+        if let Some(s) = starting_player {
+            if s.index() >= n {
+                return Err(RulesError::setup(format!("{s} is not at this table")));
+            }
+        }
+
+        let mut objects = Objects::new();
+        let mut states = Vec::with_capacity(n);
+        for (i, p) in players.iter().enumerate() {
+            let seat = Seat(i as u8);
+            let violations = format.check_deck(&p.deck, &cards);
+            if !violations.is_empty() {
+                let list: Vec<String> = violations.iter().map(ToString::to_string).collect();
+                return Err(RulesError::setup(format!(
+                    "{}'s deck is not legal in {}: {}",
+                    p.name,
+                    format.name,
+                    list.join("; ")
+                )));
+            }
+            let library: Vec<ObjectId> = p
+                .deck
+                .iter()
+                .map(|&card| objects.insert_with_key(|id| GameObject::new(id, card, seat)))
+                .collect();
+            states.push(PlayerState {
+                name: p.name.clone(),
+                life: format.starting_life,
+                library,
+                ..PlayerState::default()
+            });
+        }
+
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
+        let starting = starting_player.unwrap_or_else(|| Seat(rng.gen_range(0..n) as u8));
+        let seating: Vec<Seat> = (0..n).map(|k| Seat(((starting.index() + k) % n) as u8)).collect();
+        let starting_hand = format.starting_hand;
+
+        let mut game = Game {
+            format,
+            turn: 0,
+            seating: seating.clone(),
+            turn_order: seating.clone(),
+            active_player: starting,
+            phase: Phase::Untap,
+            priority: None,
+            passed_in_succession: 0,
+            stack: Vec::new(),
+            players: states,
+            objects,
+            pending: None,
+            log: Vec::new(),
+            rng,
+            cards,
+            seed,
+            state_version: 0,
+            history: Vec::new(),
+            outcome: None,
+            started: false,
+            turn_aborted: false,
+            damage_assignments: BTreeMap::new(),
+        };
+        game.emit(Event::GameStarted { starting_player: starting, seats: n as u8 });
+        for seat in seating {
+            game.shuffle_library(seat);
+            game.draw(seat, starting_hand as usize);
+        }
+        if starting_hand > 0 {
+            game.pending = Some(PendingChoice::Mulligan { seat: game.seating[0] });
+        }
+        game.settle();
+        Ok(game)
+    }
+
+    /// Reconstruct a game from its seed and action log (§3.6).
+    pub fn replay(config: GameConfig, seed: u64, actions: &[(Seat, Action)]) -> Result<Game, RulesError> {
+        let mut game = Game::new(config, seed)?;
+        for (seat, action) in actions {
+            game.apply(*seat, action)?;
+        }
+        Ok(game)
+    }
+
+    pub fn seed(&self) -> u64 {
+        self.seed
+    }
+
+    pub fn cards(&self) -> &CardDb {
+        &self.cards
+    }
+
+    pub fn state_version(&self) -> u64 {
+        self.state_version
+    }
+
+    /// Every accepted action, in order. With the seed, fully determines this game.
+    pub fn history(&self) -> &[(Seat, Action)] {
+        &self.history
+    }
+
+    pub fn is_over(&self) -> Option<Outcome> {
+        self.outcome
+    }
+
+    /// Seats whose `legal_actions` is non-empty right now, and why. Empty iff the game is over.
+    pub fn must_act(&self) -> BTreeMap<Seat, ActReason> {
+        let mut m = BTreeMap::new();
+        if self.outcome.is_some() {
+            return m;
+        }
+        if let Some(p) = &self.pending {
+            m.insert(p.seat(), p.reason());
+        } else if let Some(s) = self.priority {
+            m.insert(s, ActReason::Priority);
+        }
+        m
+    }
+
+    /// Apply one action for one seat. Rejects anything `legal_actions` would not
+    /// list (or, for division actions, anything that fails the rule check), then
+    /// runs turn-based actions, state-based actions and phase advancement until
+    /// some seat can act again or the game is over.
+    pub fn apply(&mut self, seat: Seat, action: &Action) -> Result<Vec<Event>, RulesError> {
+        if let Some(outcome) = self.outcome {
+            return Err(RulesError::GameOver { outcome });
+        }
+        if !self.must_act().contains_key(&seat) {
+            return Err(RulesError::NotYourTurnToAct { seat });
+        }
+        if action.is_division() {
+            self.validate_division(seat, action)?;
+        } else {
+            let canon = action.canonical();
+            if !self.legal_actions(seat).iter().any(|a| a.canonical() == canon) {
+                return Err(RulesError::illegal(format!(
+                    "{} is not a legal action for {seat} right now",
+                    crate::text::describe_action(self, action)
+                )));
+            }
+        }
+        let start = self.log.len();
+        self.perform(seat, action)?;
+        self.history.push((seat, action.clone()));
+        self.settle();
+        self.state_version += 1;
+        Ok(self.log[start..].to_vec())
+    }
+
+    fn perform(&mut self, seat: Seat, action: &Action) -> Result<(), RulesError> {
+        match action {
+            Action::PassPriority => self.pass_priority(seat),
+            Action::PlayLand { object } => self.play_land(seat, *object),
+            Action::CastSpell { object, targets, payment } => {
+                self.cast_spell(seat, *object, targets, payment)?
+            }
+            Action::DeclareAttackers { attackers } => self.declare_attackers(seat, attackers),
+            Action::DeclareBlockers { blocks } => self.declare_blockers(seat, blocks),
+            Action::AssignCombatDamage { attacker, assignments } => {
+                self.assign_combat_damage(seat, *attacker, assignments)
+            }
+            Action::Discard { objects } => self.discard_to_hand_size(seat, objects),
+            Action::Mulligan { keep } => self.mulligan(seat, *keep),
+            Action::BottomCards { objects } => self.bottom_cards(seat, objects),
+            Action::Concede => self.eliminate(seat, Elimination::Conceded),
+            other => {
+                return Err(RulesError::Unsupported { what: format!("{other:?}") });
+            }
+        }
+        Ok(())
+    }
+
+    // ----- views -----
+
+    /// What `seat` is allowed to know: hidden information of other seats removed.
+    pub fn view(&self, seat: Seat) -> GameView {
+        self.build_view(Some(seat))
+    }
+
+    /// All hidden information removed.
+    pub fn view_spectator(&self) -> GameView {
+        self.build_view(None)
+    }
+
+    fn build_view(&self, viewer: Option<Seat>) -> GameView {
+        let castable: BTreeSet<ObjectId> = viewer
+            .map(|s| {
+                self.legal_actions(s)
+                    .iter()
+                    .filter_map(|a| match a {
+                        Action::PlayLand { object } | Action::CastSpell { object, .. } => Some(*object),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let players = self
+            .players
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let seat = Seat(i as u8);
+                let is_you = viewer == Some(seat);
+                PlayerView {
+                    seat,
+                    name: p.name.clone(),
+                    life: p.life,
+                    eliminated: p.eliminated.is_some(),
+                    hand: if is_you {
+                        HandView::Yours(p.hand.clone())
+                    } else {
+                        HandView::Hidden { count: p.hand.len() as u8 }
+                    },
+                    library: LibraryView { count: p.library.len() as u16 },
+                    graveyard: p.graveyard.clone(),
+                    exile: p.exile.clone(),
+                    battlefield: p.battlefield.clone(),
+                    command: p.command.clone(),
+                    commander_damage: p.commander_damage.clone(),
+                    poison: p.poison,
+                    lands_played_this_turn: p.lands_played_this_turn,
+                    mana_pool: is_you.then(|| p.mana_pool.clone()),
+                    pool: None,
+                }
+            })
+            .collect();
+
+        let mut objects = BTreeMap::new();
+        for (id, obj) in &self.objects {
+            let visible = obj.zone.is_public() || (obj.zone == Zone::Hand && viewer == Some(obj.owner));
+            if !visible {
+                continue;
+            }
+            let def = self.cards.get(obj.card);
+            objects.insert(
+                id,
+                ObjectView {
+                    id,
+                    card: obj.card,
+                    name: def.name.clone(),
+                    cost: def.cost.clone(),
+                    types: def.types.clone(),
+                    owner: obj.owner,
+                    controller: obj.controller,
+                    zone: obj.zone,
+                    tapped: obj.tapped,
+                    summoning_sick: obj.summoning_sick,
+                    damage: obj.damage,
+                    pt: self.effective_stats(id),
+                    attacking: obj.attacking,
+                    blocking: obj.blocking.clone(),
+                    castable: castable.contains(&id),
+                },
+            );
+        }
+
+        let stack = self
+            .stack
+            .iter()
+            .map(|s| StackObjectView {
+                object: s.object,
+                name: self.object_name(s.object).to_string(),
+                controller: s.controller,
+                targets: s.targets.clone(),
+            })
+            .collect();
+
+        GameView {
+            you: viewer,
+            turn: self.turn,
+            active_player: self.active_player,
+            phase: self.phase,
+            priority: self.priority,
+            must_act: self.must_act(),
+            state_version: self.state_version,
+            outcome: self.outcome,
+            stack,
+            players,
+            objects,
+        }
+    }
+
+    // ----- queries -----
+
+    pub fn card_def(&self, id: ObjectId) -> &CardDef {
+        self.cards.get(self.objects[id].card)
+    }
+
+    pub fn object_name(&self, id: ObjectId) -> &str {
+        &self.card_def(id).name
+    }
+
+    pub fn player_name(&self, seat: Seat) -> &str {
+        &self.players[seat.index()].name
+    }
+
+    pub fn is_creature(&self, id: ObjectId) -> bool {
+        self.card_def(id).is_creature()
+    }
+
+    pub fn is_eliminated(&self, seat: Seat) -> bool {
+        self.players[seat.index()].eliminated.is_some()
+    }
+
+    /// Every seat still in the game other than `seat`. Never `1 - seat`.
+    pub fn opponents_of(&self, seat: Seat) -> impl Iterator<Item = Seat> + '_ {
+        self.turn_order.iter().copied().filter(move |&s| s != seat)
+    }
+
+    /// Effective power and toughness (§3.4): base, then counters and modifiers.
+    /// Recomputed on every call, never cached. `None` for non-creatures.
+    pub fn effective_stats(&self, id: ObjectId) -> Option<(i32, i32)> {
+        let obj = &self.objects[id];
+        let (mut p, mut t) = self.cards.get(obj.card).pt?;
+        p += obj.counters.plus1 as i32 - obj.counters.minus1 as i32;
+        t += obj.counters.plus1 as i32 - obj.counters.minus1 as i32;
+        for m in &obj.modifiers {
+            match m.kind {
+                ModifierKind::Pt { power, toughness } => {
+                    p += power;
+                    t += toughness;
+                }
+            }
+        }
+        Some((p, t))
+    }
+
+    pub fn power(&self, id: ObjectId) -> i32 {
+        self.effective_stats(id).map(|(p, _)| p).unwrap_or(0)
+    }
+
+    pub fn toughness(&self, id: ObjectId) -> i32 {
+        self.effective_stats(id).map(|(_, t)| t).unwrap_or(0)
+    }
+
+    /// The next seat still in the game after `seat` in turn order, or `None` if there is none.
+    pub fn next_in_turn_order_after(&self, seat: Seat) -> Option<Seat> {
+        let n = self.seating.len();
+        let pos = self.seating.iter().position(|&s| s == seat)?;
+        (1..=n)
+            .map(|k| self.seating[(pos + k) % n])
+            .find(|s| *s != seat && self.turn_order.contains(s))
+    }
+
+    /// Seats in the game in APNAP order: the active player first, then turn order.
+    pub fn apnap(&self) -> Vec<Seat> {
+        let mut out = Vec::with_capacity(self.turn_order.len());
+        let first = if self.turn_order.contains(&self.active_player) {
+            Some(self.active_player)
+        } else {
+            self.next_in_turn_order_after(self.active_player)
+        };
+        let Some(first) = first else { return out };
+        out.push(first);
+        let mut cur = first;
+        while let Some(next) = self.next_in_turn_order_after(cur) {
+            if next == first {
+                break;
+            }
+            out.push(next);
+            cur = next;
+        }
+        out
+    }
+
+    /// Objects on the battlefield, in id order.
+    pub(crate) fn battlefield_objects(&self) -> Vec<ObjectId> {
+        let mut ids: Vec<ObjectId> = self
+            .objects
+            .iter()
+            .filter(|(_, o)| o.zone == Zone::Battlefield)
+            .map(|(id, _)| id)
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    // ----- mutation primitives -----
+
+    pub(crate) fn emit(&mut self, event: Event) {
+        self.log.push(event);
+    }
+
+    fn zone_list_mut(&mut self, id: ObjectId, zone: Zone) -> Option<&mut Vec<ObjectId>> {
+        let obj = &self.objects[id];
+        let (owner, controller) = (obj.owner, obj.controller);
+        let p = match zone {
+            Zone::Battlefield => &mut self.players[controller.index()],
+            Zone::Library | Zone::Hand | Zone::Graveyard | Zone::Exile | Zone::Command => {
+                &mut self.players[owner.index()]
+            }
+            Zone::Stack | Zone::OutOfGame => return None,
+        };
+        Some(match zone {
+            Zone::Library => &mut p.library,
+            Zone::Hand => &mut p.hand,
+            Zone::Battlefield => &mut p.battlefield,
+            Zone::Graveyard => &mut p.graveyard,
+            Zone::Exile => &mut p.exile,
+            Zone::Command => &mut p.command,
+            Zone::Stack | Zone::OutOfGame => unreachable!(),
+        })
+    }
+
+    /// Move an object between zones, keeping the zone lists and the object's
+    /// zone field in step. The caller pushes onto `stack` itself when moving
+    /// there. A hidden-to-hidden move emits nothing; anything touching a
+    /// public zone emits `ZoneChange`.
+    pub(crate) fn move_object(&mut self, id: ObjectId, to: Zone) {
+        let from = self.objects[id].zone;
+        if from == to {
+            return;
+        }
+        match from {
+            Zone::Stack => self.stack.retain(|s| s.object != id),
+            Zone::OutOfGame => {}
+            z => {
+                if let Some(list) = self.zone_list_mut(id, z) {
+                    list.retain(|&o| o != id);
+                }
+            }
+        }
+        {
+            let obj = &mut self.objects[id];
+            obj.reset_zone_state();
+            obj.zone = to;
+        }
+        match to {
+            Zone::Stack | Zone::OutOfGame => {}
+            z => {
+                if let Some(list) = self.zone_list_mut(id, z) {
+                    list.push(id);
+                }
+            }
+        }
+        if from.is_public() || to.is_public() {
+            self.emit(Event::ZoneChange { object: id, from, to });
+        }
+    }
+
+    pub(crate) fn shuffle_library(&mut self, seat: Seat) {
+        let mut lib = std::mem::take(&mut self.players[seat.index()].library);
+        lib.shuffle(&mut self.rng);
+        self.players[seat.index()].library = lib;
+        self.emit(Event::Shuffled { seat });
+    }
+
+    /// Draw `n` cards. Drawing from an empty library sets the flag the
+    /// state-based action checks; it does not end the game here.
+    pub(crate) fn draw(&mut self, seat: Seat, n: usize) {
+        let i = seat.index();
+        let mut drawn = Vec::with_capacity(n);
+        for _ in 0..n {
+            match self.players[i].library.pop() {
+                Some(id) => {
+                    self.objects[id].zone = Zone::Hand;
+                    self.players[i].hand.push(id);
+                    drawn.push(id);
+                }
+                None => self.players[i].drew_from_empty = true,
+            }
+        }
+        if !drawn.is_empty() {
+            self.emit(Event::Drew { seat, cards: drawn });
+        }
+    }
+
+    pub(crate) fn give_priority(&mut self, seat: Seat) {
+        self.priority = Some(seat);
+        self.passed_in_succession = 0;
+    }
+
+    /// Priority to the active player, or to whoever follows them if they have left.
+    pub(crate) fn give_priority_to_active(&mut self) {
+        self.passed_in_succession = 0;
+        self.priority = if self.turn_order.contains(&self.active_player) {
+            Some(self.active_player)
+        } else {
+            self.next_in_turn_order_after(self.active_player)
+        };
+    }
+
+    pub(crate) fn play_land(&mut self, seat: Seat, object: ObjectId) {
+        self.objects[object].controller = seat;
+        self.move_object(object, Zone::Battlefield);
+        self.players[seat.index()].lands_played_this_turn += 1;
+        self.emit(Event::LandPlayed { seat, object });
+        self.give_priority(seat);
+    }
+
+    pub(crate) fn cast_spell(
+        &mut self,
+        seat: Seat,
+        object: ObjectId,
+        targets: &[Target],
+        payment: &crate::action::ManaPayment,
+    ) -> Result<(), RulesError> {
+        let cost = self.card_def(object).cost.clone();
+        self.pay_mana(seat, payment, &cost)?;
+        self.objects[object].controller = seat;
+        self.move_object(object, Zone::Stack);
+        self.stack.push(StackObject { object, controller: seat, targets: targets.to_vec() });
+        self.emit(Event::Cast { seat, object, targets: targets.to_vec() });
+        self.give_priority(seat);
+        Ok(())
+    }
+
+    pub(crate) fn resolve(&mut self, so: StackObject) {
+        let permanent = self.card_def(so.object).is_permanent();
+        if permanent {
+            self.objects[so.object].controller = so.controller;
+            self.move_object(so.object, Zone::Battlefield);
+            self.objects[so.object].summoning_sick = true;
+        } else {
+            self.move_object(so.object, Zone::Graveyard);
+        }
+        self.emit(Event::Resolved { object: so.object });
+    }
+
+    pub(crate) fn discard_to_hand_size(&mut self, seat: Seat, objects: &[ObjectId]) {
+        for &id in objects {
+            self.move_object(id, Zone::Graveyard);
+        }
+        self.emit(Event::Discarded { seat, objects: objects.to_vec() });
+        self.pending = None;
+        self.finish_cleanup();
+    }
+}

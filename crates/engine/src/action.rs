@@ -1,0 +1,141 @@
+//! The action vocabulary (§3.2). Deliberately small.
+
+use crate::types::{Mana, ObjectId, Seat};
+use serde::{Deserialize, Serialize};
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttackTarget {
+    Player(Seat),
+    Planeswalker(ObjectId),
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DamageTarget {
+    Player(Seat),
+    Object(ObjectId),
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Target {
+    Object(ObjectId),
+    Player(Seat),
+}
+
+/// How a cost is paid: which permanents to tap for their mana, and which mana
+/// already in the pool to spend. Enumerated by the engine per §10's
+/// "by colour combination" rule; the engine picks concrete permanents.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ManaPayment {
+    #[serde(default)]
+    pub tap: Vec<ObjectId>,
+    #[serde(default)]
+    pub from_pool: Vec<Mana>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Action {
+    PassPriority,
+    PlayLand {
+        object: ObjectId,
+    },
+    CastSpell {
+        object: ObjectId,
+        #[serde(default)]
+        targets: Vec<Target>,
+        #[serde(default)]
+        payment: ManaPayment,
+    },
+    ActivateAbility {
+        object: ObjectId,
+        ability: u8,
+        #[serde(default)]
+        targets: Vec<Target>,
+        #[serde(default)]
+        payment: ManaPayment,
+    },
+    DeclareAttackers {
+        attackers: Vec<(ObjectId, AttackTarget)>,
+    },
+    /// `(blocker, attacker)` pairs.
+    DeclareBlockers {
+        blocks: Vec<(ObjectId, ObjectId)>,
+    },
+    /// Only offered when a real choice exists (§3.2). Validated by rule, not by list membership.
+    AssignCombatDamage {
+        attacker: ObjectId,
+        assignments: Vec<(DamageTarget, i32)>,
+    },
+    /// Answering a `PendingChoice`.
+    ChooseTargets {
+        targets: Vec<Target>,
+    },
+    ChooseMode {
+        mode: u8,
+    },
+    /// Cleanup-step hand size.
+    Discard {
+        objects: Vec<ObjectId>,
+    },
+    Mulligan {
+        keep: bool,
+    },
+    /// London mulligan: after keeping, put N cards on the bottom.
+    BottomCards {
+        objects: Vec<ObjectId>,
+    },
+    CastCommander {
+        object: ObjectId,
+        #[serde(default)]
+        targets: Vec<Target>,
+        #[serde(default)]
+        payment: ManaPayment,
+    },
+    CommanderToCommandZone {
+        object: ObjectId,
+    },
+    Concede,
+}
+
+impl Action {
+    /// Actions whose legal space is a division of a resource among recipients
+    /// (§3's carve-out): combat damage among blockers, and — in the same spirit —
+    /// a player's creatures among attack targets or among attackers to block.
+    /// These are validated by rule rather than by list membership; the entries
+    /// `legal_actions` enumerates for them are suggestions.
+    pub fn is_division(&self) -> bool {
+        matches!(
+            self,
+            Action::AssignCombatDamage { .. }
+                | Action::DeclareAttackers { .. }
+                | Action::DeclareBlockers { .. }
+        )
+    }
+
+    /// Order-insensitive form used for list-membership checks: the vectors
+    /// inside set-like actions are sorted so `[a, b]` and `[b, a]` compare equal.
+    pub fn canonical(&self) -> Action {
+        let mut a = self.clone();
+        match &mut a {
+            Action::CastSpell { payment, .. }
+            | Action::ActivateAbility { payment, .. }
+            | Action::CastCommander { payment, .. } => {
+                payment.tap.sort();
+                payment.from_pool.sort();
+            }
+            Action::DeclareAttackers { attackers } => attackers.sort(),
+            Action::DeclareBlockers { blocks } => blocks.sort(),
+            Action::AssignCombatDamage { assignments, .. } => assignments.sort(),
+            Action::Discard { objects } | Action::BottomCards { objects } => objects.sort(),
+            _ => {}
+        }
+        a
+    }
+
+    pub fn is_pass(&self) -> bool {
+        matches!(self, Action::PassPriority)
+    }
+}

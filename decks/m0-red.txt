@@ -1,0 +1,10 @@
+// M0 starter: mono-red vanilla creatures. 40 cards.
+Deck
+17 Mountain
+4 Goblin Piker
+4 Gray Ogre
+4 Balduvian Barbarians
+3 Hill Giant
+3 Canyon Minotaur
+2 Borderland Minotaur
+3 Fire Elemental

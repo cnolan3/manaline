@@ -1,0 +1,8 @@
+// M0 starter: mono-blue vanilla creatures. 40 cards.
+Deck
+17 Island
+5 Merfolk of the Pearl Trident
+4 Fugitive Wizard
+5 Coral Merfolk
+5 Vodalian Soldiers
+4 Horned Turtle

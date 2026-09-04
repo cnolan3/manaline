@@ -1,0 +1,21 @@
+[package]
+name = "manaline-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Pure rules engine for manaline: no I/O, no async"
+
+[lib]
+name = "engine"
+path = "src/lib.rs"
+
+[dependencies]
+serde.workspace = true
+rand.workspace = true
+rand_chacha.workspace = true
+thiserror.workspace = true
+ron.workspace = true
+
+[dev-dependencies]
+manaline-cards = { path = "../cards" }
+serde_json.workspace = true

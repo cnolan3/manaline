@@ -1,0 +1,13 @@
+[package]
+name = "manaline-cards"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The manaline card set: card definitions, loader, and starter decklists"
+
+[lib]
+name = "cards"
+path = "src/lib.rs"
+
+[dependencies]
+manaline-engine = { path = "../engine" }

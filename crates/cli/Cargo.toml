@@ -1,0 +1,16 @@
+[package]
+name = "manaline"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Terminal Magic: The Gathering"
+
+[[bin]]
+name = "manaline"
+path = "src/main.rs"
+
+[dependencies]
+manaline-engine = { path = "../engine" }
+manaline-cards = { path = "../cards" }
+clap.workspace = true
+anyhow.workspace = true
