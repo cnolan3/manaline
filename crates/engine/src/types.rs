@@ -6,9 +6,37 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// A seat at the table. Seats are indices; no type anywhere names "player 1/2".
-#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(transparent)]
 pub struct Seat(pub u8);
+
+impl<'de> Deserialize<'de> for Seat {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Seat, D::Error> {
+        Ok(Seat(deserialize_int_or_string(d)? as u8))
+    }
+}
+
+/// Integers used as JSON map keys arrive as strings, and serde's `flatten`
+/// routes them through a buffer that keeps them that way. Accept both.
+fn deserialize_int_or_string<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
+    struct V;
+    impl serde::de::Visitor<'_> for V {
+        type Value = u64;
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("an integer or a numeric string")
+        }
+        fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<u64, E> {
+            Ok(v)
+        }
+        fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<u64, E> {
+            u64::try_from(v).map_err(|_| E::custom("negative id"))
+        }
+        fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<u64, E> {
+            v.parse().map_err(|_| E::custom(format!("{v:?} is not a number")))
+        }
+    }
+    d.deserialize_any(V)
+}
 
 impl Seat {
     pub fn index(self) -> usize {
@@ -24,9 +52,15 @@ impl fmt::Display for Seat {
 
 /// Identity of a game object (card, token, ability) for the life of the game.
 /// Shown to humans and agents as `#12`.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(transparent)]
 pub struct ObjectId(pub u32);
+
+impl<'de> Deserialize<'de> for ObjectId {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<ObjectId, D::Error> {
+        Ok(ObjectId(deserialize_int_or_string(d)? as u32))
+    }
+}
 
 impl ObjectId {
     pub fn index(self) -> u32 {
@@ -381,6 +415,17 @@ mod tests {
         assert_eq!(Phase::Cleanup.next(), None);
         assert!(!Phase::Untap.has_priority());
         assert!(Phase::Main2.is_main());
+    }
+
+    #[test]
+    fn ids_deserialize_from_integers_and_strings() {
+        let s: Seat = serde_json::from_str("3").unwrap();
+        assert_eq!(s, Seat(3));
+        let s: Seat = serde_json::from_str("\"3\"").unwrap();
+        assert_eq!(s, Seat(3));
+        let m: std::collections::BTreeMap<ObjectId, i32> = serde_json::from_str(r#"{"12":4}"#).unwrap();
+        assert_eq!(m[&ObjectId(12)], 4);
+        assert!(serde_json::from_str::<Seat>("\"x\"").is_err());
     }
 
     #[test]

@@ -33,57 +33,95 @@ fn attack_target(game: &Game, t: AttackTarget) -> String {
     }
 }
 
-/// One line per event, with card names.
+/// One line per event, with card names, from inside the engine.
 pub fn describe_event(game: &Game, e: &Event) -> String {
+    describe_event_with(e, |c| c.len(), &|id| obj(game, id), &|s| who(game, s))
+}
+
+/// One line per seat-filtered event, for clients that only hold a view.
+/// `names` resolves object ids (clients keep a cache from the views they
+/// have seen); `seats` resolves seat names.
+pub fn describe_event_view(
+    e: &crate::event::EventView,
+    names: &dyn Fn(crate::types::ObjectId) -> String,
+    seats: &dyn Fn(Seat) -> String,
+) -> String {
+    describe_event_with(
+        e,
+        |c| match c {
+            crate::event::DrawnCards::Yours(v) => v.len(),
+            crate::event::DrawnCards::Hidden { count } => *count as usize,
+        },
+        names,
+        seats,
+    )
+}
+
+fn describe_event_with<D>(
+    e: &EventBase<D>,
+    drawn: impl Fn(&D) -> usize,
+    names: &dyn Fn(crate::types::ObjectId) -> String,
+    seats: &dyn Fn(Seat) -> String,
+) -> String {
+    let obj = |id: crate::types::ObjectId| names(id);
+    let who = |s: Seat| seats(s);
+    let damage_target = |t: DamageTarget| match t {
+        DamageTarget::Player(s) => who(s),
+        DamageTarget::Object(o) => obj(o),
+    };
+    let attack_target = |t: AttackTarget| match t {
+        AttackTarget::Player(s) => who(s),
+        AttackTarget::Planeswalker(o) => obj(o),
+    };
     match e {
         EventBase::GameStarted { starting_player, seats } => {
-            format!("Game started with {seats} seats; {} plays first", who(game, *starting_player))
+            format!("Game started with {seats} seats; {} plays first", who(*starting_player))
         }
-        EventBase::Drew { seat, cards } => format!("{} draws {} card(s)", who(game, *seat), cards.len()),
-        EventBase::Shuffled { seat } => format!("{} shuffles", who(game, *seat)),
-        EventBase::MulliganTaken { seat, to } => format!("{} mulligans to {to}", who(game, *seat)),
-        EventBase::HandKept { seat, size } => format!("{} keeps {size}", who(game, *seat)),
-        EventBase::Bottomed { seat, count } => format!("{} puts {count} card(s) on the bottom", who(game, *seat)),
-        EventBase::TurnStarted { turn, active } => format!("--- Turn {turn}: {} ---", who(game, *active)),
+        EventBase::Drew { seat, cards } => format!("{} draws {} card(s)", who(*seat), drawn(cards)),
+        EventBase::Shuffled { seat } => format!("{} shuffles", who(*seat)),
+        EventBase::MulliganTaken { seat, to } => format!("{} mulligans to {to}", who(*seat)),
+        EventBase::HandKept { seat, size } => format!("{} keeps {size}", who(*seat)),
+        EventBase::Bottomed { seat, count } => format!("{} puts {count} card(s) on the bottom", who(*seat)),
+        EventBase::TurnStarted { turn, active } => format!("--- Turn {turn}: {} ---", who(*active)),
         EventBase::PhaseChanged { phase } => format!("[{phase}]"),
-        EventBase::PriorityPassed { seat } => format!("{} passes", who(game, *seat)),
-        EventBase::LandPlayed { seat, object } => format!("{} plays {}", who(game, *seat), obj(game, *object)),
-        EventBase::Cast { seat, object, .. } => format!("{} casts {}", who(game, *seat), obj(game, *object)),
-        EventBase::Resolved { object } => format!("{} resolves", obj(game, *object)),
-        EventBase::Tapped { object } => format!("{} taps", obj(game, *object)),
-        EventBase::Untapped { object } => format!("{} untaps", obj(game, *object)),
-        EventBase::ManaAdded { seat, mana, amount } => format!("{} adds {amount}×{mana}", who(game, *seat)),
+        EventBase::PriorityPassed { seat } => format!("{} passes", who(*seat)),
+        EventBase::LandPlayed { seat, object } => format!("{} plays {}", who(*seat), obj(*object)),
+        EventBase::Cast { seat, object, .. } => format!("{} casts {}", who(*seat), obj(*object)),
+        EventBase::Resolved { object } => format!("{} resolves", obj(*object)),
+        EventBase::Tapped { object } => format!("{} taps", obj(*object)),
+        EventBase::Untapped { object } => format!("{} untaps", obj(*object)),
+        EventBase::ManaAdded { seat, mana, amount } => format!("{} adds {amount}×{mana}", who(*seat)),
         EventBase::Attacked { seat, attackers } => {
             if attackers.is_empty() {
-                return format!("{} declares no attackers", who(game, *seat));
+                return format!("{} declares no attackers", who(*seat));
             }
             let list: Vec<String> = attackers
                 .iter()
-                .map(|(a, t)| format!("{} → {}", obj(game, *a), attack_target(game, *t)))
+                .map(|(a, t)| format!("{} → {}", obj(*a), attack_target(*t)))
                 .collect();
-            format!("{} attacks: {}", who(game, *seat), list.join(", "))
+            format!("{} attacks: {}", who(*seat), list.join(", "))
         }
         EventBase::Blocked { seat, blocks } => {
             if blocks.is_empty() {
-                return format!("{} declares no blockers", who(game, *seat));
+                return format!("{} declares no blockers", who(*seat));
             }
             let list: Vec<String> = blocks
                 .iter()
-                .map(|(b, a)| format!("{} blocks {}", obj(game, *b), obj(game, *a)))
+                .map(|(b, a)| format!("{} blocks {}", obj(*b), obj(*a)))
                 .collect();
-            format!("{}: {}", who(game, *seat), list.join(", "))
+            format!("{}: {}", who(*seat), list.join(", "))
         }
         EventBase::DamageAssigned { attacker, assignments } => {
             let list: Vec<String> = assignments
                 .iter()
-                .map(|(t, n)| format!("{n} to {}", damage_target(game, *t)))
+                .map(|(t, n)| format!("{n} to {}", damage_target(*t)))
                 .collect();
-            format!("{} assigns {}", obj(game, *attacker), list.join(", "))
+            format!("{} assigns {}", obj(*attacker), list.join(", "))
         }
         EventBase::Damage { source, to, amount } => {
-            format!("{} deals {amount} to {}", obj(game, *source), damage_target(game, *to))
+            format!("{} deals {amount} to {}", obj(*source), damage_target(*to))
         }
-        EventBase::LifeChanged { seat, from, to } => format!("{}: {from} → {to} life", who(game, *seat)),
+        EventBase::LifeChanged { seat, from, to } => format!("{}: {from} → {to} life", who(*seat)),
         EventBase::ZoneChange { object, from, to } => {
             let verb = match (from, to) {
                 (Zone::Battlefield, Zone::Graveyard) => "dies".to_string(),
@@ -91,20 +129,20 @@ pub fn describe_event(game: &Game, e: &Event) -> String {
                 (_, Zone::OutOfGame) => "leaves the game".to_string(),
                 (f, t) => format!("moves from {f:?} to {t:?}"),
             };
-            format!("{} {verb}", obj(game, *object))
+            format!("{} {verb}", obj(*object))
         }
         EventBase::Discarded { seat, objects } => {
-            let list: Vec<String> = objects.iter().map(|o| obj(game, *o)).collect();
-            format!("{} discards {}", who(game, *seat), list.join(", "))
+            let list: Vec<String> = objects.iter().map(|o| obj(*o)).collect();
+            format!("{} discards {}", who(*seat), list.join(", "))
         }
-        EventBase::Eliminated { seat, reason } => format!("{} loses ({reason:?})", who(game, *seat)),
+        EventBase::Eliminated { seat, reason } => format!("{} loses ({reason:?})", who(*seat)),
         EventBase::GameOver { outcome } => match outcome {
-            crate::game::Outcome::Winner(s) => format!("=== {} wins ===", who(game, *s)),
+            crate::game::Outcome::Winner(s) => format!("=== {} wins ===", who(*s)),
             crate::game::Outcome::Draw => "=== The game is a draw ===".into(),
         },
         EventBase::Chat { from, to, text } => match to {
-            Some(t) => format!("{} → {}: \"{text}\"", who(game, *from), who(game, *t)),
-            None => format!("{}: \"{text}\"", who(game, *from)),
+            Some(t) => format!("{} → {}: \"{text}\"", who(*from), who(*t)),
+            None => format!("{}: \"{text}\"", who(*from)),
         },
     }
 }

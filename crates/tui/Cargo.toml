@@ -1,0 +1,24 @@
+[package]
+name = "manaline-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The manaline terminal client"
+
+[lib]
+name = "tui"
+path = "src/lib.rs"
+
+[dependencies]
+manaline-engine = { path = "../engine" }
+manaline-protocol = { path = "../protocol" }
+ratatui.workspace = true
+crossterm.workspace = true
+futures.workspace = true
+anyhow.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
+
+[dev-dependencies]
+manaline-cards = { path = "../cards" }
+manaline-daemon = { path = "../daemon" }
+tokio = { workspace = true, features = ["full"] }

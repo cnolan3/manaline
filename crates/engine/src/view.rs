@@ -5,7 +5,7 @@
 use crate::action::{AttackTarget, Target};
 use crate::card::CardId;
 use crate::game::{ActReason, Outcome};
-use crate::types::{CardType, ManaCost, ManaPool, ObjectId, Phase, Seat, Zone};
+use crate::types::{CardType, Color, ManaCost, ManaPool, ObjectId, Phase, Seat, Zone};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -59,6 +59,14 @@ pub struct ObjectView {
     pub name: String,
     pub cost: ManaCost,
     pub types: Vec<CardType>,
+    #[serde(default)]
+    pub subtypes: Vec<String>,
+    /// Oracle text.
+    #[serde(default)]
+    pub text: String,
+    /// Colours this permanent's intrinsic mana ability makes (basic lands).
+    #[serde(default)]
+    pub produces: Vec<Color>,
     pub owner: Seat,
     pub controller: Seat,
     pub zone: Zone,

@@ -1,6 +1,8 @@
-//! `manaline` — the front door. In M0 only `sim` exists: random bots play a
-//! whole game in-process at any seat count. `play`, `daemon`, `tui`, and
-//! `mcp` arrive with M1 and M2.
+//! `manaline` — the front door.
+
+mod bot;
+mod commands;
+mod play;
 
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, Subcommand};
@@ -19,8 +21,20 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Play a game in this terminal: `manaline play --deck m0-green --vs random`.
+    Play(play::PlayArgs),
+    /// Join a game someone else is hosting, with the token they gave you.
+    Join(play::JoinArgs),
+    /// Open the terminal client on an existing game (advanced).
+    Tui(play::TuiArgs),
     /// Play random bots against each other in-process and print the result.
     Sim(SimArgs),
+    /// Run a game daemon (advanced; `play` does this for you).
+    Daemon(commands::DaemonArgs),
+    /// Join a daemon as the built-in random bot.
+    Bot(commands::BotArgs),
+    /// Reconstruct a game from its replay log.
+    Replay(commands::ReplayArgs),
     /// List the formats, decks, and cards built into this binary.
     List {
         #[arg(value_enum)]
@@ -71,10 +85,32 @@ struct SimArgs {
 }
 
 fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env().add_directive("warn".parse()?))
+        .with_writer(std::io::stderr)
+        .init();
     let cli = Cli::parse();
     match cli.command {
+        Command::Play(args) => runtime()?.block_on(play::play(args)),
+        Command::Join(args) => runtime()?.block_on(play::join(args)),
+        Command::Tui(args) => runtime()?.block_on(play::tui(args)),
         Command::Sim(args) => sim(args),
         Command::List { what } => list(what),
+        Command::Daemon(args) => runtime()?.block_on(commands::daemon(args)),
+        Command::Bot(args) => runtime()?.block_on(commands::bot(args)),
+        Command::Replay(args) => commands::replay(args),
+    }
+}
+
+fn runtime() -> Result<tokio::runtime::Runtime> {
+    Ok(tokio::runtime::Builder::new_multi_thread().enable_all().build()?)
+}
+
+/// A deck as text: a built-in name or a file path.
+pub fn deck_text(spec: &str) -> Result<String> {
+    match cards::deck_text(spec) {
+        Some(t) => Ok(t.to_string()),
+        None => std::fs::read_to_string(spec).with_context(|| format!("reading deck {spec}")),
     }
 }
 
@@ -123,10 +159,7 @@ fn load_format(name: Option<&str>, seats: usize) -> Result<Format> {
 }
 
 fn load_deck(spec: &str, db: &engine::CardDb) -> Result<Vec<engine::CardId>> {
-    let text = match cards::deck_text(spec) {
-        Some(t) => t.to_string(),
-        None => std::fs::read_to_string(spec).with_context(|| format!("reading deck {spec}"))?,
-    };
+    let text = deck_text(spec)?;
     cards::parse_decklist(&text, db).map_err(|e| anyhow!("{spec}: {e}"))
 }
 

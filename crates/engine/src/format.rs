@@ -95,6 +95,8 @@ pub enum Violation {
     NotInPool { name: String },
     UnsupportedPool { pool: String },
     UnsupportedRule { rule: String },
+    /// The decklist could not be parsed (unknown card name, bad line).
+    Unparsable { reason: String },
 }
 
 impl std::fmt::Display for Violation {
@@ -107,6 +109,7 @@ impl std::fmt::Display for Violation {
             Violation::NotInPool { name } => write!(f, "{name} is not in this format's card pool"),
             Violation::UnsupportedPool { pool } => write!(f, "card pool {pool} is not supported yet"),
             Violation::UnsupportedRule { rule } => write!(f, "format rule {rule} is not implemented yet"),
+            Violation::Unparsable { reason } => write!(f, "could not read the decklist: {reason}"),
         }
     }
 }
