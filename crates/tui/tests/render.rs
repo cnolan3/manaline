@@ -1,7 +1,7 @@
 //! Layout tests: render real game views at 100×32 and 80×24 and check the
 //! panes, and drive the pickers with keys.
 
-use engine::testing::{advance_until, TestGame};
+use engine::testing::{advance_to, advance_until, TestGame};
 use engine::{ActReason, Action, AttackTarget, PendingChoice, Seat};
 use protocol::{LegalAction, LobbyView};
 use ratatui::backend::TestBackend;
@@ -273,3 +273,54 @@ fn mulligan_menu_and_log_lines() {
     assert!(s.contains("Bot: gl hf"));
 }
 
+
+#[test]
+fn minor_priority_moments_auto_pass_and_main_phases_wait() {
+    use engine::Phase;
+    use tui::settings::Settings;
+    // Main phase on my turn: never a countdown.
+    let game = board();
+    let mut app = app_for(&game, Seat(0)).with_settings(Settings::default());
+    app.set_legal(app.legal.clone(), app.legal_version, app.reason);
+    assert!(!app.priority_is_minor());
+    assert!(app.auto_pass_at.is_none());
+
+    // Begin combat with only pass and concede available: minor, countdown armed.
+    let mut game = board();
+    advance_to(&mut game, Phase::BeginCombat).unwrap();
+    assert_eq!(game.phase, Phase::BeginCombat);
+    let mut app = app_for(&game, Seat(0)).with_settings(Settings { auto_pass_ms: 500, ..Settings::default() });
+    app.set_legal(app.legal.clone(), app.legal_version, app.reason);
+    assert!(app.priority_is_minor());
+    assert!(app.auto_pass_at.is_some());
+    let s = render(&app, 100, 32);
+    assert!(s.contains("Passing in"), "{s}");
+    assert!(app.footer().contains("Auto-passing"));
+    assert!(!app.auto_pass_due());
+    std::thread::sleep(std::time::Duration::from_millis(600));
+    assert!(app.auto_pass_due());
+
+    // Esc holds for this moment and it does not re-arm at the same version.
+    app.handle_key(key(KeyCode::Esc));
+    assert!(app.auto_pass_at.is_none());
+    app.set_legal(app.legal.clone(), app.legal_version, app.reason);
+    assert!(app.auto_pass_at.is_none());
+    assert!(app.footer().contains("[Space] pass"));
+
+    // Turning auto-pass off in the settings menu disarms it.
+    let mut app = app_for(&game, Seat(0)).with_settings(Settings::default());
+    app.set_legal(app.legal.clone(), app.legal_version, app.reason);
+    assert!(app.auto_pass_at.is_some());
+    app.handle_key(key(KeyCode::Char('o')));
+    assert!(matches!(app.mode, Mode::Settings { selected: 0 }));
+    let s = render(&app, 100, 32);
+    assert!(s.contains("Auto-pass minor priority moments   [on]"), "{s}");
+    app.handle_key(key(KeyCode::Enter));
+    assert!(!app.settings.auto_pass);
+    assert!(app.auto_pass_at.is_none());
+    app.handle_key(key(KeyCode::Down));
+    app.handle_key(key(KeyCode::Right));
+    assert_eq!(app.settings.auto_pass_ms, 2500);
+    app.handle_key(key(KeyCode::Esc));
+    assert!(matches!(app.mode, Mode::Normal));
+}

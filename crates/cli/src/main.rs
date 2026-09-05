@@ -33,6 +33,8 @@ enum Command {
     Daemon(commands::DaemonArgs),
     /// Join a daemon as the built-in random bot.
     Bot(commands::BotArgs),
+    /// Run the MCP server on a seat so an agent can play it (advanced; `play --vs claude` does this).
+    Mcp(commands::McpArgs),
     /// Reconstruct a game from its replay log.
     Replay(commands::ReplayArgs),
     /// List the formats, decks, and cards built into this binary.
@@ -98,6 +100,7 @@ fn main() -> Result<()> {
         Command::List { what } => list(what),
         Command::Daemon(args) => runtime()?.block_on(commands::daemon(args)),
         Command::Bot(args) => runtime()?.block_on(commands::bot(args)),
+        Command::Mcp(args) => runtime()?.block_on(commands::mcp(args)),
         Command::Replay(args) => commands::replay(args),
     }
 }

@@ -2,6 +2,7 @@
 //! the seat-filtered view and turns keys into protocol messages.
 
 pub mod app;
+pub mod settings;
 pub mod ui;
 
 use crate::app::{App, Command, LogKind, Mode};
@@ -66,7 +67,8 @@ pub async fn join(config: TuiConfig) -> Result<Session> {
         client.ready().await?;
     }
 
-    let mut app = App::new(me, welcome.game_id.0.clone(), welcome.format.name.clone(), welcome.lobby.clone());
+    let mut app = App::new(me, welcome.game_id.0.clone(), welcome.format.name.clone(), welcome.lobby.clone())
+        .with_settings(crate::settings::Settings::load());
     app.hints = config.hints.clone();
     for h in &config.hints {
         for line in h.lines() {
@@ -102,7 +104,7 @@ async fn event_loop(
     terminal: &mut ratatui::DefaultTerminal,
 ) -> Result<()> {
     let mut events = EventStream::new();
-    let mut tick = tokio::time::interval(Duration::from_millis(500));
+    let mut tick = tokio::time::interval(Duration::from_millis(100));
     loop {
         terminal.draw(|f| ui::draw(f, app))?;
         tokio::select! {
@@ -146,6 +148,10 @@ async fn event_loop(
         if app.needs_refresh {
             app.needs_refresh = false;
             refresh(client, app).await;
+        }
+        if app.auto_pass_due() {
+            app.auto_pass_at = None;
+            execute(client, app, Command::Act(engine::Action::PassPriority)).await;
         }
         if app.quit {
             return Ok(());

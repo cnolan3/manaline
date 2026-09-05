@@ -104,6 +104,75 @@ pub async fn bot(args: BotArgs) -> Result<()> {
 }
 
 #[derive(clap::Args)]
+pub struct McpArgs {
+    /// Socket path or host:port of the daemon.
+    #[arg(long, conflicts_with = "game")]
+    pub connect: Option<String>,
+    /// A game id; connects to that game's socket in the runtime directory.
+    #[arg(long)]
+    pub game: Option<String>,
+    /// The seat token the agent plays with.
+    #[arg(long)]
+    pub token: String,
+    /// Deck to submit for the agent if the game has not started (file or built-in name).
+    #[arg(long)]
+    pub deck: Option<String>,
+    /// The agent's display name at the table.
+    #[arg(long, default_value = "Agent")]
+    pub name: String,
+    /// Serve streamable HTTP at this address (default 127.0.0.1:7454; port 0 picks a free one).
+    #[arg(long, conflicts_with = "stdio")]
+    pub http: Option<String>,
+    /// Serve over stdin/stdout for clients that launch processes.
+    #[arg(long)]
+    pub stdio: bool,
+    /// Exit when this process is gone.
+    #[arg(long)]
+    pub parent_pid: Option<u32>,
+}
+
+/// Run the MCP server on a seat. In HTTP mode, prints one JSON line with the
+/// URL first (`play` reads it), then serves until stopped.
+pub async fn mcp(args: McpArgs) -> Result<()> {
+    let endpoint = match (&args.connect, &args.game) {
+        (Some(c), _) => c.clone(),
+        (None, Some(g)) => protocol::endpoint::socket_path(g).display().to_string(),
+        (None, None) => bail!("pass --connect <endpoint> or --game <id>"),
+    };
+    let decklist = match &args.deck {
+        Some(d) => Some(crate::deck_text(d)?),
+        None => None,
+    };
+    let config = mcp::SessionConfig {
+        endpoint: Endpoint::parse(&endpoint).map_err(|e| anyhow!(e))?,
+        token: Token(args.token.clone()),
+        name: args.name.clone(),
+        decklist,
+    };
+    let server = mcp::connect(config).await?;
+    if let Some(pid) = args.parent_pid {
+        mcp::watch_parent(pid, || std::process::exit(0));
+    }
+    if args.stdio {
+        return mcp::serve_stdio(server).await;
+    }
+    let addr = args.http.clone().unwrap_or_else(|| "127.0.0.1:7454".into());
+    let http = match mcp::serve_http(server.clone(), &addr).await {
+        Ok(h) => h,
+        Err(e) if addr.ends_with(":7454") => {
+            tracing::warn!("{e:#}; falling back to a free port");
+            mcp::serve_http(server, "127.0.0.1:0").await?
+        }
+        Err(e) => return Err(e),
+    };
+    println!("{}", serde_json::json!({ "url": http.url(), "addr": http.addr.to_string() }));
+    tokio::select! {
+        r = http.wait() => r,
+        _ = tokio::signal::ctrl_c() => Ok(()),
+    }
+}
+
+#[derive(clap::Args)]
 pub struct ReplayArgs {
     /// A replay log written by the daemon.
     pub file: PathBuf,

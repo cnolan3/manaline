@@ -406,10 +406,18 @@ impl Game {
         if let Some(outcome) = self.outcome {
             return Err(RulesError::GameOver { outcome });
         }
-        if !self.must_act().contains_key(&seat) {
+        // A player may concede at any time (rule 104.3a), whether or not they must act.
+        let conceding = matches!(action, Action::Concede);
+        if conceding {
+            if self.is_eliminated(seat) {
+                return Err(RulesError::illegal(format!("{seat} has already left the game")));
+            }
+        } else if !self.must_act().contains_key(&seat) {
             return Err(RulesError::NotYourTurnToAct { seat });
         }
-        if action.is_division() {
+        if conceding {
+            // Always legal; skip the list check.
+        } else if action.is_division() {
             self.validate_division(seat, action)?;
         } else {
             let canon = action.canonical();

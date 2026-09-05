@@ -382,6 +382,18 @@ fn active_player_conceding_ends_their_turn() {
 }
 
 #[test]
+fn any_seat_may_concede_at_any_time() {
+    let mut game = TestGame::new(db(), 3).build();
+    assert_eq!(game.priority, Some(Seat(0)));
+    assert!(!game.legal_actions(Seat(2)).contains(&Action::Concede), "not listed when it isn't their turn");
+    game.apply(Seat(2), &Action::Concede).unwrap();
+    assert_eq!(game.players[2].eliminated, Some(Elimination::Conceded));
+    assert_eq!(game.turn_order, vec![Seat(0), Seat(1)]);
+    assert!(matches!(game.apply(Seat(2), &Action::Concede), Err(RulesError::IllegalAction { .. })));
+    assert_eq!(game.priority, Some(Seat(0)), "the turn continues");
+}
+
+#[test]
 fn cleanup_discards_down_to_hand_size() {
     let mut t = TestGame::new(db(), 2);
     for _ in 0..9 {

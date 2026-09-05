@@ -75,7 +75,7 @@ fn draw_center(f: &mut Frame, app: &App, area: Rect) {
     let w = area.width as usize;
     let pad = w.saturating_sub(title_len) / 2;
     let whose_style = if mine && view.outcome.is_none() {
-        Style::default().fg(Color::Black).bg(Color::Green).bold()
+        Style::default().fg(Color::White).bg(Color::Green).bold()
     } else {
         Style::default().dim()
     };
@@ -93,6 +93,10 @@ fn draw_center(f: &mut Frame, app: &App, area: Rect) {
         Some(Outcome::Winner(s)) => (format!("GAME OVER — {} wins", app.seat_name(s)), Style::default().fg(Color::Red).bold()),
         Some(Outcome::Draw) => ("GAME OVER — draw".into(), Style::default().bold()),
         None => match app.my_reason() {
+            Some(ActReason::Priority) if app.auto_pass_remaining().is_some() => (
+                format!("Passing in {:.1}s  ·  [Space] now  [Esc] hold", app.auto_pass_remaining().unwrap_or(0.0)),
+                Style::default().fg(Color::Yellow),
+            ),
             Some(ActReason::Priority) => ("YOU HAVE PRIORITY  ·  [Space] pass".into(), Style::default().fg(Color::Green).bold()),
             Some(r) => (
                 format!("YOU MUST {}  ·  [Enter] open", crate::app::reason_verb(r).to_uppercase()),
@@ -672,6 +676,8 @@ fn draw_overlays(f: &mut Frame, app: &App, area: Rect) {
                 "Enter      nudge whoever the game is waiting on",
                 "Tab        expand the next opponent",
                 "l / s      show or hide the log / the stack",
+                "o          settings (auto-pass, delay, verbose log)",
+                "Esc / h    hold: cancel an auto-pass countdown",
                 "PgUp/PgDn  scroll the log",
                 "v          toggle verbose log",
                 "x          concede",
@@ -687,6 +693,29 @@ fn draw_overlays(f: &mut Frame, app: &App, area: Rect) {
         }
         Mode::ConfirmConcede => {
             popup(f, area, "Concede", vec![Line::from("Concede the game? Press y to confirm.")], 44);
+        }
+        Mode::Settings { selected } => {
+            let s = &app.settings;
+            let rows = [
+                format!("Auto-pass minor priority moments   {}", if s.auto_pass { "[on]" } else { "[off]" }),
+                format!("Auto-pass delay                     {}", s.delay_label()),
+                format!("Verbose log                         {}", if s.verbose_log { "[on]" } else { "[off]" }),
+            ];
+            let mut lines = vec![Line::from("Minor moments are upkeep, draw, combat steps and the opponent's turn, when passing is your only choice.").dim()];
+            for (i, r) in rows.iter().enumerate() {
+                let style = if i == *selected { Style::default().add_modifier(Modifier::REVERSED) } else { Style::default() };
+                lines.push(Line::styled(r.clone(), style));
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::from(match crate::settings::Settings::path() {
+                Some(p) => format!("saved to {}", p.display()),
+                None => "not saved: no config directory".into(),
+            })
+            .dim());
+            let rect = centered(area, 62, lines.len() as u16 + 2);
+            f.render_widget(Clear, rect);
+            let block = Block::default().borders(Borders::ALL).title(" Settings ");
+            f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(block), rect);
         }
     }
 }

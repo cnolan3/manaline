@@ -4,6 +4,7 @@
 
 use engine::text::describe_event_view;
 use engine::{ActReason, Action, AttackTarget, DamageTarget, EventBase, EventView, GameView, ObjectId, Outcome, Seat};
+use crate::settings::Settings;
 use protocol::{LegalAction, LobbyView, ServerMessage};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::HashMap;
@@ -86,7 +87,10 @@ pub enum Mode {
     Inspect(ObjectId),
     Help,
     ConfirmConcede,
+    Settings { selected: usize },
 }
+
+pub const SETTINGS_ITEMS: usize = 3;
 
 pub struct App {
     pub me: Option<Seat>,
@@ -115,6 +119,11 @@ pub struct App {
     /// Side panes, off by default (`l` and `s`).
     pub show_log: bool,
     pub show_stack: bool,
+    pub settings: Settings,
+    /// When an armed auto-pass fires, if the current priority moment is minor.
+    pub auto_pass_at: Option<Instant>,
+    /// The state version the auto-pass was last armed (or held) at, so it arms once per moment.
+    auto_pass_version: Option<u64>,
 }
 
 impl App {
@@ -142,7 +151,68 @@ impl App {
             verbose_log: false,
             show_log: false,
             show_stack: false,
+            settings: Settings::default(),
+            auto_pass_at: None,
+            auto_pass_version: None,
         }
+    }
+
+    pub fn with_settings(mut self, settings: Settings) -> App {
+        self.verbose_log = settings.verbose_log;
+        self.settings = settings;
+        self.auto_pass_version = None;
+        self.arm_auto_pass();
+        self
+    }
+
+    /// A priority moment where passing is the only choice, outside your own
+    /// main phases: the kind the countdown handles.
+    pub fn priority_is_minor(&self) -> bool {
+        let (Some(me), Some(view)) = (self.me, &self.view) else { return false };
+        if self.my_reason() != Some(ActReason::Priority) || view.outcome.is_some() {
+            return false;
+        }
+        if view.phase.is_main() && view.active_player == me {
+            return false;
+        }
+        self.legal.iter().all(|l| matches!(l.action, Action::PassPriority | Action::Concede))
+    }
+
+    fn arm_auto_pass(&mut self) {
+        if !self.settings.auto_pass || !self.priority_is_minor() {
+            self.auto_pass_at = None;
+            return;
+        }
+        if self.auto_pass_version == Some(self.legal_version) {
+            return; // already armed or held for this moment
+        }
+        self.auto_pass_version = Some(self.legal_version);
+        self.auto_pass_at = Some(Instant::now() + std::time::Duration::from_millis(self.settings.auto_pass_ms));
+    }
+
+    /// Cancel the countdown for the current moment.
+    pub fn hold(&mut self) {
+        self.auto_pass_at = None;
+        self.auto_pass_version = Some(self.legal_version);
+    }
+
+    pub fn auto_pass_due(&self) -> bool {
+        self.auto_pass_at.map(|t| Instant::now() >= t).unwrap_or(false) && self.priority_is_minor()
+    }
+
+    /// Seconds left on the countdown, if one is running.
+    pub fn auto_pass_remaining(&self) -> Option<f64> {
+        let at = self.auto_pass_at?;
+        Some(at.saturating_duration_since(Instant::now()).as_secs_f64())
+    }
+
+    fn settings_changed(&mut self) {
+        self.verbose_log = self.settings.verbose_log;
+        if let Err(e) = self.settings.save() {
+            self.set_status(format!("could not save settings: {e}"));
+        }
+        self.auto_pass_version = None;
+        self.arm_auto_pass();
     }
 
     pub fn is_spectator(&self) -> bool {
@@ -226,6 +296,7 @@ impl App {
         self.legal_version = version;
         self.reason = reason;
         self.maybe_auto_open();
+        self.arm_auto_pass();
     }
 
     /// A pushed message from the daemon.
@@ -456,7 +527,31 @@ impl App {
                 KeyCode::Char('y') | KeyCode::Char('Y') => vec![Command::Act(Action::Concede)],
                 _ => Vec::new(),
             },
+            Mode::Settings { selected } => self.key_settings(selected, key),
         }
+    }
+
+    fn key_settings(&mut self, mut selected: usize, key: KeyEvent) -> Vec<Command> {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('o') | KeyCode::Char('q') => return Vec::new(),
+            KeyCode::Up | KeyCode::Char('k') => selected = selected.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => selected = (selected + 1).min(SETTINGS_ITEMS - 1),
+            KeyCode::Left | KeyCode::Right | KeyCode::Enter | KeyCode::Char(' ') => {
+                let dir: i64 = if key.code == KeyCode::Left { -1 } else { 1 };
+                match selected {
+                    0 => self.settings.auto_pass = !self.settings.auto_pass,
+                    1 => {
+                        let ms = self.settings.auto_pass_ms as i64 + dir * 500;
+                        self.settings.auto_pass_ms = ms.clamp(500, 10_000) as u64;
+                    }
+                    _ => self.settings.verbose_log = !self.settings.verbose_log,
+                }
+                self.settings_changed();
+            }
+            _ => {}
+        }
+        self.mode = Mode::Settings { selected };
+        Vec::new()
     }
 
     fn key_normal(&mut self, key: KeyEvent) -> Vec<Command> {
@@ -467,6 +562,11 @@ impl App {
                 return vec![Command::Quit];
             }
             KeyCode::Char('?') => self.mode = Mode::Help,
+            KeyCode::Char('o') => self.mode = Mode::Settings { selected: 0 },
+            KeyCode::Esc | KeyCode::Char('h') if self.auto_pass_at.is_some() => {
+                self.hold();
+                self.set_status("Holding priority; press Space to pass");
+            }
             KeyCode::Char('c') => self.mode = Mode::Chat(String::new()),
             KeyCode::Char('i') => self.open_inspect_menu(),
             KeyCode::Char('v') => {
@@ -772,7 +872,11 @@ impl App {
             Mode::Chat(_) => return "type a message  [Enter] send  [Esc] cancel".into(),
             Mode::Inspect(_) | Mode::Help => return "[Esc] close".into(),
             Mode::ConfirmConcede => return "Concede the game? [y] yes  [any other key] no".into(),
+            Mode::Settings { .. } => return "[↑↓] move  [←→/Enter] change  [Esc] close".into(),
             Mode::Normal => {}
+        }
+        if let Some(left) = self.auto_pass_remaining() {
+            return format!("Auto-passing in {left:.1}s  [Space] pass now  [Esc] hold  [o] settings  [?] help");
         }
         match self.my_reason() {
             Some(ActReason::Priority) => {
@@ -780,7 +884,7 @@ impl App {
                 if self.legal.iter().any(|l| matches!(l.action, Action::PlayLand { .. } | Action::CastSpell { .. })) {
                     parts.push("[1-9] play/cast".into());
                 }
-                parts.extend(["[i] inspect", "[c] chat", "[l] log", "[s] stack", "[x] concede", "[?] help"].map(String::from));
+                parts.extend(["[i] inspect", "[c] chat", "[l] log", "[s] stack", "[o] settings", "[x] concede", "[?] help"].map(String::from));
                 parts.join("  ")
             }
             Some(reason) => {

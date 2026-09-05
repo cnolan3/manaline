@@ -15,7 +15,8 @@ pub struct PlayArgs {
     /// Your deck: a file path or a built-in deck name (see `list decks`).
     #[arg(long)]
     pub deck: String,
-    /// Opponent: `random` (built-in bot) or `human` (a second terminal).
+    /// Opponent: `random` (built-in bot), `human` (a second terminal), or an agent:
+    /// `claude`, `codex`, or `mcp` (starts the MCP server on seat 1 and tells you how to connect).
     #[arg(long, default_value = "random")]
     pub vs: String,
     /// The bot's deck (defaults to a built-in deck that differs from yours).
@@ -43,15 +44,17 @@ pub async fn play(args: PlayArgs) -> Result<()> {
     let opponent = match args.vs.as_str() {
         "random" => Opponent::Random,
         "human" => Opponent::Human,
-        "mcp" | "claude" | "codex" => bail!("playing against an agent arrives with the MCP server (M2); use --vs random or --vs human for now"),
-        other => bail!("unknown opponent {other:?}; use random or human"),
+        "claude" => Opponent::Agent(AgentKind::Claude),
+        "codex" => Opponent::Agent(AgentKind::Codex),
+        "mcp" => Opponent::Agent(AgentKind::Generic),
+        other => bail!("unknown opponent {other:?}; use random, human, claude, codex, or mcp"),
     };
     let opp_deck_name = match &args.opp_deck {
         Some(d) => d.clone(),
         None => default_opponent_deck(&args.deck),
     };
     let opp_decklist = crate::deck_text(&opp_deck_name)?;
-    if matches!(opponent, Opponent::Random) {
+    if !matches!(opponent, Opponent::Human) {
         check_deck(&opp_decklist, &format, &db, &opp_deck_name)?;
     }
 
@@ -66,6 +69,7 @@ pub async fn play(args: PlayArgs) -> Result<()> {
 
     let mut hints = Vec::new();
     let mut bot_task = None;
+    let mut mcp_child: Option<tokio::process::Child> = None;
     match opponent {
         Opponent::Random => {
             let settings = BotSettings {
@@ -76,6 +80,11 @@ pub async fn play(args: PlayArgs) -> Result<()> {
                 seed: rand::random(),
             };
             bot_task = Some(tokio::spawn(bot::run(settings)));
+        }
+        Opponent::Agent(kind) => {
+            let (child, url) = spawn_mcp(&socket, &tokens[1], &opp_deck_name, kind.name()).await?;
+            mcp_child = Some(child);
+            hints.push(agent_hints(kind, &url, &socket, &tokens[1]));
         }
         Opponent::Human => {
             let mut lines = vec!["To seat the other player, run this in another terminal:".to_string()];
@@ -100,6 +109,10 @@ pub async fn play(args: PlayArgs) -> Result<()> {
     if let Some(t) = bot_task {
         t.abort();
     }
+    if let Some(mut child) = mcp_child {
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+    }
     daemon.stop().await;
 
     match result {
@@ -121,6 +134,86 @@ pub async fn play(args: PlayArgs) -> Result<()> {
 enum Opponent {
     Random,
     Human,
+    Agent(AgentKind),
+}
+
+#[derive(Clone, Copy)]
+enum AgentKind {
+    Claude,
+    Codex,
+    Generic,
+}
+
+impl AgentKind {
+    fn name(self) -> &'static str {
+        match self {
+            AgentKind::Claude => "Claude",
+            AgentKind::Codex => "Codex",
+            AgentKind::Generic => "Agent",
+        }
+    }
+}
+
+/// The one thing the human needs to know: how to point their agent at the game.
+fn agent_hints(kind: AgentKind, url: &str, socket: &std::path::Path, token: &protocol::Token) -> String {
+    let stdio = format!("manaline mcp --stdio --connect {} --token {}", socket.display(), token);
+    let mut lines = vec![
+        format!("{} plays seat 1. Point it at the game:", kind.name()),
+        format!("  MCP server (streamable HTTP):  {url}"),
+    ];
+    match kind {
+        AgentKind::Claude => {
+            lines.push(format!("  Claude Code:  claude mcp add --transport http manaline {url}"));
+        }
+        AgentKind::Codex => {
+            lines.push(format!("  Codex:  codex mcp add manaline --url {url}"));
+        }
+        AgentKind::Generic => {}
+    }
+    lines.push(format!("  Config snippet:  {{\"mcpServers\":{{\"manaline\":{{\"type\":\"http\",\"url\":\"{url}\"}}}}}}"));
+    lines.push(format!("  stdio alternative:  {stdio}"));
+    lines.push("Then tell it: \"You're playing Magic against me. Pull the play-a-game prompt from the manaline server and go.\"".into());
+    lines.join("\n")
+}
+
+/// Spawn `manaline mcp` on seat 1 and read the URL it prints.
+async fn spawn_mcp(socket: &std::path::Path, token: &protocol::Token, deck: &str, name: &str) -> Result<(tokio::process::Child, String)> {
+    let exe = std::env::current_exe().context("locating the manaline binary")?;
+    let log_dir = protocol::endpoint::data_dir().join("logs");
+    std::fs::create_dir_all(&log_dir).ok();
+    let log_path = log_dir.join(format!("mcp-{}.log", std::process::id()));
+    let log_file = std::fs::File::create(&log_path).with_context(|| format!("creating {}", log_path.display()))?;
+    let mut cmd = tokio::process::Command::new(exe);
+    cmd.arg("mcp")
+        .arg("--connect")
+        .arg(socket)
+        .arg("--token")
+        .arg(&token.0)
+        .arg("--deck")
+        .arg(deck)
+        .arg("--name")
+        .arg(name)
+        .arg("--http")
+        .arg("127.0.0.1:7454")
+        .arg("--parent-pid")
+        .arg(std::process::id().to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::from(log_file))
+        .kill_on_drop(true);
+    let mut child = cmd.spawn().context("starting the MCP server")?;
+    let stdout = child.stdout.take().expect("piped stdout");
+    let mut lines = BufReader::new(stdout).lines();
+    let first = tokio::time::timeout(std::time::Duration::from_secs(10), lines.next_line())
+        .await
+        .context("the MCP server did not start in time")?
+        .context("reading from the MCP server")?
+        .ok_or_else(|| anyhow!("the MCP server exited before it was ready (see {})", log_path.display()))?;
+    let info: serde_json::Value =
+        serde_json::from_str(&first).with_context(|| format!("the MCP server said something unexpected: {first}"))?;
+    let url = info["url"].as_str().ok_or_else(|| anyhow!("no url in {first}"))?.to_string();
+    tokio::spawn(async move { while let Ok(Some(_)) = lines.next_line().await {} });
+    Ok((child, url))
 }
 
 fn describe_outcome(o: engine::Outcome, _info: &StartupInfo) -> String {

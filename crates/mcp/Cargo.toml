@@ -1,0 +1,31 @@
+[package]
+name = "manaline-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The manaline MCP server: lets any MCP-capable agent play a seat"
+
+[lib]
+name = "mcp"
+path = "src/lib.rs"
+
+[dependencies]
+manaline-engine = { path = "../engine" }
+manaline-protocol = { path = "../protocol" }
+manaline-cards = { path = "../cards" }
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time", "macros", "io-std", "net", "signal"] }
+rmcp = { version = "3.2.0", features = ["server", "transport-io", "transport-streamable-http-server", "macros", "schemars"] }
+axum = "0.8.9"
+schemars = "1.2.2"
+tokio-util = "0.7"
+libc.workspace = true
+
+[dev-dependencies]
+manaline-daemon = { path = "../daemon" }
+rand.workspace = true
+rand_chacha.workspace = true
+tokio = { workspace = true, features = ["full"] }
