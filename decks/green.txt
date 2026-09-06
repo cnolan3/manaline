@@ -1,0 +1,14 @@
+// Starter: mono-green creatures, pump, and Elf mana. 40 cards.
+Deck
+17 Forest
+4 Llanowar Elves
+2 Elvish Mystic
+3 Elvish Visionary
+4 Grizzly Bears
+2 Elvish Archdruid
+2 Garruk's Companion
+1 Colossal Dreadmaw
+2 Giant Growth
+1 Titanic Growth
+1 Plummet
+1 Overrun

@@ -21,7 +21,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Play a game in this terminal: `manaline play --deck m0-green --vs random`.
+    /// Play a game in this terminal: `manaline play --deck green --vs random`.
     Play(play::PlayArgs),
     /// Join a game someone else is hosting, with the token they gave you.
     Join(play::JoinArgs),

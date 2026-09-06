@@ -1,0 +1,7 @@
+Card(
+    name: "Essence Scatter",
+    cost: "{1}{U}",
+    types: [Instant],
+    text: "Counter target creature spell.",
+    spell: Spell(targets: [And([Creature, Spell])], effects: [CounterSpell(target: Target(0))]),
+)

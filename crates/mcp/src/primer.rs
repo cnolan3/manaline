@@ -29,8 +29,9 @@ nothing is on the stack.
 Within a phase, players take turns holding priority. When you hold priority
 you may cast a spell, play a land, or pass. When every player passes in a row
 with nothing on the stack, the game moves to the next phase. Passing does not
-skip your whole turn: you will get priority again in the next phase. To move
-through a turn quickly, pass repeatedly.
+skip your whole turn: you will get priority again in the next phase.
+`wait_for_turn` passes for you whenever passing is your only option, so you
+are woken only when there is something you could actually do.
 
 ## Mana
 
@@ -38,14 +39,19 @@ Lands tap for mana. To cast a spell you tap lands whose colours match the
 cost: `{1}{G}` needs one green mana and one mana of any colour. Tapped lands
 untap at the start of your next turn. `get_legal_actions` only lists spells you
 can actually pay for, with the payment already worked out, so you never need
-to compute mana yourself.
+to compute mana yourself. It lists up to two payments per colour combination:
+lands first, and mana creatures first (a creature that taps for several mana,
+like Elvish Archdruid, counts for all of it). If you would rather tap a
+different set of sources, pass the action with `payment.tap` edited to any of
+your untapped sources that covers the cost; `act` accepts it as long as it pays.
 
 ## Combat
 
 During your declare attackers step you choose which untapped creatures attack
 and whom they attack (in a pod, each attacker can target a different opponent).
 Attacking taps the creature. Creatures that came under your control this turn
-cannot attack (summoning sickness). The defending player then assigns blockers:
+cannot attack (summoning sickness) unless they have haste; the state marks
+these "sick" or "sick but hasty". The defending player then assigns blockers:
 each of their untapped creatures may block one attacker, and several may block
 the same attacker. Unblocked attackers deal damage equal to their power to the
 player. Blocked attackers and their blockers deal damage to each other at the
@@ -78,13 +84,17 @@ everything.
 
 ## The loop
 
-1. Call `wait_for_turn`. It returns when you must act, saying why, with the
-   state and the numbered legal actions. If it times out, call it again.
+1. Call `wait_for_turn`. It returns when you have a real decision to make,
+   saying why, with the state and the numbered legal actions. Moments where
+   you could only pass are passed for you meanwhile. If it times out, call
+   it again.
 2. Read the state. Decide.
 3. Call `take_action` with the id of the action you chose. The reply tells
    you whether you still must act (for example you cast a creature and still
    hold priority) and lists the next legal actions.
 4. Repeat step 3 until it is no longer your turn to act, then go back to 1.
 
-Use `say` to talk to the other players; it is a friendly table.
+Use `say` to talk to the other players; it is a friendly table. You may
+`concede` at any point if the game is clearly lost, but play it out while
+you have outs.
 "#;

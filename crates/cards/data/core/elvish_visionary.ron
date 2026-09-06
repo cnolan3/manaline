@@ -1,0 +1,9 @@
+Card(
+    name: "Elvish Visionary",
+    cost: "{1}{G}",
+    types: [Creature],
+    subtypes: ["Elf", "Shaman"],
+    pt: (1, 1),
+    text: "When Elvish Visionary enters, draw a card.",
+    triggers: [Etb(effects: [Draw(player: You, count: Const(1))])],
+)

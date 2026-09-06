@@ -1,0 +1,7 @@
+Card(
+    name: "Plummet",
+    cost: "{1}{G}",
+    types: [Instant],
+    text: "Destroy target creature with flying.",
+    spell: Spell(targets: [And([Creature, HasKeyword(Flying)])], effects: [Destroy(target: Target(0))]),
+)

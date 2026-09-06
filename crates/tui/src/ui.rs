@@ -1,7 +1,7 @@
 //! Rendering (§6). Everything reads in monochrome; colour reinforces.
 
 use crate::app::{App, LogKind, Mode};
-use engine::{ActReason, AttackTarget, CardType, HandView, ObjectId, ObjectView, Outcome, Seat};
+use engine::{ActReason, AttackTarget, CardType, HandView, Keyword, ObjectId, ObjectView, Outcome, Seat};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
@@ -9,7 +9,14 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 
 pub const CARD_W: u16 = 11;
-pub const CARD_H: u16 = 5;
+/// Card box height: name (two lines) and stats, plus a keyword row when enabled.
+pub fn card_h(keywords: bool) -> u16 {
+    if keywords {
+        6
+    } else {
+        5
+    }
+}
 
 pub fn draw(f: &mut Frame, app: &App) {
     let area = f.area();
@@ -42,7 +49,17 @@ pub fn draw(f: &mut Frame, app: &App) {
     let hand_height = 2;
     // Two card rows per field (lands, nonlands); boxes when there is room, chips otherwise.
     let fixed = 1 + collapsed + CENTER_H + 1 + hand_height + 1;
-    let row_h = if field.height >= fixed + 4 * CARD_H { CARD_H } else { 1 };
+    // Tall boxes with a keyword row when enabled and there is room, plain
+    // boxes when there is room only for those, chips otherwise.
+    let tall = card_h(true);
+    let plain = card_h(false);
+    let row_h = if app.settings.card_keywords && field.height >= fixed + 4 * tall {
+        tall
+    } else if field.height >= fixed + 4 * plain {
+        plain
+    } else {
+        1
+    };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -366,10 +383,14 @@ fn draw_row(
 ) {
     let view = app.view.as_ref().unwrap();
     let objects: Vec<&ObjectView> = ids.iter().filter_map(|id| view.object(*id)).collect();
-    if area.height < CARD_H {
-        draw_chip_row(f, area, &objects, highlight);
+    let keywords = app.settings.card_keywords;
+    if area.height < card_h(false) {
+        draw_chip_row(f, area, &objects, highlight, keywords);
         return;
     }
+    // The row is as tall as the boxes it was given room for.
+    let keywords = keywords && area.height >= card_h(true);
+    let card_h = area.height.min(card_h(true));
     let per_row = (area.width / CARD_W).max(1) as usize;
     let mut x = area.x;
     for (i, o) in objects.iter().enumerate() {
@@ -377,19 +398,19 @@ fn draw_row(
             let more = objects.len() - i;
             f.render_widget(
                 Paragraph::new(format!("+{more}\nmore")).dim().block(Block::default().borders(Borders::ALL)),
-                Rect::new(x, area.y, CARD_W, CARD_H),
+                Rect::new(x, area.y, CARD_W, card_h),
             );
             break;
         }
         let marked = highlight.map(|(m, _)| m.contains(&o.id)).unwrap_or(false);
         let cursor = highlight.and_then(|(_, c)| *c) == Some(o.id);
-        draw_card(f, o, Rect::new(x, area.y, CARD_W, CARD_H), marked, cursor);
+        draw_card(f, o, Rect::new(x, area.y, CARD_W, card_h), marked, cursor, keywords);
         x += CARD_W;
     }
 }
 
 /// One-line rendering for short terminals: `Forest{G}  Grizzly Bears 2/2 T`.
-fn draw_chip_row(f: &mut Frame, area: Rect, objects: &[&ObjectView], highlight: Option<&(Vec<ObjectId>, Option<ObjectId>)>) {
+fn draw_chip_row(f: &mut Frame, area: Rect, objects: &[&ObjectView], highlight: Option<&(Vec<ObjectId>, Option<ObjectId>)>, keywords: bool) {
     let mut spans: Vec<Span> = Vec::new();
     for o in objects {
         let mut text = o.name.clone();
@@ -401,11 +422,18 @@ fn draw_chip_row(f: &mut Frame, area: Rect, objects: &[&ObjectView], highlight: 
                 }
             }
         }
+        if keywords && !o.keywords.is_empty() {
+            text.push(' ');
+            text.push_str(&keyword_glyphs(&o.keywords));
+        }
+        if o.counters != 0 {
+            text.push_str(&format!("{:+}", o.counters));
+        }
         if o.damage > 0 {
             text.push_str(&format!("({})", o.damage));
         }
         if o.summoning_sick && o.pt.is_some() {
-            text.push('★');
+            text.push(sick_star(o));
         }
         if o.tapped {
             text.push_str(" T");
@@ -432,7 +460,8 @@ fn draw_chip_row(f: &mut Frame, area: Rect, objects: &[&ObjectView], highlight: 
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-pub fn draw_card(f: &mut Frame, o: &ObjectView, area: Rect, marked: bool, cursor: bool) {
+/// A card box: two name lines, an optional keyword row, and a stats line.
+pub fn draw_card(f: &mut Frame, o: &ObjectView, area: Rect, marked: bool, cursor: bool, keywords: bool) {
     let mut style = Style::default();
     if o.tapped {
         style = style.add_modifier(Modifier::DIM);
@@ -457,17 +486,61 @@ pub fn draw_card(f: &mut Frame, o: &ObjectView, area: Rect, marked: bool, cursor
         None if o.types.contains(&CardType::Land) => o.produces.iter().map(|c| format!("{{{}}}", c.symbol())).collect(),
         None => String::new(),
     };
+    if o.counters != 0 {
+        stats.push_str(&format!("{:+}", o.counters));
+    }
     if o.damage > 0 {
         stats.push_str(&format!("({})", o.damage));
     }
     if o.summoning_sick && o.pt.is_some() {
-        stats.push('★');
+        stats.push(sick_star(o));
+    }
+    if o.attached_to.is_some() {
+        stats.push('⇗');
     }
     let tapped = if o.tapped { "T" } else { " " };
     let last = format!("{}{tapped}", fit(&stats, width - 1).chars().chain(std::iter::repeat(' ')).take(width - 1).collect::<String>());
-    let lines = vec![Line::from(name1), Line::from(name2), Line::from(last)];
+    let mut lines = vec![Line::from(name1), Line::from(name2)];
+    if keywords {
+        lines.push(Line::from(fit(&keyword_glyphs(&o.keywords), width)).dim());
+    }
+    lines.push(Line::from(last));
     let block = Block::default().borders(Borders::ALL).border_style(border);
     f.render_widget(Paragraph::new(lines).style(style).block(block), area);
+}
+
+/// Summoning sickness: a solid star, or a hollow one when haste lets the
+/// creature attack anyway (it is still sick; haste just ignores that).
+fn sick_star(o: &ObjectView) -> char {
+    if o.keywords.contains(&Keyword::Haste) {
+        '☆'
+    } else {
+        '★'
+    }
+}
+
+/// One glyph per keyword, for card boxes and chips.
+pub fn keyword_glyphs(ks: &[Keyword]) -> String {
+    ks.iter()
+        .map(|k| match k {
+            Keyword::Flying => "✈",
+            Keyword::FirstStrike => "⚔",
+            Keyword::DoubleStrike => "⚔⚔",
+            Keyword::Deathtouch => "☠",
+            Keyword::Lifelink => "♥",
+            Keyword::Trample => "Tr",
+            Keyword::Vigilance => "Vg",
+            Keyword::Haste => "Hs",
+            Keyword::Reach => "Rc",
+            Keyword::Menace => "Mn",
+            Keyword::Defender => "Df",
+            Keyword::Flash => "Fl",
+            Keyword::Hexproof => "Hx",
+            Keyword::Indestructible => "In",
+            Keyword::Prowess => "Pw",
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Split a card name over two lines of `w` characters, breaking at spaces.
@@ -621,6 +694,17 @@ fn draw_overlays(f: &mut Frame, app: &App, area: Rect) {
             }
             popup(f, area, "Assign combat damage", lines, 50);
         }
+        Mode::Pick(p) => {
+            let marked = p.marked.iter().filter(|m| **m).count();
+            let mut lines = vec![Line::from(format!("Space marks a card; Enter confirms ({marked}/{} marked).", p.count)).dim()];
+            for (i, (id, m)) in p.cards.iter().zip(&p.marked).enumerate() {
+                let mark = if *m { "[x]" } else { "[ ]" };
+                let text = format!("{mark} {} {}", i + 1, app.name_of(*id));
+                let style = if i == p.cursor { Style::default().add_modifier(Modifier::REVERSED) } else { Style::default() };
+                lines.push(Line::styled(text, style));
+            }
+            popup(f, area, &p.title, lines, 50);
+        }
         Mode::Chat(text) => {
             let lines = vec![Line::from(format!("> {text}_"))];
             popup(f, area, "Say", lines, 60);
@@ -639,15 +723,28 @@ fn draw_overlays(f: &mut Frame, app: &App, area: Rect) {
                 if let Some((pw, t)) = o.pt {
                     lines.push(Line::from(format!("{pw}/{t}{}", if o.damage > 0 { format!(" ({} damage marked)", o.damage) } else { String::new() })));
                 }
+                if !o.keywords.is_empty() {
+                    let words: Vec<&str> = o.keywords.iter().map(|k| k.word()).collect();
+                    lines.push(Line::from(format!("Keywords now: {}", words.join(", "))));
+                }
                 lines.push(Line::from(""));
                 lines.push(Line::from(if o.text.is_empty() { "(no rules text)".to_string() } else { o.text.clone() }));
                 lines.push(Line::from(""));
+                for a in &o.abilities {
+                    lines.push(Line::from(format!("• {a}")).dim());
+                }
+                if let Some(t) = o.attached_to {
+                    lines.push(Line::from(format!("Attached to {}", app.object_label(t))));
+                }
+                if o.counters != 0 {
+                    lines.push(Line::from(format!("Counters: {:+}", o.counters)));
+                }
                 let mut state = vec![format!("{:?}", o.zone).to_lowercase(), format!("controlled by {}", app.seat_name(o.controller))];
                 if o.tapped {
                     state.push("tapped".into());
                 }
                 if o.summoning_sick && o.pt.is_some() {
-                    state.push("summoning sick".into());
+                    state.push(if o.keywords.contains(&Keyword::Haste) { "summoning sick (haste: can still attack)".into() } else { "summoning sick".into() });
                 }
                 if let Some(AttackTarget::Player(s)) = o.attacking {
                     state.push(format!("attacking {}", app.seat_name(s)));
@@ -670,13 +767,15 @@ fn draw_overlays(f: &mut Frame, app: &App, area: Rect) {
                 "Space      pass priority (or open the pending decision)",
                 "1-9, 0     play or cast the card at that hand position",
                 "a / b / d  declare attackers / blockers / assign damage",
+                "e          activate an ability of one of your permanents",
                 "m          mulligan decision",
                 "i          inspect a card",
                 "c          chat with the table",
                 "Enter      nudge whoever the game is waiting on",
                 "Tab        expand the next opponent",
                 "l / s      show or hide the log / the stack",
-                "o          settings (auto-pass, delay, verbose log)",
+                "o          settings (auto-pass, delay, keyword row, verbose log)",
+                "★ / ☆      summoning sick / sick but hasty (can still attack)",
                 "Esc / h    hold: cancel an auto-pass countdown",
                 "PgUp/PgDn  scroll the log",
                 "v          toggle verbose log",
@@ -699,6 +798,7 @@ fn draw_overlays(f: &mut Frame, app: &App, area: Rect) {
             let rows = [
                 format!("Auto-pass minor priority moments   {}", if s.auto_pass { "[on]" } else { "[off]" }),
                 format!("Auto-pass delay                     {}", s.delay_label()),
+                format!("Keyword row on card boxes           {}", if s.card_keywords { "[on]" } else { "[off]" }),
                 format!("Verbose log                         {}", if s.verbose_log { "[on]" } else { "[off]" }),
             ];
             let mut lines = vec![Line::from("Minor moments are upkeep, draw, combat steps and the opponent's turn, when passing is your only choice.").dim()];

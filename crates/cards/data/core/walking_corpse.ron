@@ -1,0 +1,8 @@
+Card(
+    name: "Walking Corpse",
+    cost: "{1}{B}",
+    types: [Creature],
+    subtypes: ["Zombie"],
+    pt: (2, 2),
+    text: "",
+)

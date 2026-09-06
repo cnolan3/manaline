@@ -181,40 +181,7 @@ impl fmt::Display for Phase {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Color {
-    White,
-    Blue,
-    Black,
-    Red,
-    Green,
-}
-
-impl Color {
-    pub const ALL: [Color; 5] = [Color::White, Color::Blue, Color::Black, Color::Red, Color::Green];
-
-    pub fn symbol(self) -> char {
-        match self {
-            Color::White => 'W',
-            Color::Blue => 'U',
-            Color::Black => 'B',
-            Color::Red => 'R',
-            Color::Green => 'G',
-        }
-    }
-
-    pub fn from_symbol(c: char) -> Option<Color> {
-        match c.to_ascii_uppercase() {
-            'W' => Some(Color::White),
-            'U' => Some(Color::Blue),
-            'B' => Some(Color::Black),
-            'R' => Some(Color::Red),
-            'G' => Some(Color::Green),
-            _ => None,
-        }
-    }
-}
+pub use cardir::{CardType, Color, Keyword, ManaCost, Supertype};
 
 /// One unit of mana in a pool or a payment.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -315,99 +282,9 @@ impl fmt::Display for ManaPool {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CardType {
-    Creature,
-    Land,
-    Instant,
-    Sorcery,
-    Artifact,
-    Enchantment,
-    Planeswalker,
-}
-
-impl CardType {
-    pub fn is_permanent(self) -> bool {
-        !matches!(self, CardType::Instant | CardType::Sorcery)
-    }
-}
-
-/// A mana cost. v1 has no hybrid, phyrexian, or X symbols.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct ManaCost {
-    pub generic: u8,
-    pub pips: Vec<Color>,
-}
-
-impl ManaCost {
-    /// Parse Oracle-style cost text such as `{1}{G}{G}`. The empty string is a free cost.
-    pub fn parse(text: &str) -> Result<ManaCost, String> {
-        let mut cost = ManaCost::default();
-        let mut rest = text.trim();
-        while !rest.is_empty() {
-            let close = rest
-                .find('}')
-                .ok_or_else(|| format!("unterminated mana symbol in {text:?}"))?;
-            if !rest.starts_with('{') {
-                return Err(format!("expected '{{' in mana cost {text:?}"));
-            }
-            let sym = &rest[1..close];
-            if let Ok(n) = sym.parse::<u8>() {
-                cost.generic = cost.generic.saturating_add(n);
-            } else if sym.len() == 1 {
-                let c = Color::from_symbol(sym.chars().next().unwrap())
-                    .ok_or_else(|| format!("unknown mana symbol {{{sym}}} in {text:?}"))?;
-                cost.pips.push(c);
-            } else {
-                return Err(format!("unsupported mana symbol {{{sym}}} in {text:?}"));
-            }
-            rest = &rest[close + 1..];
-        }
-        cost.pips.sort();
-        Ok(cost)
-    }
-
-    pub fn mana_value(&self) -> u32 {
-        self.generic as u32 + self.pips.len() as u32
-    }
-
-    pub fn pips_of(&self, color: Color) -> u8 {
-        self.pips.iter().filter(|&&c| c == color).count() as u8
-    }
-
-    pub fn is_free(&self) -> bool {
-        self.generic == 0 && self.pips.is_empty()
-    }
-}
-
-impl fmt::Display for ManaCost {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.generic > 0 || self.pips.is_empty() {
-            write!(f, "{{{}}}", self.generic)?;
-        }
-        for c in &self.pips {
-            write!(f, "{{{}}}", c.symbol())?;
-        }
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parses_costs() {
-        let c = ManaCost::parse("{1}{G}{G}").unwrap();
-        assert_eq!(c.generic, 1);
-        assert_eq!(c.pips, vec![Color::Green, Color::Green]);
-        assert_eq!(c.mana_value(), 3);
-        assert_eq!(c.to_string(), "{1}{G}{G}");
-        assert!(ManaCost::parse("").unwrap().is_free());
-        assert_eq!(ManaCost::parse("{3}{R}{R}").unwrap().mana_value(), 5);
-        assert!(ManaCost::parse("{X}{R}").is_err());
-    }
 
     #[test]
     fn phase_order() {

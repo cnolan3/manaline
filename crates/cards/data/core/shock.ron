@@ -1,0 +1,7 @@
+Card(
+    name: "Shock",
+    cost: "{R}",
+    types: [Instant],
+    text: "Shock deals 2 damage to any target.",
+    spell: Spell(targets: [Any], effects: [DealDamage(amount: Const(2), to: Target(0))]),
+)

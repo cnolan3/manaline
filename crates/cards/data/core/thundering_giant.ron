@@ -1,0 +1,9 @@
+Card(
+    name: "Thundering Giant",
+    cost: "{3}{R}{R}",
+    types: [Creature],
+    subtypes: ["Giant"],
+    pt: (4, 3),
+    text: "Haste",
+    keywords: [Haste],
+)

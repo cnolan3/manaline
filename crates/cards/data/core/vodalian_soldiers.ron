@@ -1,0 +1,8 @@
+Card(
+    name: "Vodalian Soldiers",
+    cost: "{1}{U}",
+    types: [Creature],
+    subtypes: ["Merfolk", "Soldier"],
+    pt: (1, 2),
+    text: "",
+)

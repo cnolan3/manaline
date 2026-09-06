@@ -1,0 +1,8 @@
+Card(
+    name: "Rumbling Baloth",
+    cost: "{2}{G}{G}",
+    types: [Creature],
+    subtypes: ["Beast"],
+    pt: (4, 4),
+    text: "",
+)

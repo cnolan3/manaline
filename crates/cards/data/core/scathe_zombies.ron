@@ -1,0 +1,8 @@
+Card(
+    name: "Scathe Zombies",
+    cost: "{2}{B}",
+    types: [Creature],
+    subtypes: ["Zombie"],
+    pt: (2, 2),
+    text: "",
+)

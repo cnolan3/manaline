@@ -1,0 +1,7 @@
+Card(
+    name: "Mind Rot",
+    cost: "{2}{B}",
+    types: [Sorcery],
+    text: "Target player discards two cards.",
+    spell: Spell(targets: [Player], effects: [Discard(player: TargetPlayer(0), count: Const(2))]),
+)

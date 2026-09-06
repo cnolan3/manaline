@@ -1,0 +1,7 @@
+Card(
+    name: "Murder",
+    cost: "{1}{B}{B}",
+    types: [Instant],
+    text: "Destroy target creature.",
+    spell: Spell(targets: [Creature], effects: [Destroy(target: Target(0))]),
+)

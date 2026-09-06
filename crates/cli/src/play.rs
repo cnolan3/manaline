@@ -234,7 +234,7 @@ fn default_opponent_deck(mine: &str) -> String {
             return name.to_string();
         }
     }
-    "m0-red".into()
+    "red".into()
 }
 
 fn check_deck(decklist: &str, format: &Format, db: &engine::CardDb, label: &str) -> Result<()> {

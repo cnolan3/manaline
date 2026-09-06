@@ -1,0 +1,8 @@
+Card(
+    name: "Muck Rats",
+    cost: "{B}",
+    types: [Creature],
+    subtypes: ["Rat"],
+    pt: (1, 1),
+    text: "",
+)

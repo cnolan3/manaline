@@ -1,0 +1,7 @@
+Card(
+    name: "Unsummon",
+    cost: "{U}",
+    types: [Instant],
+    text: "Return target creature to its owner's hand.",
+    spell: Spell(targets: [Creature], effects: [ReturnToHand(target: Target(0))]),
+)

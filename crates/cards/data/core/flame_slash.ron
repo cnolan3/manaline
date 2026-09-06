@@ -1,0 +1,7 @@
+Card(
+    name: "Flame Slash",
+    cost: "{R}",
+    types: [Sorcery],
+    text: "Flame Slash deals 4 damage to target creature.",
+    spell: Spell(targets: [Creature], effects: [DealDamage(amount: Const(4), to: Target(0))]),
+)

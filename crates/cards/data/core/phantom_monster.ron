@@ -1,0 +1,9 @@
+Card(
+    name: "Phantom Monster",
+    cost: "{3}{U}",
+    types: [Creature],
+    subtypes: ["Illusion"],
+    pt: (3, 3),
+    text: "Flying",
+    keywords: [Flying],
+)

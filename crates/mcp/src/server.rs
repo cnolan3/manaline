@@ -42,6 +42,10 @@ pub struct WaitParams {
     /// Give up after this many seconds and return `{ "timed_out": true }`. Default 300.
     #[serde(default)]
     pub timeout_seconds: Option<u32>,
+    /// Pass priority for you whenever passing (or conceding) is your only option, and keep
+    /// waiting, so you are only woken when there is a real decision. Default true.
+    #[serde(default)]
+    pub auto_pass: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -81,6 +85,11 @@ fn text_and_json(text: String, json: serde_json::Value) -> CallToolResult {
     let mut r = CallToolResult::success(vec![ContentBlock::text(text)]);
     r.structured_content = Some(json);
     r
+}
+
+/// Priority with nothing to do: every legal action is a pass or a concession.
+fn nothing_to_do(legal: &[LegalAction]) -> bool {
+    !legal.is_empty() && legal.iter().all(|l| matches!(l.action, Action::PassPriority | Action::Concede))
 }
 
 fn tool_error(msg: impl Into<String>) -> CallToolResult {
@@ -183,7 +192,7 @@ impl McpServer {
 
     #[tool(
         name = "take_action",
-        description = "Take one of your legal actions, by id from the last list. The reply says whether you still must act and lists the next legal actions if so."
+        description = "Take one of your legal actions, by id from the last list, or pass a full `action` object. For a cast or activation you may edit `payment.tap` to any set of your untapped mana sources that covers the cost (e.g. tap a big mana creature instead of lands); the listed payments are just the common choices. The reply says whether you still must act and lists the next legal actions if so."
     )]
     pub async fn take_action(&self, Parameters(p): Parameters<TakeActionParams>) -> Result<CallToolResult, ErrorData> {
         let (action, version) = match (p.action_id, p.action) {
@@ -236,28 +245,47 @@ impl McpServer {
 
     #[tool(
         name = "wait_for_turn",
-        description = "Block until it is your turn to act (priority, blockers, a mulligan, a choice) or the game ends. Returns the state, why you must act, and your legal actions. On timeout returns { \"timed_out\": true }; just call it again."
+        description = "Block until you have a real decision to make (a spell or ability you can afford, a land drop, attackers, blockers, a mulligan, a choice) or the game ends. Priority moments where passing is your only option are passed for you while you wait (set auto_pass=false to be woken at every one). Returns the state, why you must act, and your legal actions; `auto_passed` counts the passes made for you. On timeout returns { \"timed_out\": true }; just call it again."
     )]
     pub async fn wait_for_turn(&self, Parameters(p): Parameters<WaitParams>) -> Result<CallToolResult, ErrorData> {
         let secs = p.timeout_seconds.map(u64::from).unwrap_or(DEFAULT_WAIT_SECS).max(1);
+        let auto_pass = p.auto_pass.unwrap_or(true);
         if !self.session.started() {
             self.session.refresh().await;
         }
-        match self.session.wait_for_turn(Duration::from_secs(secs)).await {
-            Wait::TimedOut => Ok(text_and_json(
-                format!("Still waiting after {secs}s: not your turn yet. Call wait_for_turn again."),
-                serde_json::json!({ "timed_out": true }),
-            )),
-            Wait::Ready(view) => {
-                if let Some(o) = view.outcome {
-                    let text = format!("The game is over: {}.\n\n{}", outcome_text(&self.session, o), render_state(&self.session, &view, &[]));
-                    return Ok(text_and_json(text, serde_json::json!({ "game_over": true, "outcome": o, "state": view })));
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(secs);
+        let mut auto_passed = 0u32;
+        loop {
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            match self.session.wait_for_turn(left).await {
+                Wait::TimedOut => break,
+                Wait::Ready(view) => {
+                    if let Some(o) = view.outcome {
+                        let text = format!("The game is over: {}.\n\n{}", outcome_text(&self.session, o), render_state(&self.session, &view, &[]));
+                        return Ok(text_and_json(text, serde_json::json!({ "game_over": true, "outcome": o, "state": view, "auto_passed": auto_passed })));
+                    }
+                    let (legal, version, reason) = self.session.legal_actions().await.unwrap_or_default();
+                    if auto_pass && nothing_to_do(&legal) {
+                        // Only pass and concede: pass on the agent's behalf and keep waiting.
+                        match self.session.act(Action::PassPriority, version).await {
+                            Ok(_) => auto_passed += 1,
+                            Err(ClientError::Protocol(e)) if matches!(e.code, protocol::ErrorCode::StaleStateVersion | protocol::ErrorCode::NotYourTurnToAct) => {}
+                            Err(e) => return Ok(tool_error(format!("auto-pass failed: {}", describe_client_error(e)))),
+                        }
+                        continue;
+                    }
+                    let extra = serde_json::json!({ "reason": reason, "timed_out": false, "auto_passed": auto_passed });
+                    return Ok(self.state_result(&view, &legal, Some(extra)));
                 }
-                let (legal, _, reason) = self.session.legal_actions().await.unwrap_or_default();
-                let extra = serde_json::json!({ "reason": reason, "timed_out": false });
-                Ok(self.state_result(&view, &legal, Some(extra)))
             }
         }
+        Ok(text_and_json(
+            format!("Still waiting after {secs}s: nothing for you to do yet ({auto_passed} priority passes made for you). Call wait_for_turn again."),
+            serde_json::json!({ "timed_out": true, "auto_passed": auto_passed }),
+        ))
     }
 
     #[tool(
@@ -278,7 +306,7 @@ impl McpServer {
                 state.push("tapped".into());
             }
             if o.summoning_sick && o.pt.is_some() {
-                state.push("summoning sick".into());
+                state.push(if o.keywords.contains(&engine::Keyword::Haste) { "summoning sick, but has haste so it can attack".into() } else { "summoning sick".into() });
             }
             if o.damage > 0 {
                 state.push(format!("{} damage marked", o.damage));

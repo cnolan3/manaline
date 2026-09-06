@@ -1,0 +1,19 @@
+[package]
+name = "manaline-cardir"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The manaline card IR: schema types, validator, and English renderer"
+
+[lib]
+name = "cardir"
+path = "src/lib.rs"
+
+[dependencies]
+serde.workspace = true
+ron.workspace = true
+schemars = "1.2"
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

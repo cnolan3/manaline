@@ -1,0 +1,9 @@
+Card(
+    name: "Typhoid Rats",
+    cost: "{B}",
+    types: [Creature],
+    subtypes: ["Rat"],
+    pt: (1, 1),
+    text: "Deathtouch (Any amount of damage this deals to a creature is enough to destroy it.)",
+    keywords: [Deathtouch],
+)

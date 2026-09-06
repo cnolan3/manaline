@@ -1,0 +1,8 @@
+Card(
+    name: "Forest",
+    types: [Land],
+    supertypes: [Basic],
+    subtypes: ["Forest"],
+    text: "({T}: Add {G}.)",
+    activated: [Ability(cost: [Tap], effects: [AddMana(color: Green, amount: Const(1))])],
+)

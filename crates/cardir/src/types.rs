@@ -1,0 +1,265 @@
+//! Value types shared by the IR and the engine: colours, card types,
+//! keywords, and mana costs. Mana costs serialize as their Oracle text.
+
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use std::fmt;
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema)]
+pub enum Color {
+    White,
+    Blue,
+    Black,
+    Red,
+    Green,
+}
+
+impl Color {
+    pub const ALL: [Color; 5] = [Color::White, Color::Blue, Color::Black, Color::Red, Color::Green];
+
+    pub fn symbol(self) -> char {
+        match self {
+            Color::White => 'W',
+            Color::Blue => 'U',
+            Color::Black => 'B',
+            Color::Red => 'R',
+            Color::Green => 'G',
+        }
+    }
+
+    pub fn from_symbol(c: char) -> Option<Color> {
+        match c.to_ascii_uppercase() {
+            'W' => Some(Color::White),
+            'U' => Some(Color::Blue),
+            'B' => Some(Color::Black),
+            'R' => Some(Color::Red),
+            'G' => Some(Color::Green),
+            _ => None,
+        }
+    }
+
+    /// The colour word as it appears in Oracle text.
+    pub fn word(self) -> &'static str {
+        match self {
+            Color::White => "white",
+            Color::Blue => "blue",
+            Color::Black => "black",
+            Color::Red => "red",
+            Color::Green => "green",
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub enum CardType {
+    Creature,
+    Land,
+    Instant,
+    Sorcery,
+    Artifact,
+    Enchantment,
+    Planeswalker,
+}
+
+impl CardType {
+    pub fn is_permanent(self) -> bool {
+        !matches!(self, CardType::Instant | CardType::Sorcery)
+    }
+
+    pub fn word(self) -> &'static str {
+        match self {
+            CardType::Creature => "creature",
+            CardType::Land => "land",
+            CardType::Instant => "instant",
+            CardType::Sorcery => "sorcery",
+            CardType::Artifact => "artifact",
+            CardType::Enchantment => "enchantment",
+            CardType::Planeswalker => "planeswalker",
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub enum Supertype {
+    Basic,
+    Legendary,
+}
+
+/// The evergreen keywords the engine implements (§4.2).
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema)]
+pub enum Keyword {
+    Flying,
+    FirstStrike,
+    DoubleStrike,
+    Deathtouch,
+    Lifelink,
+    Trample,
+    Vigilance,
+    Haste,
+    Reach,
+    Menace,
+    Defender,
+    Flash,
+    Hexproof,
+    Indestructible,
+    Prowess,
+}
+
+impl Keyword {
+    pub const ALL: [Keyword; 15] = [
+        Keyword::Flying,
+        Keyword::FirstStrike,
+        Keyword::DoubleStrike,
+        Keyword::Deathtouch,
+        Keyword::Lifelink,
+        Keyword::Trample,
+        Keyword::Vigilance,
+        Keyword::Haste,
+        Keyword::Reach,
+        Keyword::Menace,
+        Keyword::Defender,
+        Keyword::Flash,
+        Keyword::Hexproof,
+        Keyword::Indestructible,
+        Keyword::Prowess,
+    ];
+
+    pub fn word(self) -> &'static str {
+        match self {
+            Keyword::Flying => "flying",
+            Keyword::FirstStrike => "first strike",
+            Keyword::DoubleStrike => "double strike",
+            Keyword::Deathtouch => "deathtouch",
+            Keyword::Lifelink => "lifelink",
+            Keyword::Trample => "trample",
+            Keyword::Vigilance => "vigilance",
+            Keyword::Haste => "haste",
+            Keyword::Reach => "reach",
+            Keyword::Menace => "menace",
+            Keyword::Defender => "defender",
+            Keyword::Flash => "flash",
+            Keyword::Hexproof => "hexproof",
+            Keyword::Indestructible => "indestructible",
+            Keyword::Prowess => "prowess",
+        }
+    }
+}
+
+/// A mana cost. v1 has no hybrid, phyrexian, or X symbols. Serializes as
+/// its Oracle text, e.g. `"{1}{G}{G}"`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct ManaCost {
+    pub generic: u8,
+    pub pips: Vec<Color>,
+}
+
+impl ManaCost {
+    /// Parse Oracle-style cost text such as `{1}{G}{G}`. The empty string is a free cost.
+    pub fn parse(text: &str) -> Result<ManaCost, String> {
+        let mut cost = ManaCost::default();
+        let mut rest = text.trim();
+        while !rest.is_empty() {
+            if !rest.starts_with('{') {
+                return Err(format!("expected '{{' in mana cost {text:?}"));
+            }
+            let close = rest.find('}').ok_or_else(|| format!("unterminated mana symbol in {text:?}"))?;
+            let sym = &rest[1..close];
+            if let Ok(n) = sym.parse::<u8>() {
+                cost.generic = cost.generic.saturating_add(n);
+            } else if sym.len() == 1 {
+                let c = Color::from_symbol(sym.chars().next().unwrap())
+                    .ok_or_else(|| format!("unknown mana symbol {{{sym}}} in {text:?}"))?;
+                cost.pips.push(c);
+            } else {
+                return Err(format!("unsupported mana symbol {{{sym}}} in {text:?}"));
+            }
+            rest = &rest[close + 1..];
+        }
+        cost.pips.sort();
+        Ok(cost)
+    }
+
+    pub fn mana_value(&self) -> u32 {
+        self.generic as u32 + self.pips.len() as u32
+    }
+
+    pub fn pips_of(&self, color: Color) -> u8 {
+        self.pips.iter().filter(|&&c| c == color).count() as u8
+    }
+
+    pub fn is_free(&self) -> bool {
+        self.generic == 0 && self.pips.is_empty()
+    }
+
+    /// The colours in the cost, each once, in WUBRG order.
+    pub fn colors(&self) -> Vec<Color> {
+        let mut cs = self.pips.clone();
+        cs.sort();
+        cs.dedup();
+        cs
+    }
+}
+
+impl fmt::Display for ManaCost {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.generic > 0 || self.pips.is_empty() {
+            write!(f, "{{{}}}", self.generic)?;
+        }
+        for c in &self.pips {
+            write!(f, "{{{}}}", c.symbol())?;
+        }
+        Ok(())
+    }
+}
+
+impl Serialize for ManaCost {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        if self.is_free() {
+            s.serialize_str("")
+        } else {
+            s.serialize_str(&self.to_string())
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ManaCost {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<ManaCost, D::Error> {
+        let text = String::deserialize(d)?;
+        ManaCost::parse(&text).map_err(serde::de::Error::custom)
+    }
+}
+
+impl JsonSchema for ManaCost {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "ManaCost".into()
+    }
+
+    fn json_schema(_gen: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "description": "A mana cost in Oracle notation, e.g. \"{1}{G}{G}\"; empty for no cost.",
+            "pattern": "^(\\{[0-9WUBRG]\\})*$"
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_and_prints_costs() {
+        let c = ManaCost::parse("{1}{G}{G}").unwrap();
+        assert_eq!(c.generic, 1);
+        assert_eq!(c.pips, vec![Color::Green, Color::Green]);
+        assert_eq!(c.mana_value(), 3);
+        assert_eq!(c.to_string(), "{1}{G}{G}");
+        assert!(ManaCost::parse("").unwrap().is_free());
+        assert_eq!(ManaCost::parse("{0}").unwrap().to_string(), "{0}");
+        assert!(ManaCost::parse("{X}{R}").is_err());
+        let json = serde_json::to_string(&c).unwrap();
+        assert_eq!(json, "\"{1}{G}{G}\"");
+        let back: ManaCost = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, c);
+    }
+}

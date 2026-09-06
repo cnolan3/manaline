@@ -1,0 +1,8 @@
+Card(
+    name: "Balduvian Barbarians",
+    cost: "{1}{R}{R}",
+    types: [Creature],
+    subtypes: ["Human", "Barbarian"],
+    pt: (3, 2),
+    text: "",
+)

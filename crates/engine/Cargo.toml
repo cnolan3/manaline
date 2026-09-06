@@ -10,6 +10,7 @@ name = "engine"
 path = "src/lib.rs"
 
 [dependencies]
+manaline-cardir = { path = "../cardir" }
 serde.workspace = true
 rand.workspace = true
 rand_chacha.workspace = true

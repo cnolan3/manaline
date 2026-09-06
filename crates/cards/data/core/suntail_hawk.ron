@@ -1,0 +1,9 @@
+Card(
+    name: "Suntail Hawk",
+    cost: "{W}",
+    types: [Creature],
+    subtypes: ["Bird"],
+    pt: (1, 1),
+    text: "Flying",
+    keywords: [Flying],
+)

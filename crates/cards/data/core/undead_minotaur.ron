@@ -1,0 +1,8 @@
+Card(
+    name: "Undead Minotaur",
+    cost: "{3}{B}",
+    types: [Creature],
+    subtypes: ["Zombie", "Minotaur"],
+    pt: (2, 3),
+    text: "",
+)

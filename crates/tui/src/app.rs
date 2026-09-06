@@ -3,7 +3,7 @@
 //! executes them against the daemon.
 
 use engine::text::describe_event_view;
-use engine::{ActReason, Action, AttackTarget, DamageTarget, EventBase, EventView, GameView, ObjectId, Outcome, Seat};
+use engine::{ActReason, Action, AttackTarget, DamageTarget, EventBase, EventView, GameView, Keyword, ObjectId, Outcome, Seat};
 use crate::settings::Settings;
 use protocol::{LegalAction, LobbyView, ServerMessage};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -67,6 +67,17 @@ pub struct BlockPicker {
     pub cursor: usize,
 }
 
+/// Pick exactly `count` cards from hand (bottoming after a mulligan, discarding).
+#[derive(Clone, Debug)]
+pub struct CardPicker {
+    pub title: String,
+    pub cards: Vec<ObjectId>,
+    pub marked: Vec<bool>,
+    pub count: usize,
+    pub cursor: usize,
+    pub reason: ActReason,
+}
+
 #[derive(Clone, Debug)]
 pub struct DamagePicker {
     pub attacker: ObjectId,
@@ -83,6 +94,7 @@ pub enum Mode {
     Attack(AttackPicker),
     Block(BlockPicker),
     Damage(DamagePicker),
+    Pick(CardPicker),
     Chat(String),
     Inspect(ObjectId),
     Help,
@@ -90,7 +102,7 @@ pub enum Mode {
     Settings { selected: usize },
 }
 
-pub const SETTINGS_ITEMS: usize = 3;
+pub const SETTINGS_ITEMS: usize = 4;
 
 pub struct App {
     pub me: Option<Seat>,
@@ -369,8 +381,8 @@ impl App {
         }
         let opened = match reason {
             ActReason::Mulligan => self.open_menu("Mulligan"),
-            ActReason::BottomCards => self.open_menu("Put on the bottom of your library"),
-            ActReason::Discard => self.open_menu("Discard down to hand size"),
+            ActReason::BottomCards => self.open_card_picker(ActReason::BottomCards),
+            ActReason::Discard => self.open_card_picker(ActReason::Discard),
             ActReason::Choice => self.open_menu("Choose"),
             ActReason::DeclareAttackers => self.open_attack(),
             ActReason::DeclareBlockers => self.open_block(),
@@ -398,6 +410,32 @@ impl App {
         true
     }
 
+    /// A checkbox list over my hand: exactly as many cards as the engine asks
+    /// for (the length of every listed action).
+    fn open_card_picker(&mut self, reason: ActReason) -> bool {
+        let (Some(me), Some(view)) = (self.me, &self.view) else { return false };
+        let engine::HandView::Yours(hand) = &view.player(me).hand else { return false };
+        let count = self
+            .legal
+            .iter()
+            .find_map(|l| match &l.action {
+                Action::BottomCards { objects } | Action::Discard { objects } => Some(objects.len()),
+                _ => None,
+            })
+            .unwrap_or(0);
+        if hand.is_empty() || count == 0 {
+            return false;
+        }
+        let cards = hand.clone();
+        let title = match reason {
+            ActReason::BottomCards => format!("Put {count} on the bottom of your library"),
+            _ => format!("Discard {count} down to hand size"),
+        };
+        let n = cards.len();
+        self.mode = Mode::Pick(CardPicker { title, cards, marked: vec![false; n], count, cursor: 0, reason });
+        true
+    }
+
     fn open_attack(&mut self) -> bool {
         let (Some(me), Some(view)) = (self.me, &self.view) else { return false };
         let mut candidates: Vec<ObjectId> = view
@@ -405,7 +443,16 @@ impl App {
             .battlefield
             .iter()
             .copied()
-            .filter(|id| view.object(*id).map(|o| o.pt.is_some() && !o.tapped && !o.summoning_sick).unwrap_or(false))
+            .filter(|id| {
+                view.object(*id)
+                    .map(|o| {
+                        o.pt.is_some()
+                            && !o.tapped
+                            && (!o.summoning_sick || o.keywords.contains(&Keyword::Haste))
+                            && !o.keywords.contains(&Keyword::Defender)
+                    })
+                    .unwrap_or(false)
+            })
             .collect();
         candidates.sort();
         let targets: Vec<Seat> = view.players.iter().filter(|p| !p.eliminated && p.seat != me).map(|p| p.seat).collect();
@@ -469,6 +516,34 @@ impl App {
         true
     }
 
+    /// Client-side check of flying and reach, so the picker doesn't offer
+    /// blocks the daemon would refuse.
+    pub fn can_block(&self, blocker: ObjectId, attacker: ObjectId) -> bool {
+        let Some(view) = &self.view else { return true };
+        let (Some(b), Some(a)) = (view.object(blocker), view.object(attacker)) else { return true };
+        if a.keywords.contains(&Keyword::Flying)
+            && !(b.keywords.contains(&Keyword::Flying) || b.keywords.contains(&Keyword::Reach))
+        {
+            return false;
+        }
+        true
+    }
+
+    /// A menu of every activated ability (and equip) available right now.
+    fn open_abilities_menu(&mut self) {
+        let items: Vec<MenuItem> = self
+            .legal
+            .iter()
+            .filter(|l| matches!(l.action, Action::ActivateAbility { .. }))
+            .map(|l| MenuItem { label: l.description.clone(), action: Some(l.action.clone()), inspect: None })
+            .collect();
+        if items.is_empty() {
+            self.set_status("No abilities to activate right now");
+            return;
+        }
+        self.mode = Mode::Menu(Menu { title: "Activate".into(), items, selected: 0 });
+    }
+
     fn open_inspect_menu(&mut self) {
         let Some(view) = &self.view else { return };
         let mut items = Vec::new();
@@ -521,6 +596,7 @@ impl App {
             Mode::Attack(p) => self.key_attack(p, key),
             Mode::Block(p) => self.key_block(p, key),
             Mode::Damage(p) => self.key_damage(p, key),
+            Mode::Pick(p) => self.key_pick(p, key),
             Mode::Chat(text) => self.key_chat(text, key),
             Mode::Inspect(_) | Mode::Help => Vec::new(),
             Mode::ConfirmConcede => match key.code {
@@ -544,6 +620,7 @@ impl App {
                         let ms = self.settings.auto_pass_ms as i64 + dir * 500;
                         self.settings.auto_pass_ms = ms.clamp(500, 10_000) as u64;
                     }
+                    2 => self.settings.card_keywords = !self.settings.card_keywords,
                     _ => self.settings.verbose_log = !self.settings.verbose_log,
                 }
                 self.settings_changed();
@@ -610,6 +687,9 @@ impl App {
             KeyCode::Char('m') if reason == Some(ActReason::Mulligan) => {
                 self.open_menu("Mulligan");
             }
+            KeyCode::Char('e') if reason == Some(ActReason::Priority) => {
+                self.open_abilities_menu();
+            }
             KeyCode::Char(ch) if ch.is_ascii_digit() && reason == Some(ActReason::Priority) => {
                 let idx = if ch == '0' { 9 } else { ch as usize - '1' as usize };
                 return self.play_hand_index(idx);
@@ -623,8 +703,8 @@ impl App {
         let opened = match reason {
             ActReason::Priority => return vec![Command::Act(Action::PassPriority)],
             ActReason::Mulligan => self.open_menu("Mulligan"),
-            ActReason::BottomCards => self.open_menu("Put on the bottom of your library"),
-            ActReason::Discard => self.open_menu("Discard down to hand size"),
+            ActReason::BottomCards => self.open_card_picker(ActReason::BottomCards),
+            ActReason::Discard => self.open_card_picker(ActReason::Discard),
             ActReason::Choice => self.open_menu("Choose"),
             ActReason::DeclareAttackers => self.open_attack(),
             ActReason::DeclareBlockers => self.open_block(),
@@ -767,11 +847,27 @@ impl App {
             }
             KeyCode::Tab | KeyCode::Right | KeyCode::Left => {
                 let n = p.attackers.len();
-                p.choice[p.cursor] = match p.choice[p.cursor] {
+                let blocker = p.blockers[p.cursor];
+                let can = |a: usize| self.can_block(blocker, p.attackers[a]);
+                let mut next = match p.choice[p.cursor] {
                     None => Some(0),
                     Some(a) if key.code == KeyCode::Left => Some((a + n - 1) % n),
                     Some(a) => Some((a + 1) % n),
                 };
+                // Skip attackers this creature can't block (flying without reach).
+                for _ in 0..n {
+                    match next {
+                        Some(a) if !can(a) => next = Some((a + 1) % n),
+                        _ => break,
+                    }
+                }
+                if let Some(a) = next {
+                    if !can(a) {
+                        next = None;
+                        self.set_status("This creature can't block any attacker (flying)");
+                    }
+                }
+                p.choice[p.cursor] = next;
             }
             KeyCode::Char('n') => {
                 for c in p.choice.iter_mut() {
@@ -790,6 +886,51 @@ impl App {
             _ => {}
         }
         self.mode = Mode::Block(p);
+        Vec::new()
+    }
+
+    fn key_pick(&mut self, mut p: CardPicker, key: KeyEvent) -> Vec<Command> {
+        match key.code {
+            KeyCode::Esc => return Vec::new(),
+            KeyCode::Up | KeyCode::Char('k') => p.cursor = p.cursor.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => p.cursor = (p.cursor + 1).min(p.cards.len() - 1),
+            KeyCode::Char(' ') => {
+                let marked = p.marked.iter().filter(|m| **m).count();
+                if p.marked[p.cursor] {
+                    p.marked[p.cursor] = false;
+                } else if marked < p.count {
+                    p.marked[p.cursor] = true;
+                } else {
+                    self.set_status(format!("Pick exactly {} card(s); unmark one first", p.count));
+                }
+            }
+            KeyCode::Char(ch) if ch.is_ascii_digit() => {
+                let idx = if ch == '0' { 9 } else { ch as usize - '1' as usize };
+                if idx < p.cards.len() {
+                    p.cursor = idx;
+                    let marked = p.marked.iter().filter(|m| **m).count();
+                    if p.marked[idx] {
+                        p.marked[idx] = false;
+                    } else if marked < p.count {
+                        p.marked[idx] = true;
+                    }
+                }
+            }
+            KeyCode::Enter => {
+                let objects: Vec<ObjectId> = p.cards.iter().zip(&p.marked).filter(|(_, m)| **m).map(|(id, _)| *id).collect();
+                if objects.len() != p.count {
+                    self.set_status(format!("Pick exactly {} card(s) ({} marked)", p.count, objects.len()));
+                } else {
+                    let action = match p.reason {
+                        ActReason::BottomCards => Action::BottomCards { objects },
+                        _ => Action::Discard { objects },
+                    };
+                    return vec![Command::Act(action)];
+                }
+            }
+            _ => {}
+        }
+        self.mode = Mode::Pick(p);
         Vec::new()
     }
 
@@ -869,6 +1010,7 @@ impl App {
             Mode::Attack(_) => return "[Space] toggle attack  [Tab] cycle target  [a] all  [n] none  [Enter] declare  [Esc] cancel".into(),
             Mode::Block(_) => return "[Space] toggle block  [Tab] cycle attacker  [n] none  [Enter] declare  [Esc] cancel".into(),
             Mode::Damage(_) => return "[←→/+-] adjust  [↑↓] move  [Enter] assign  [Esc] cancel".into(),
+            Mode::Pick(_) => return "[Space]/[1-9] toggle  [↑↓] move  [Enter] confirm  [Esc] cancel".into(),
             Mode::Chat(_) => return "type a message  [Enter] send  [Esc] cancel".into(),
             Mode::Inspect(_) | Mode::Help => return "[Esc] close".into(),
             Mode::ConfirmConcede => return "Concede the game? [y] yes  [any other key] no".into(),
@@ -883,6 +1025,9 @@ impl App {
                 let mut parts = vec!["[Space] pass".to_string()];
                 if self.legal.iter().any(|l| matches!(l.action, Action::PlayLand { .. } | Action::CastSpell { .. })) {
                     parts.push("[1-9] play/cast".into());
+                }
+                if self.legal.iter().any(|l| matches!(l.action, Action::ActivateAbility { .. })) {
+                    parts.push("[e] abilities".into());
                 }
                 parts.extend(["[i] inspect", "[c] chat", "[l] log", "[s] stack", "[o] settings", "[x] concede", "[?] help"].map(String::from));
                 parts.join("  ")

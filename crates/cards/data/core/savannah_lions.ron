@@ -1,0 +1,8 @@
+Card(
+    name: "Savannah Lions",
+    cost: "{W}",
+    types: [Creature],
+    subtypes: ["Cat"],
+    pt: (2, 1),
+    text: "",
+)

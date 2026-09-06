@@ -1,0 +1,9 @@
+Card(
+    name: "Wind Drake",
+    cost: "{2}{U}",
+    types: [Creature],
+    subtypes: ["Drake"],
+    pt: (2, 2),
+    text: "Flying",
+    keywords: [Flying],
+)

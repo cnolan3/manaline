@@ -11,6 +11,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::watch;
 
+/// How often `wait_for_turn` asks the daemon for the state directly.
+const POLL_EVERY: Duration = Duration::from_secs(3);
+
 pub struct SessionConfig {
     pub endpoint: Endpoint,
     pub token: Token,
@@ -210,19 +213,28 @@ impl Session {
     /// Block until this seat must act or the game ends, or the timeout passes.
     pub async fn wait_for_turn(&self, timeout: Duration) -> Wait {
         let me = self.me;
+        let ready = |v: &Option<GameView>| match v {
+            Some(v) => v.must_act.contains_key(&me) || v.outcome.is_some(),
+            None => false,
+        };
         let mut rx = self.view.subscribe();
-        let result = tokio::time::timeout(timeout, async {
-            rx.wait_for(|v| match v {
-                Some(v) => v.must_act.contains_key(&me) || v.outcome.is_some(),
-                None => false,
-            })
-            .await
-            .map(|v| v.clone())
-        })
-        .await;
-        match result {
-            Ok(Ok(Some(v))) => Wait::Ready(v),
-            _ => Wait::TimedOut,
+        let deadline = tokio::time::Instant::now() + timeout;
+        // Pushes are the fast path; a periodic poll of the daemon covers a
+        // push that was lost or that carried nothing visible to this seat.
+        loop {
+            if ready(&rx.borrow_and_update()) {
+                return Wait::Ready(self.view().expect("ready implies a view"));
+            }
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                return Wait::TimedOut;
+            }
+            let slice = (deadline - now).min(POLL_EVERY);
+            match tokio::time::timeout(slice, rx.changed()).await {
+                Ok(Err(_)) => return Wait::TimedOut, // session gone
+                Ok(Ok(())) => {}
+                Err(_) => self.refresh().await,
+            }
         }
     }
 

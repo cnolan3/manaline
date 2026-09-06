@@ -1,0 +1,8 @@
+Card(
+    name: "Alaborn Trooper",
+    cost: "{2}{W}",
+    types: [Creature],
+    subtypes: ["Human", "Soldier"],
+    pt: (2, 3),
+    text: "",
+)

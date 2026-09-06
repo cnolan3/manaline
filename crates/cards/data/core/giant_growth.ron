@@ -1,0 +1,7 @@
+Card(
+    name: "Giant Growth",
+    cost: "{G}",
+    types: [Instant],
+    text: "Target creature gets +3/+3 until end of turn.",
+    spell: Spell(targets: [Creature], effects: [ModifyPt(target: Target(0), power: Const(3), toughness: Const(3), until: EndOfTurn)]),
+)

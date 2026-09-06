@@ -1,0 +1,8 @@
+Card(
+    name: "Horned Turtle",
+    cost: "{2}{U}",
+    types: [Creature],
+    subtypes: ["Turtle"],
+    pt: (1, 4),
+    text: "",
+)

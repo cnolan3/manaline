@@ -1,0 +1,7 @@
+Card(
+    name: "Dark Ritual",
+    cost: "{B}",
+    types: [Instant],
+    text: "Add {B}{B}{B}.",
+    spell: Spell(effects: [AddMana(color: Black, amount: Const(3))]),
+)

@@ -1,0 +1,9 @@
+Card(
+    name: "Air Elemental",
+    cost: "{3}{U}{U}",
+    types: [Creature],
+    subtypes: ["Elemental"],
+    pt: (4, 4),
+    text: "Flying",
+    keywords: [Flying],
+)

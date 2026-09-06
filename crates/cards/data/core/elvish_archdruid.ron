@@ -1,0 +1,10 @@
+Card(
+    name: "Elvish Archdruid",
+    cost: "{1}{G}{G}",
+    types: [Creature],
+    subtypes: ["Elf", "Druid"],
+    pt: (2, 2),
+    text: "Other Elf creatures you control get +1/+1.\n{T}: Add {G} for each Elf you control.",
+    statics: [PtBoost(filter: And([Other, Subtype("Elf"), Creature, ControlledBy(You)]), power: Const(1), toughness: Const(1))],
+    activated: [Ability(cost: [Tap], effects: [AddMana(color: Green, amount: Count(And([Subtype("Elf"), ControlledBy(You)])))])],
+)

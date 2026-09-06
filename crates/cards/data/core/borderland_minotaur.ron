@@ -1,0 +1,8 @@
+Card(
+    name: "Borderland Minotaur",
+    cost: "{3}{R}",
+    types: [Creature],
+    subtypes: ["Minotaur", "Warrior"],
+    pt: (4, 3),
+    text: "",
+)

@@ -1,0 +1,8 @@
+Card(
+    name: "Merfolk of the Pearl Trident",
+    cost: "{U}",
+    types: [Creature],
+    subtypes: ["Merfolk"],
+    pt: (1, 1),
+    text: "",
+)

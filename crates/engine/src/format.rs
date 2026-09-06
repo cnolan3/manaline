@@ -191,7 +191,7 @@ impl Format {
         for id in ids {
             let card = db.get(id);
             let count = counts[&id];
-            if self.deck.singleton && count > 1 && !card.basic {
+            if self.deck.singleton && count > 1 && !card.is_basic() {
                 out.push(Violation::NotSingleton { name: card.name.clone(), count });
             }
             let banned = self.legality.banned.iter().any(|b| b.eq_ignore_ascii_case(&card.name));

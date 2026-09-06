@@ -1,0 +1,15 @@
+// Starter: mono-red goblins and burn. 40 cards.
+Deck
+17 Mountain
+4 Raging Goblin
+3 Goblin Piker
+2 Goblin Chieftain
+2 Prodigal Pyromancer
+1 Furnace Whelp
+1 Thundering Giant
+3 Shock
+2 Lightning Bolt
+2 Lightning Strike
+1 Volcanic Hammer
+1 Flame Slash
+1 Trumpet Blast

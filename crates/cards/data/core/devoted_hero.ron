@@ -1,0 +1,8 @@
+Card(
+    name: "Devoted Hero",
+    cost: "{W}",
+    types: [Creature],
+    subtypes: ["Elf", "Soldier"],
+    pt: (1, 2),
+    text: "",
+)

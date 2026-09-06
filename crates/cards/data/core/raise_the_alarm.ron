@@ -1,0 +1,7 @@
+Card(
+    name: "Raise the Alarm",
+    cost: "{1}{W}",
+    types: [Instant],
+    text: "Create two 1/1 white Soldier creature tokens.",
+    spell: Spell(effects: [CreateToken(spec: TokenSpec(name: "Soldier", colors: [White], types: [Creature], subtypes: ["Soldier"], pt: (1, 1)), count: Const(2))]),
+)

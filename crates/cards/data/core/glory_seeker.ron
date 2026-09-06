@@ -1,0 +1,8 @@
+Card(
+    name: "Glory Seeker",
+    cost: "{1}{W}",
+    types: [Creature],
+    subtypes: ["Human", "Soldier"],
+    pt: (2, 2),
+    text: "",
+)

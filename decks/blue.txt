@@ -1,0 +1,16 @@
+// Starter: mono-blue fliers, counters, and bounce. 40 cards.
+Deck
+17 Island
+3 Merfolk of the Pearl Trident
+3 Coral Merfolk
+1 Horned Turtle
+2 Wind Drake
+2 Phantom Monster
+1 Air Elemental
+2 Man-o'-War
+2 Counterspell
+1 Cancel
+1 Essence Scatter
+1 Negate
+2 Divination
+2 Unsummon

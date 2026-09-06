@@ -1,0 +1,17 @@
+// Starter: mono-black removal and evasive threats. 40 cards.
+Deck
+17 Swamp
+3 Typhoid Rats
+2 Child of Night
+3 Walking Corpse
+2 Festering Goblin
+2 Vampire Nighthawk
+2 Scathe Zombies
+1 Zombie Goliath
+2 Doom Blade
+1 Murder
+1 Assassinate
+1 Cruel Edict
+1 Mind Rot
+1 Dark Ritual
+1 Bonesplitter

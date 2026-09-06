@@ -1,0 +1,9 @@
+Card(
+    name: "Holy Strength",
+    cost: "{W}",
+    types: [Enchantment],
+    subtypes: ["Aura"],
+    text: "Enchant creature\nEnchanted creature gets +1/+2.",
+    enchant: Creature,
+    statics: [PtBoost(filter: Attached, power: Const(1), toughness: Const(2))],
+)

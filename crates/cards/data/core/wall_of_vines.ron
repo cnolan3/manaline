@@ -1,0 +1,9 @@
+Card(
+    name: "Wall of Vines",
+    cost: "{G}",
+    types: [Creature],
+    subtypes: ["Plant", "Wall"],
+    pt: (0, 3),
+    text: "Defender (This creature can't attack.)\nReach (This creature can block creatures with flying.)",
+    keywords: [Defender, Reach],
+)

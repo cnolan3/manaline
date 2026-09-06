@@ -1,0 +1,7 @@
+Card(
+    name: "Divine Verdict",
+    cost: "{3}{W}",
+    types: [Instant],
+    text: "Destroy target attacking or blocking creature.",
+    spell: Spell(targets: [And([Or([Attacking, Blocking]), Creature])], effects: [Destroy(target: Target(0))]),
+)

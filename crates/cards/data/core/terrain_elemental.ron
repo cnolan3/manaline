@@ -1,0 +1,8 @@
+Card(
+    name: "Terrain Elemental",
+    cost: "{1}{G}",
+    types: [Creature],
+    subtypes: ["Elemental"],
+    pt: (3, 2),
+    text: "",
+)

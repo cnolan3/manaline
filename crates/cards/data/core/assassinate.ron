@@ -1,0 +1,7 @@
+Card(
+    name: "Assassinate",
+    cost: "{2}{B}",
+    types: [Sorcery],
+    text: "Destroy target tapped creature.",
+    spell: Spell(targets: [And([Tapped, Creature])], effects: [Destroy(target: Target(0))]),
+)

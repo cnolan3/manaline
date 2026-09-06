@@ -1,0 +1,9 @@
+Card(
+    name: "Youthful Knight",
+    cost: "{1}{W}",
+    types: [Creature],
+    subtypes: ["Human", "Knight"],
+    pt: (2, 1),
+    text: "First strike",
+    keywords: [FirstStrike],
+)

@@ -103,8 +103,8 @@ async fn bot_loop(mut c: Client, seed: u64) -> Client {
 #[tokio::test]
 async fn bots_play_a_whole_game_over_a_unix_socket_and_the_log_replays_it() {
     let r = start(2, 11, false).await;
-    let mut a = seat_client(&r, 0, "Ann", "m0-green").await;
-    let b = seat_client(&r, 1, "Bob", "m0-red").await;
+    let mut a = seat_client(&r, 0, "Ann", "green").await;
+    let b = seat_client(&r, 1, "Bob", "red").await;
     let mut spec = Client::connect(&r.endpoint).await.unwrap();
     let w = spec.hello(&r.spectator, None).await.unwrap();
     assert_eq!(w.role, protocol::Role::Spectator);
@@ -161,7 +161,7 @@ fn dummy_client() -> Client {
 #[tokio::test]
 async fn bots_play_over_tcp_at_four_seats() {
     let r = start(4, 5, true).await;
-    let decks = ["m0-white", "m0-blue", "m0-black", "m0-red"];
+    let decks = ["white", "blue", "black", "red"];
     let mut clients = Vec::new();
     for (i, d) in decks.iter().enumerate() {
         let mut c = seat_client(&r, i, &format!("P{i}"), d).await;
@@ -194,8 +194,8 @@ async fn versions_tokens_and_turn_order_are_enforced() {
     let err = bad.get_state().await.unwrap_err();
     assert!(matches!(err, ClientError::Protocol(e) if e.code == ErrorCode::BadRequest));
 
-    let mut a = seat_client(&r, 0, "A", "m0-green").await;
-    let mut b = seat_client(&r, 1, "B", "m0-red").await;
+    let mut a = seat_client(&r, 0, "A", "green").await;
+    let mut b = seat_client(&r, 1, "B", "red").await;
     // Ready without a deck is refused; a short deck is rejected with reasons.
     let mut c = Client::connect(&r.endpoint).await.unwrap();
     c.hello(&r.spectator, None).await.unwrap();
@@ -205,7 +205,7 @@ async fn versions_tokens_and_turn_order_are_enforced() {
     assert!(matches!(rejected[0], engine::Violation::TooFewCards { .. }));
     let rejected = a.set_deck("40 Black Lotus\n").await.unwrap().unwrap_err();
     assert!(matches!(rejected[0], engine::Violation::Unparsable { .. }));
-    a.set_deck(cards::deck_text("m0-green").unwrap()).await.unwrap().unwrap();
+    a.set_deck(cards::deck_text("green").unwrap()).await.unwrap().unwrap();
 
     a.ready().await.unwrap();
     b.ready().await.unwrap();
@@ -248,8 +248,8 @@ async fn versions_tokens_and_turn_order_are_enforced() {
 #[tokio::test]
 async fn a_seat_that_disconnects_keeps_its_seat_and_resumes() {
     let r = start(2, 8, false).await;
-    let mut a = seat_client(&r, 0, "A", "m0-green").await;
-    let mut b = seat_client(&r, 1, "B", "m0-red").await;
+    let mut a = seat_client(&r, 0, "A", "green").await;
+    let mut b = seat_client(&r, 1, "B", "red").await;
     a.ready().await.unwrap();
     b.ready().await.unwrap();
     let mut status = r.handle.status();
@@ -286,7 +286,7 @@ async fn a_seat_that_disconnects_keeps_its_seat_and_resumes() {
 #[tokio::test]
 async fn the_wire_never_carries_another_seats_hidden_information() {
     let r = start(2, 21, false).await;
-    let a = seat_client(&r, 0, "A", "m0-green").await;
+    let a = seat_client(&r, 0, "A", "green").await;
     let a_ready = async move {
         let mut a = a;
         a.ready().await.unwrap();
@@ -311,7 +311,7 @@ async fn the_wire_never_carries_another_seats_hidden_information() {
     };
     raw.request(ClientMessage::Hello { token: r.tokens[1].clone(), protocol_version: 1, name: Some("B".into()) })
         .await;
-    raw.request(ClientMessage::SetDeck { decklist: cards::deck_text("m0-red").unwrap().into(), commander: None })
+    raw.request(ClientMessage::SetDeck { decklist: cards::deck_text("red").unwrap().into(), commander: None })
         .await;
     raw.request(ClientMessage::Subscribe).await;
     let a = a_ready.await;

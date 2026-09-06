@@ -1,0 +1,10 @@
+Card(
+    name: "Goblin Chieftain",
+    cost: "{1}{R}{R}",
+    types: [Creature],
+    subtypes: ["Goblin"],
+    pt: (2, 2),
+    text: "Haste\nOther Goblin creatures you control get +1/+1 and have haste.",
+    keywords: [Haste],
+    statics: [PtBoost(filter: And([Other, Subtype("Goblin"), Creature, ControlledBy(You)]), power: Const(1), toughness: Const(1), keywords: [Haste])],
+)

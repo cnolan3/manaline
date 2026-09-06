@@ -1,0 +1,8 @@
+Card(
+    name: "Swamp",
+    types: [Land],
+    supertypes: [Basic],
+    subtypes: ["Swamp"],
+    text: "({T}: Add {B}.)",
+    activated: [Ability(cost: [Tap], effects: [AddMana(color: Black, amount: Const(1))])],
+)

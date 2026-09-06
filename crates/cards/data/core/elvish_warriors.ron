@@ -1,0 +1,8 @@
+Card(
+    name: "Elvish Warriors",
+    cost: "{G}{G}",
+    types: [Creature],
+    subtypes: ["Elf", "Warrior"],
+    pt: (2, 3),
+    text: "",
+)

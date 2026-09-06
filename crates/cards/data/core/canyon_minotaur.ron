@@ -1,0 +1,8 @@
+Card(
+    name: "Canyon Minotaur",
+    cost: "{3}{R}",
+    types: [Creature],
+    subtypes: ["Minotaur"],
+    pt: (3, 3),
+    text: "",
+)

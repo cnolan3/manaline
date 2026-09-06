@@ -1,0 +1,8 @@
+Card(
+    name: "Coral Merfolk",
+    cost: "{1}{U}",
+    types: [Creature],
+    subtypes: ["Merfolk"],
+    pt: (2, 1),
+    text: "",
+)

@@ -1,0 +1,8 @@
+Card(
+    name: "Pearled Unicorn",
+    cost: "{2}{W}",
+    types: [Creature],
+    subtypes: ["Unicorn"],
+    pt: (2, 2),
+    text: "",
+)

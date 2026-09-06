@@ -1,0 +1,9 @@
+Card(
+    name: "Garruk's Companion",
+    cost: "{G}{G}",
+    types: [Creature],
+    subtypes: ["Beast"],
+    pt: (3, 2),
+    text: "Trample (This creature can deal excess combat damage to the player or planeswalker it's attacking.)",
+    keywords: [Trample],
+)

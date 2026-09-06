@@ -1,0 +1,7 @@
+Card(
+    name: "Trumpet Blast",
+    cost: "{2}{R}",
+    types: [Instant],
+    text: "Attacking creatures get +2/+0 until end of turn.",
+    spell: Spell(effects: [ModifyPt(target: Each(And([Attacking, Creature])), power: Const(2), toughness: Const(0), until: EndOfTurn)]),
+)

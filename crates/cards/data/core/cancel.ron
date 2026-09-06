@@ -1,0 +1,7 @@
+Card(
+    name: "Cancel",
+    cost: "{1}{U}{U}",
+    types: [Instant],
+    text: "Counter target spell.",
+    spell: Spell(targets: [Spell], effects: [CounterSpell(target: Target(0))]),
+)

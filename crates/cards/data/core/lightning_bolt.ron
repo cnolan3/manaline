@@ -1,0 +1,7 @@
+Card(
+    name: "Lightning Bolt",
+    cost: "{R}",
+    types: [Instant],
+    text: "Lightning Bolt deals 3 damage to any target.",
+    spell: Spell(targets: [Any], effects: [DealDamage(amount: Const(3), to: Target(0))]),
+)

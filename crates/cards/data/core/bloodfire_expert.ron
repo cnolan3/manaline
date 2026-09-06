@@ -1,0 +1,9 @@
+Card(
+    name: "Bloodfire Expert",
+    cost: "{2}{R}",
+    types: [Creature],
+    subtypes: ["Efreet", "Monk"],
+    pt: (3, 1),
+    text: "Prowess (Whenever you cast a noncreature spell, this creature gets +1/+1 until end of turn.)",
+    keywords: [Prowess],
+)

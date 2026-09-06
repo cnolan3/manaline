@@ -1,0 +1,8 @@
+Card(
+    name: "Island",
+    types: [Land],
+    supertypes: [Basic],
+    subtypes: ["Island"],
+    text: "({T}: Add {U}.)",
+    activated: [Ability(cost: [Tap], effects: [AddMana(color: Blue, amount: Const(1))])],
+)

@@ -81,14 +81,18 @@ fn check_invariants(game: &Game, seats: usize) {
         }
     }
     for so in &game.stack {
-        assert!(seen.insert(so.object, Zone::Stack).is_none());
-        assert_eq!(game.objects[so.object].zone, Zone::Stack);
+        // Abilities and triggers reference their source, which stays where it is.
+        if so.kind == engine::StackKind::Spell {
+            assert!(seen.insert(so.object, Zone::Stack).is_none());
+            assert_eq!(game.objects[so.object].zone, Zone::Stack);
+        }
     }
     for (id, obj) in &game.objects {
         match obj.zone {
             Zone::OutOfGame => {
                 assert!(!seen.contains_key(&id));
-                assert!(game.is_eliminated(obj.owner), "{id} left the game but its owner is still playing");
+                let token = game.card_by_id(obj.card).token;
+                assert!(token || game.is_eliminated(obj.owner), "{id} left the game but its owner is still playing");
             }
             z => assert_eq!(seen.get(&id), Some(&z), "{id} says it is in {z:?} but no list holds it"),
         }

@@ -1,0 +1,9 @@
+Card(
+    name: "Vampire Nighthawk",
+    cost: "{1}{B}{B}",
+    types: [Creature],
+    subtypes: ["Vampire", "Shaman"],
+    pt: (2, 3),
+    text: "Flying\nDeathtouch (Any amount of damage this deals to a creature is enough to destroy it.)\nLifelink (Damage dealt by this creature also causes you to gain that much life.)",
+    keywords: [Flying, Deathtouch, Lifelink],
+)

@@ -10,12 +10,14 @@ pub struct Settings {
     /// choice, outside your own main phases) after `auto_pass_ms`.
     pub auto_pass: bool,
     pub auto_pass_ms: u64,
+    /// Give card boxes an extra row for keyword glyphs (flying, trample, ...).
+    pub card_keywords: bool,
     pub verbose_log: bool,
 }
 
 impl Default for Settings {
     fn default() -> Settings {
-        Settings { auto_pass: true, auto_pass_ms: 2000, verbose_log: false }
+        Settings { auto_pass: true, auto_pass_ms: 1500, card_keywords: true, verbose_log: false }
     }
 }
 

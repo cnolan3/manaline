@@ -29,11 +29,70 @@ impl Game {
             }
 
             for id in self.battlefield_objects() {
-                let Some((_, toughness)) = self.effective_stats(id) else { continue };
-                if toughness <= 0 || self.objects[id].damage >= toughness {
-                    self.move_object(id, Zone::Graveyard);
+                let def = self.card_def(id).clone();
+                if let Some((_, toughness)) = self.effective_stats(id) {
+                    let obj = &self.objects[id];
+                    if toughness <= 0 {
+                        self.move_object(id, Zone::Graveyard);
+                        acted = true;
+                        continue;
+                    }
+                    if (obj.damage >= toughness || obj.deathtouch_damaged)
+                        && !self.has_keyword(id, crate::types::Keyword::Indestructible)
+                    {
+                        self.move_object(id, Zone::Graveyard);
+                        acted = true;
+                        continue;
+                    }
+                }
+                // +1/+1 and -1/-1 counters annihilate (rule 704.5q).
+                let c = &self.objects[id].counters;
+                if c.plus1 > 0 && c.minus1 > 0 {
+                    let n = c.plus1.min(c.minus1);
+                    let c = &mut self.objects[id].counters;
+                    c.plus1 -= n;
+                    c.minus1 -= n;
                     acted = true;
                 }
+                // An aura attached to nothing legal goes to the graveyard (704.5m);
+                // equipment attached illegally becomes unattached (704.5n).
+                if def.is_aura() || def.is_equipment() {
+                    let attached = self.objects[id].attached_to;
+                    let legal = attached
+                        .and_then(|t| self.objects.get(t))
+                        .map(|t| t.zone == Zone::Battlefield)
+                        .unwrap_or(false)
+                        && attached
+                            .map(|t| {
+                                let ctx = crate::filter::Ctx::simple(self.objects[id].controller, Some(id));
+                                match &def.ir.enchant {
+                                    Some(f) => self.object_matches(t, f, &ctx),
+                                    None => self.is_creature(t) && self.objects[t].controller == self.objects[id].controller,
+                                }
+                            })
+                            .unwrap_or(false);
+                    if !legal {
+                        if def.is_aura() {
+                            self.move_object(id, Zone::Graveyard);
+                            acted = true;
+                        } else if attached.is_some() {
+                            self.objects[id].attached_to = None;
+                            acted = true;
+                        }
+                    }
+                }
+            }
+            // Tokens anywhere but the battlefield cease to exist (704.5d).
+            let stray_tokens: Vec<ObjectId> = self
+                .objects
+                .iter()
+                .filter(|(_, o)| o.zone != Zone::Battlefield && o.zone != Zone::OutOfGame && o.zone != Zone::Stack)
+                .filter(|(_, o)| self.card_by_id(o.card).token)
+                .map(|(id, _)| id)
+                .collect();
+            for id in stray_tokens {
+                self.move_object(id, Zone::OutOfGame);
+                acted = true;
             }
 
             if !acted {
@@ -90,6 +149,7 @@ impl Game {
             self.move_object(id, Zone::OutOfGame);
         }
         self.stack.retain(|s| s.controller != seat);
+        self.fired.retain(|f| f.controller != seat);
 
         // Creatures attacking a player who left are removed from combat.
         for (_, o) in self.objects.iter_mut() {
@@ -114,6 +174,14 @@ impl Game {
                 Some(PendingChoice::DeclareBlockers { remaining, .. }) => self.continue_blockers(remaining),
                 Some(PendingChoice::Mulligan { .. }) | Some(PendingChoice::BottomCards { .. }) => {
                     self.advance_mulligan(seat)
+                }
+                Some(PendingChoice::ChooseTargets { .. }) => {
+                    if self.place_triggers() && self.priority.is_none() {
+                        self.give_priority_to_active();
+                    }
+                }
+                Some(PendingChoice::Sacrifice { resume, .. }) | Some(PendingChoice::EffectDiscard { resume, .. }) => {
+                    self.resume(resume)
                 }
                 _ => {}
             }

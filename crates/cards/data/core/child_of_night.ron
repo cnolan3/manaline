@@ -1,0 +1,9 @@
+Card(
+    name: "Child of Night",
+    cost: "{1}{B}",
+    types: [Creature],
+    subtypes: ["Vampire"],
+    pt: (2, 1),
+    text: "Lifelink (Damage dealt by this creature also causes you to gain that much life.)",
+    keywords: [Lifelink],
+)

@@ -1,0 +1,8 @@
+Card(
+    name: "Zombie Goliath",
+    cost: "{4}{B}",
+    types: [Creature],
+    subtypes: ["Zombie", "Giant"],
+    pt: (4, 3),
+    text: "",
+)

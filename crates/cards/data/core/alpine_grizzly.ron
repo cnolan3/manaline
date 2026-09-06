@@ -1,0 +1,8 @@
+Card(
+    name: "Alpine Grizzly",
+    cost: "{2}{G}",
+    types: [Creature],
+    subtypes: ["Bear"],
+    pt: (4, 2),
+    text: "",
+)

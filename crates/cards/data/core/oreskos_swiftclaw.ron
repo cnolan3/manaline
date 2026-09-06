@@ -1,0 +1,8 @@
+Card(
+    name: "Oreskos Swiftclaw",
+    cost: "{1}{W}",
+    types: [Creature],
+    subtypes: ["Cat", "Warrior"],
+    pt: (3, 1),
+    text: "",
+)

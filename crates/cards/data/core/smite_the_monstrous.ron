@@ -1,0 +1,7 @@
+Card(
+    name: "Smite the Monstrous",
+    cost: "{3}{W}",
+    types: [Instant],
+    text: "Destroy target creature with power 4 or greater.",
+    spell: Spell(targets: [And([Creature, PowerAtLeast(4)])], effects: [Destroy(target: Target(0))]),
+)

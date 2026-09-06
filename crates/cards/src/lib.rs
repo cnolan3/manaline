@@ -6,100 +6,37 @@
 //! M3 this crate loads card IR files instead; the loader's interface
 //! (`core()` → `CardDb`) does not change.
 
-use engine::{CardDb, CardDef, CardId, CardType, Color, ManaCost};
+use engine::{CardDb, CardId};
+use include_dir::{include_dir, Dir};
 
-const SET: &str = "core";
+/// The card files, embedded at build time. One `.ron` per Oracle name.
+static CORE: Dir = include_dir!("$CARGO_MANIFEST_DIR/data/core");
 
-fn basic(name: &str, color: Color) -> CardDef {
-    CardDef {
-        name: name.into(),
-        cost: ManaCost::default(),
-        types: vec![CardType::Land],
-        subtypes: vec![name.into()],
-        pt: None,
-        text: format!("({{T}}: Add {{{}}}.)", color.symbol()),
-        set: SET.into(),
-        basic: true,
-        produces: vec![color],
-    }
-}
-
-fn creature(name: &str, cost: &str, subtypes: &str, power: i32, toughness: i32) -> CardDef {
-    CardDef {
-        name: name.into(),
-        cost: ManaCost::parse(cost).unwrap_or_else(|e| panic!("{name}: {e}")),
-        types: vec![CardType::Creature],
-        subtypes: subtypes.split_whitespace().map(String::from).collect(),
-        pt: Some((power, toughness)),
-        text: String::new(),
-        set: SET.into(),
-        basic: false,
-        produces: Vec::new(),
-    }
-}
-
-/// Every card definition in the built-in "core" set.
-pub fn core_cards() -> Vec<CardDef> {
-    vec![
-        basic("Plains", Color::White),
-        basic("Island", Color::Blue),
-        basic("Swamp", Color::Black),
-        basic("Mountain", Color::Red),
-        basic("Forest", Color::Green),
-        // White
-        creature("Savannah Lions", "{W}", "Cat", 2, 1),
-        creature("Devoted Hero", "{W}", "Elf Soldier", 1, 2),
-        creature("Eager Cadet", "{W}", "Human Soldier", 1, 1),
-        creature("Glory Seeker", "{1}{W}", "Human Soldier", 2, 2),
-        creature("Oreskos Swiftclaw", "{1}{W}", "Cat Warrior", 3, 1),
-        creature("Pearled Unicorn", "{2}{W}", "Unicorn", 2, 2),
-        creature("Regal Unicorn", "{2}{W}", "Unicorn", 2, 3),
-        creature("Alaborn Trooper", "{2}{W}", "Human Soldier", 2, 3),
-        // Blue
-        creature("Merfolk of the Pearl Trident", "{U}", "Merfolk", 1, 1),
-        creature("Fugitive Wizard", "{U}", "Human Wizard", 1, 1),
-        creature("Coral Merfolk", "{1}{U}", "Merfolk", 2, 1),
-        creature("Vodalian Soldiers", "{1}{U}", "Merfolk Soldier", 1, 2),
-        creature("Horned Turtle", "{2}{U}", "Turtle", 1, 4),
-        // Black
-        creature("Muck Rats", "{B}", "Rat", 1, 1),
-        creature("Walking Corpse", "{1}{B}", "Zombie", 2, 2),
-        creature("Scathe Zombies", "{2}{B}", "Zombie", 2, 2),
-        creature("Undead Minotaur", "{3}{B}", "Zombie Minotaur", 2, 3),
-        creature("Zombie Goliath", "{4}{B}", "Zombie Giant", 4, 3),
-        // Red
-        creature("Goblin Piker", "{1}{R}", "Goblin Warrior", 2, 1),
-        creature("Gray Ogre", "{2}{R}", "Ogre", 2, 2),
-        creature("Balduvian Barbarians", "{1}{R}{R}", "Human Barbarian", 3, 2),
-        creature("Hill Giant", "{3}{R}", "Giant", 3, 3),
-        creature("Canyon Minotaur", "{3}{R}", "Minotaur", 3, 3),
-        creature("Borderland Minotaur", "{3}{R}", "Minotaur Warrior", 4, 3),
-        creature("Fire Elemental", "{3}{R}{R}", "Elemental", 5, 4),
-        // Green
-        creature("Grizzly Bears", "{1}{G}", "Bear", 2, 2),
-        creature("Runeclaw Bear", "{1}{G}", "Bear", 2, 2),
-        creature("Terrain Elemental", "{1}{G}", "Elemental", 3, 2),
-        creature("Elvish Warriors", "{G}{G}", "Elf Warrior", 2, 3),
-        creature("Centaur Courser", "{2}{G}", "Centaur Warrior", 3, 3),
-        creature("Alpine Grizzly", "{2}{G}", "Bear", 4, 2),
-        creature("Rumbling Baloth", "{2}{G}{G}", "Beast", 4, 4),
-        creature("Grizzled Outrider", "{4}{G}", "Elf Warrior", 5, 5),
-        creature("Craw Wurm", "{4}{G}{G}", "Wurm", 6, 4),
-    ]
+/// Every card in the built-in "core" set as IR, in file-name order.
+pub fn core_ir() -> Vec<cardir::Card> {
+    let mut files: Vec<_> = CORE.files().filter(|f| f.path().extension().is_some_and(|e| e == "ron")).collect();
+    files.sort_by_key(|f| f.path().to_path_buf());
+    files
+        .into_iter()
+        .map(|f| {
+            let text = f.contents_utf8().expect("card file is UTF-8");
+            cardir::load(text).unwrap_or_else(|e| panic!("{}: {e}", f.path().display()))
+        })
+        .collect()
 }
 
 /// The built-in "core" card database.
 pub fn core() -> CardDb {
-    CardDb::new(core_cards()).expect("core card table is consistent")
+    CardDb::from_ir("core", core_ir()).expect("core card set is consistent")
 }
 
 /// Starter decklists shipped in `decks/`, as `(name, text)`.
 pub const DECKS: &[(&str, &str)] = &[
-    ("m0-white", include_str!("../../../decks/m0-white.txt")),
-    ("m0-blue", include_str!("../../../decks/m0-blue.txt")),
-    ("m0-black", include_str!("../../../decks/m0-black.txt")),
-    ("m0-red", include_str!("../../../decks/m0-red.txt")),
-    ("m0-green", include_str!("../../../decks/m0-green.txt")),
+    ("white", include_str!("../../../decks/white.txt")),
+    ("blue", include_str!("../../../decks/blue.txt")),
+    ("black", include_str!("../../../decks/black.txt")),
+    ("red", include_str!("../../../decks/red.txt")),
+    ("green", include_str!("../../../decks/green.txt")),
 ];
 
 pub fn deck_text(name: &str) -> Option<&'static str> {
@@ -165,9 +102,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn every_card_round_trips_to_its_oracle_text() {
+        let mut failures = Vec::new();
+        for card in core_ir() {
+            if let Err((want, got)) = cardir::round_trips(&card) {
+                failures.push(format!("{}\n  oracle:   {want}\n  rendered: {got}", card.name));
+            }
+        }
+        assert!(failures.is_empty(), "{} card(s) do not round-trip:\n{}", failures.len(), failures.join("\n"));
+    }
+
+    #[test]
     fn core_loads_and_decks_parse() {
         let db = core();
-        assert!(db.len() > 30);
+        assert!(db.len() > 70, "{}", db.len());
         for (name, text) in DECKS {
             let deck = parse_decklist(text, &db).unwrap_or_else(|e| panic!("{name}: {e}"));
             assert_eq!(deck.len(), 40, "{name}");

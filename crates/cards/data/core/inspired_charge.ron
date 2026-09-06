@@ -1,0 +1,7 @@
+Card(
+    name: "Inspired Charge",
+    cost: "{2}{W}{W}",
+    types: [Instant],
+    text: "Creatures you control get +2/+1 until end of turn.",
+    spell: Spell(effects: [ModifyPt(target: Each(And([Creature, ControlledBy(You)])), power: Const(2), toughness: Const(1), until: EndOfTurn)]),
+)

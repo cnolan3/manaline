@@ -8,7 +8,7 @@ use crate::objects::Objects;
 use crate::error::RulesError;
 use crate::event::Event;
 use crate::format::Format;
-use crate::types::{ManaPool, ObjectId, Phase, Seat, Zone};
+use crate::types::{Keyword, ManaPool, ObjectId, Phase, Seat, Zone};
 use crate::view::{GameView, HandView, LibraryView, ObjectView, PlayerView, StackObjectView};
 use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
@@ -75,7 +75,14 @@ pub enum PendingChoice {
     DeclareBlockers { seat: Seat, remaining: Vec<Seat> },
     /// `attacker` needs a damage division now; `queue` holds the rest.
     AssignDamage { seat: Seat, attacker: ObjectId, queue: Vec<ObjectId> },
+    /// Cleanup-step hand size.
     Discard { seat: Seat, count: u8 },
+    /// A trigger needs targets before it goes on the stack.
+    ChooseTargets { seat: Seat, specs: Vec<cardir::Filter>, trigger: crate::triggers::FiredTrigger },
+    /// An effect asks `seat` to sacrifice `count` permanents matching `filter`.
+    Sacrifice { seat: Seat, filter: cardir::Filter, count: i32, resume: crate::stack::Resume },
+    /// An effect asks `seat` to discard `count` cards of their choice.
+    EffectDiscard { seat: Seat, count: i32, resume: crate::stack::Resume },
 }
 
 impl PendingChoice {
@@ -86,7 +93,10 @@ impl PendingChoice {
             | PendingChoice::DeclareAttackers { seat }
             | PendingChoice::DeclareBlockers { seat, .. }
             | PendingChoice::AssignDamage { seat, .. }
-            | PendingChoice::Discard { seat, .. } => *seat,
+            | PendingChoice::Discard { seat, .. }
+            | PendingChoice::ChooseTargets { seat, .. }
+            | PendingChoice::Sacrifice { seat, .. }
+            | PendingChoice::EffectDiscard { seat, .. } => *seat,
         }
     }
 
@@ -97,16 +107,34 @@ impl PendingChoice {
             PendingChoice::DeclareAttackers { .. } => ActReason::DeclareAttackers,
             PendingChoice::DeclareBlockers { .. } => ActReason::DeclareBlockers,
             PendingChoice::AssignDamage { .. } => ActReason::AssignDamage,
-            PendingChoice::Discard { .. } => ActReason::Discard,
+            PendingChoice::Discard { .. } | PendingChoice::EffectDiscard { .. } => ActReason::Discard,
+            PendingChoice::ChooseTargets { .. } | PendingChoice::Sacrifice { .. } => ActReason::Choice,
         }
     }
 }
 
+/// What an entry on the stack is.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StackKind {
+    /// The card itself is on the stack.
+    Spell,
+    /// An activated ability of `source` (which stays where it is).
+    Ability { source: ObjectId, index: u8 },
+    /// The equip ability of an Equipment.
+    Equip { source: ObjectId },
+    /// A triggered ability of `source`.
+    Trigger { source: ObjectId, index: u8, triggering: Option<Target> },
+    /// The prowess trigger.
+    Prowess { source: ObjectId },
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StackObject {
+    /// The spell card, or the source of an ability or trigger.
     pub object: ObjectId,
     pub controller: Seat,
     pub targets: Vec<Target>,
+    pub kind: StackKind,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -118,6 +146,7 @@ pub struct Counters {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ModifierKind {
     Pt { power: i32, toughness: i32 },
+    Keyword(Keyword),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -152,6 +181,9 @@ pub struct GameObject {
     /// Blockers in the order they were declared.
     pub blocked_by: Vec<ObjectId>,
     pub modifiers: Vec<Modifier>,
+    /// Took damage from a deathtouch source this turn (rule 704.5h).
+    #[serde(default)]
+    pub deathtouch_damaged: bool,
 }
 
 impl GameObject {
@@ -172,6 +204,7 @@ impl GameObject {
             blocked: false,
             blocked_by: Vec::new(),
             modifiers: Vec::new(),
+            deathtouch_damaged: false,
         }
     }
 
@@ -187,6 +220,7 @@ impl GameObject {
         self.blocked = false;
         self.blocked_by.clear();
         self.modifiers.clear();
+        self.deathtouch_damaged = false;
     }
 }
 
@@ -247,6 +281,24 @@ pub struct Game {
     /// Set when the active player leaves the game: the turn ends at the next opportunity.
     pub(crate) turn_aborted: bool,
     pub(crate) damage_assignments: BTreeMap<ObjectId, Vec<(DamageTarget, i32)>>,
+    /// Tokens created this game; `CardId`s from `cards.len()` upwards index here.
+    pub(crate) tokens: Vec<CardDef>,
+    /// Triggers that fired but are not yet on the stack.
+    pub(crate) fired: Vec<crate::triggers::FiredTrigger>,
+    /// Events before this index have been scanned for triggers.
+    pub(crate) trigger_cursor: usize,
+    /// Which combat damage round is next / done.
+    pub(crate) combat_round: CombatRound,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CombatRound {
+    /// Not in the combat damage step.
+    None,
+    /// First-strike damage was dealt; regular damage is still to come.
+    FirstStrikeDone,
+    /// Regular damage dealt (or no first strike this combat).
+    Done,
 }
 
 impl std::fmt::Debug for Game {
@@ -341,6 +393,10 @@ impl Game {
             started: false,
             turn_aborted: false,
             damage_assignments: BTreeMap::new(),
+            tokens: Vec::new(),
+            fired: Vec::new(),
+            trigger_cursor: 0,
+            combat_round: CombatRound::None,
         };
         game.emit(Event::GameStarted { starting_player: starting, seats: n as u8 });
         for seat in seating {
@@ -350,6 +406,7 @@ impl Game {
         if starting_hand > 0 {
             game.pending = Some(PendingChoice::Mulligan { seat: game.seating[0] });
         }
+        game.trigger_cursor = game.log.len();
         game.settle();
         Ok(game)
     }
@@ -421,11 +478,24 @@ impl Game {
             self.validate_division(seat, action)?;
         } else {
             let canon = action.canonical();
-            if !self.legal_actions(seat).iter().any(|a| a.canonical() == canon) {
-                return Err(RulesError::illegal(format!(
-                    "{} is not a legal action for {seat} right now",
-                    crate::text::describe_action(self, action)
-                )));
+            let legal = self.legal_actions(seat);
+            if !legal.iter().any(|a| a.canonical() == canon) {
+                // A cast or activation may name its own mana sources: accept it
+                // if everything but the tapped permanents matches a listed
+                // action and the payment covers the cost (§10).
+                let listed_twin = legal.iter().find(|a| a.same_except_mana(action));
+                match (listed_twin, action.mana_cost_in(self)) {
+                    (Some(_), Some(cost)) => {
+                        let payment = action.payment().expect("cast or activation");
+                        self.payment_covers(seat, payment, &cost)?;
+                    }
+                    _ => {
+                        return Err(RulesError::illegal(format!(
+                            "{} is not a legal action for {seat} right now",
+                            crate::text::describe_action(self, action)
+                        )))
+                    }
+                }
             }
         }
         let start = self.log.len();
@@ -443,12 +513,26 @@ impl Game {
             Action::CastSpell { object, targets, payment } => {
                 self.cast_spell(seat, *object, targets, payment)?
             }
+            Action::ActivateAbility { object, ability, targets, payment } => {
+                self.activate_ability(seat, *object, *ability, targets, payment)?
+            }
+            Action::ChooseTargets { targets } => match &self.pending {
+                Some(PendingChoice::ChooseTargets { .. }) => self.choose_trigger_targets(targets),
+                Some(PendingChoice::Sacrifice { .. }) => {
+                    let objects: Vec<ObjectId> = targets.iter().filter_map(|t| match t { Target::Object(o) => Some(*o), _ => None }).collect();
+                    self.answer_choice(seat, &objects)
+                }
+                _ => return Err(RulesError::illegal("nothing to choose")),
+            },
             Action::DeclareAttackers { attackers } => self.declare_attackers(seat, attackers),
             Action::DeclareBlockers { blocks } => self.declare_blockers(seat, blocks),
             Action::AssignCombatDamage { attacker, assignments } => {
                 self.assign_combat_damage(seat, *attacker, assignments)
             }
-            Action::Discard { objects } => self.discard_to_hand_size(seat, objects),
+            Action::Discard { objects } => match &self.pending {
+                Some(PendingChoice::EffectDiscard { .. }) => self.answer_choice(seat, objects),
+                _ => self.discard_to_hand_size(seat, objects),
+            },
             Action::Mulligan { keep } => self.mulligan(seat, *keep),
             Action::BottomCards { objects } => self.bottom_cards(seat, objects),
             Action::Concede => self.eliminate(seat, Elimination::Conceded),
@@ -477,7 +561,7 @@ impl Game {
                 self.legal_actions(s)
                     .iter()
                     .filter_map(|a| match a {
-                        Action::PlayLand { object } | Action::CastSpell { object, .. } => Some(*object),
+                        Action::PlayLand { object } | Action::CastSpell { object, .. } | Action::ActivateAbility { object, .. } => Some(*object),
                         _ => None,
                     })
                     .collect()
@@ -521,7 +605,17 @@ impl Game {
             if !visible {
                 continue;
             }
-            let def = self.cards.get(obj.card);
+            let def = self.card_by_id(obj.card);
+            let mut abilities: Vec<String> = def
+                .ir
+                .activated
+                .iter()
+                .filter(|a| !a.is_mana_ability())
+                .map(|a| crate::text::render_ability(def, a))
+                .collect();
+            if let Some(e) = &def.ir.equip {
+                abilities.push(format!("Equip {e}"));
+            }
             objects.insert(
                 id,
                 ObjectView {
@@ -532,7 +626,7 @@ impl Game {
                     types: def.types.clone(),
                     subtypes: def.subtypes.clone(),
                     text: def.text.clone(),
-                    produces: def.produces.clone(),
+                    produces: def.produces(),
                     owner: obj.owner,
                     controller: obj.controller,
                     zone: obj.zone,
@@ -543,6 +637,11 @@ impl Game {
                     attacking: obj.attacking,
                     blocking: obj.blocking.clone(),
                     castable: castable.contains(&id),
+                    keywords: if obj.zone == Zone::Battlefield { self.keywords_of(id) } else { def.keywords.clone() },
+                    attached_to: obj.attached_to,
+                    token: def.token,
+                    counters: obj.counters.plus1 as i32 - obj.counters.minus1 as i32,
+                    abilities,
                 },
             );
         }
@@ -555,6 +654,14 @@ impl Game {
                 name: self.object_name(s.object).to_string(),
                 controller: s.controller,
                 targets: s.targets.clone(),
+                kind: match s.kind {
+                    StackKind::Spell => "spell",
+                    StackKind::Ability { .. } => "ability",
+                    StackKind::Equip { .. } => "equip",
+                    StackKind::Trigger { .. } | StackKind::Prowess { .. } => "trigger",
+                }
+                .into(),
+                description: self.describe_stack_kind(&s.kind),
             })
             .collect();
 
@@ -576,7 +683,17 @@ impl Game {
     // ----- queries -----
 
     pub fn card_def(&self, id: ObjectId) -> &CardDef {
-        self.cards.get(self.objects[id].card)
+        self.card_by_id(self.objects[id].card)
+    }
+
+    /// A card definition by id: from the database, or a token created this game.
+    pub fn card_by_id(&self, card: CardId) -> &CardDef {
+        let n = self.cards.len() as u32;
+        if card < n {
+            self.cards.get(card)
+        } else {
+            &self.tokens[(card - n) as usize]
+        }
     }
 
     pub fn object_name(&self, id: ObjectId) -> &str {
@@ -600,22 +717,86 @@ impl Game {
         self.turn_order.iter().copied().filter(move |&s| s != seat)
     }
 
-    /// Effective power and toughness (§3.4): base, then counters and modifiers.
-    /// Recomputed on every call, never cached. `None` for non-creatures.
+    /// Effective power and toughness (§3.4, layer 7 only): base, then static
+    /// boosts from permanents on the battlefield, then counters and
+    /// "until end of turn" modifiers. Recomputed on every call, never cached.
+    /// `None` for non-creatures.
     pub fn effective_stats(&self, id: ObjectId) -> Option<(i32, i32)> {
-        let obj = &self.objects[id];
-        let (mut p, mut t) = self.cards.get(obj.card).pt?;
-        p += obj.counters.plus1 as i32 - obj.counters.minus1 as i32;
-        t += obj.counters.plus1 as i32 - obj.counters.minus1 as i32;
-        for m in &obj.modifiers {
-            match m.kind {
-                ModifierKind::Pt { power, toughness } => {
-                    p += power;
-                    t += toughness;
+        let obj = self.objects.get(id)?;
+        let (mut p, mut t) = self.card_by_id(obj.card).pt?;
+        if obj.zone == Zone::Battlefield {
+            for (source, static_) in self.active_statics() {
+                if let cardir::Static::PtBoost { filter, power, toughness, .. } = static_ {
+                    let ctx = crate::filter::Ctx::simple(self.objects[source].controller, Some(source));
+                    if self.object_matches(id, filter, &ctx) {
+                        p += self.eval_amount(power, &ctx);
+                        t += self.eval_amount(toughness, &ctx);
+                    }
                 }
             }
         }
+        p += obj.counters.plus1 as i32 - obj.counters.minus1 as i32;
+        t += obj.counters.plus1 as i32 - obj.counters.minus1 as i32;
+        for m in &obj.modifiers {
+            if let ModifierKind::Pt { power, toughness } = m.kind {
+                p += power;
+                t += toughness;
+            }
+        }
         Some((p, t))
+    }
+
+    /// Does the object have the keyword right now: printed, granted by a
+    /// static on the battlefield, or granted until end of turn?
+    pub fn has_keyword(&self, id: ObjectId, kw: Keyword) -> bool {
+        let Some(obj) = self.objects.get(id) else { return false };
+        if self.card_def(id).has_keyword(kw) {
+            return true;
+        }
+        if obj.modifiers.iter().any(|m| m.kind == ModifierKind::Keyword(kw)) {
+            return true;
+        }
+        if obj.zone != Zone::Battlefield {
+            return false;
+        }
+        for (source, static_) in self.active_statics() {
+            let ctx = crate::filter::Ctx::simple(self.objects[source].controller, Some(source));
+            match static_ {
+                cardir::Static::PtBoost { filter, keywords, .. } if keywords.contains(&kw) => {
+                    if self.object_matches(id, filter, &ctx) {
+                        return true;
+                    }
+                }
+                cardir::Static::GrantKeyword { filter, keyword } if *keyword == kw => {
+                    if self.object_matches(id, filter, &ctx) {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    /// Every keyword the object has right now.
+    pub fn keywords_of(&self, id: ObjectId) -> Vec<Keyword> {
+        Keyword::ALL.iter().copied().filter(|k| self.has_keyword(id, *k)).collect()
+    }
+
+    /// The static abilities of every permanent on the battlefield, with their source.
+    /// An aura or equipment's statics apply only while it is attached.
+    pub(crate) fn active_statics(&self) -> Vec<(ObjectId, &cardir::Static)> {
+        let mut out = Vec::new();
+        for id in self.battlefield_objects() {
+            let def = self.card_def(id);
+            if (def.is_aura() || def.is_equipment()) && self.objects[id].attached_to.is_none() {
+                continue;
+            }
+            for s in &def.ir.statics {
+                out.push((id, s));
+            }
+        }
+        out
     }
 
     pub fn power(&self, id: ObjectId) -> i32 {
@@ -779,35 +960,6 @@ impl Game {
         self.players[seat.index()].lands_played_this_turn += 1;
         self.emit(Event::LandPlayed { seat, object });
         self.give_priority(seat);
-    }
-
-    pub(crate) fn cast_spell(
-        &mut self,
-        seat: Seat,
-        object: ObjectId,
-        targets: &[Target],
-        payment: &crate::action::ManaPayment,
-    ) -> Result<(), RulesError> {
-        let cost = self.card_def(object).cost.clone();
-        self.pay_mana(seat, payment, &cost)?;
-        self.objects[object].controller = seat;
-        self.move_object(object, Zone::Stack);
-        self.stack.push(StackObject { object, controller: seat, targets: targets.to_vec() });
-        self.emit(Event::Cast { seat, object, targets: targets.to_vec() });
-        self.give_priority(seat);
-        Ok(())
-    }
-
-    pub(crate) fn resolve(&mut self, so: StackObject) {
-        let permanent = self.card_def(so.object).is_permanent();
-        if permanent {
-            self.objects[so.object].controller = so.controller;
-            self.move_object(so.object, Zone::Battlefield);
-            self.objects[so.object].summoning_sick = true;
-        } else {
-            self.move_object(so.object, Zone::Graveyard);
-        }
-        self.emit(Event::Resolved { object: so.object });
     }
 
     pub(crate) fn discard_to_hand_size(&mut self, seat: Seat, objects: &[ObjectId]) {

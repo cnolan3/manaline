@@ -1,0 +1,7 @@
+Card(
+    name: "Divination",
+    cost: "{2}{U}",
+    types: [Sorcery],
+    text: "Draw two cards.",
+    spell: Spell(effects: [Draw(player: You, count: Const(2))]),
+)

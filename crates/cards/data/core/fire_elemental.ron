@@ -1,0 +1,8 @@
+Card(
+    name: "Fire Elemental",
+    cost: "{3}{R}{R}",
+    types: [Creature],
+    subtypes: ["Elemental"],
+    pt: (5, 4),
+    text: "",
+)

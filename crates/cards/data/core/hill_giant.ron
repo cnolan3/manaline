@@ -1,0 +1,8 @@
+Card(
+    name: "Hill Giant",
+    cost: "{3}{R}",
+    types: [Creature],
+    subtypes: ["Giant"],
+    pt: (3, 3),
+    text: "",
+)

@@ -1,0 +1,9 @@
+Card(
+    name: "Benalish Marshal",
+    cost: "{W}{W}{W}",
+    types: [Creature],
+    subtypes: ["Human", "Knight"],
+    pt: (3, 3),
+    text: "Other creatures you control get +1/+1.",
+    statics: [PtBoost(filter: And([Other, Creature, ControlledBy(You)]), power: Const(1), toughness: Const(1))],
+)

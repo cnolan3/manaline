@@ -1,0 +1,7 @@
+Card(
+    name: "Naturalize",
+    cost: "{1}{G}",
+    types: [Instant],
+    text: "Destroy target artifact or enchantment.",
+    spell: Spell(targets: [Or([Artifact, Enchantment])], effects: [Destroy(target: Target(0))]),
+)

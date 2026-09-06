@@ -1,0 +1,7 @@
+Card(
+    name: "Doom Blade",
+    cost: "{1}{B}",
+    types: [Instant],
+    text: "Destroy target nonblack creature.",
+    spell: Spell(targets: [And([Not(Color(Black)), Creature])], effects: [Destroy(target: Target(0))]),
+)

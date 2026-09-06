@@ -1,0 +1,8 @@
+Card(
+    name: "Eager Cadet",
+    cost: "{W}",
+    types: [Creature],
+    subtypes: ["Human", "Soldier"],
+    pt: (1, 1),
+    text: "",
+)

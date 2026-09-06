@@ -1,0 +1,8 @@
+Card(
+    name: "Goblin Piker",
+    cost: "{1}{R}",
+    types: [Creature],
+    subtypes: ["Goblin", "Warrior"],
+    pt: (2, 1),
+    text: "",
+)

@@ -1,0 +1,8 @@
+Card(
+    name: "Gray Ogre",
+    cost: "{2}{R}",
+    types: [Creature],
+    subtypes: ["Ogre"],
+    pt: (2, 2),
+    text: "",
+)

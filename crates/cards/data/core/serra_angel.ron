@@ -1,0 +1,9 @@
+Card(
+    name: "Serra Angel",
+    cost: "{3}{W}{W}",
+    types: [Creature],
+    subtypes: ["Angel"],
+    pt: (4, 4),
+    text: "Flying, vigilance",
+    keywords: [Flying, Vigilance],
+)

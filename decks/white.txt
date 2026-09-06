@@ -1,0 +1,18 @@
+// Starter: mono-white weenies, auras, and tricks. 40 cards.
+Deck
+17 Plains
+3 Savannah Lions
+2 Suntail Hawk
+3 Youthful Knight
+1 Glory Seeker
+2 Benalish Marshal
+1 Serra Angel
+2 Raise the Alarm
+2 Holy Strength
+1 Serra's Embrace
+1 Angelic Blessing
+1 Inspired Charge
+1 Divine Verdict
+1 Smite the Monstrous
+1 Revitalize
+1 Leonin Scimitar

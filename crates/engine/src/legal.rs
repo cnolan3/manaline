@@ -2,6 +2,8 @@
 //! division actions (§3's carve-out).
 
 use crate::action::{Action, AttackTarget, DamageTarget};
+use crate::filter::Ctx;
+use crate::types::Keyword;
 use crate::error::RulesError;
 use crate::game::{Game, PendingChoice};
 use crate::types::{ObjectId, Seat};
@@ -39,6 +41,33 @@ impl Game {
                         acts.push(Action::Discard { objects });
                     }
                 }
+                PendingChoice::EffectDiscard { count, .. } => {
+                    let hand = self.sorted_hand(seat);
+                    let n = (*count as usize).min(hand.len());
+                    for objects in combinations(&hand, n) {
+                        acts.push(Action::Discard { objects });
+                    }
+                }
+                PendingChoice::ChooseTargets { specs, trigger, .. } => {
+                    let ctx = Ctx { you: seat, this: Some(trigger.source), targets: Vec::new(), triggering: trigger.triggering };
+                    for targets in self.target_combos(specs, &ctx).unwrap_or_default() {
+                        acts.push(Action::ChooseTargets { targets });
+                    }
+                }
+                PendingChoice::Sacrifice { filter, count, .. } => {
+                    let ctx = Ctx::simple(seat, None);
+                    let mut candidates: Vec<ObjectId> = self.players[seat.index()]
+                        .battlefield
+                        .iter()
+                        .copied()
+                        .filter(|&c| self.object_matches(c, filter, &ctx))
+                        .collect();
+                    candidates.sort();
+                    let n = (*count as usize).min(candidates.len());
+                    for objects in combinations(&candidates, n) {
+                        acts.push(Action::ChooseTargets { targets: objects.into_iter().map(crate::action::Target::Object).collect() });
+                    }
+                }
             },
             Some(_) => return acts,
             None => {
@@ -46,26 +75,201 @@ impl Game {
                     return acts;
                 }
                 acts.push(Action::PassPriority);
-                if self.stack.is_empty() && self.phase.is_main() && self.active_player == seat {
-                    let can_play_land = self.players[seat.index()].lands_played_this_turn < 1;
+                let sorcery_timing = self.stack.is_empty() && self.phase.is_main() && self.active_player == seat;
+                if sorcery_timing && self.players[seat.index()].lands_played_this_turn < 1 {
                     for id in self.sorted_hand(seat) {
-                        let def = self.card_def(id);
-                        if def.is_land() {
-                            if can_play_land {
-                                acts.push(Action::PlayLand { object: id });
-                            }
-                            continue;
+                        if self.card_def(id).is_land() {
+                            acts.push(Action::PlayLand { object: id });
                         }
-                        if def.is_creature() {
-                            for payment in self.enumerate_payments(seat, &def.cost) {
-                                acts.push(Action::CastSpell { object: id, targets: Vec::new(), payment });
+                    }
+                }
+                for id in self.sorted_hand(seat) {
+                    let def = self.card_def(id).clone();
+                    if def.is_land() {
+                        continue;
+                    }
+                    if !(sorcery_timing || def.ir.has_instant_speed()) {
+                        continue;
+                    }
+                    let payments = self.enumerate_payments(seat, &def.cost);
+                    if payments.is_empty() {
+                        continue;
+                    }
+                    let specs = self.cast_target_specs(id);
+                    let ctx = Ctx::simple(seat, Some(id));
+                    let Some(combos) = self.target_combos(&specs, &ctx) else { continue };
+                    for targets in combos {
+                        for payment in &payments {
+                            acts.push(Action::CastSpell { object: id, targets: targets.clone(), payment: payment.clone() });
+                        }
+                    }
+                }
+                acts.extend(self.ability_actions(seat, sorcery_timing));
+            }
+        }
+        acts.push(Action::Concede);
+        acts
+    }
+
+    /// Every legal combination of targets for the specs, or `None` if some
+    /// spec has no legal target. Capped at `ENUMERATION_CAP` combinations.
+    pub(crate) fn target_combos(&self, specs: &[cardir::Filter], ctx: &Ctx) -> Option<Vec<Vec<crate::action::Target>>> {
+        if specs.is_empty() {
+            return Some(vec![Vec::new()]);
+        }
+        let per_spec: Vec<Vec<crate::action::Target>> = specs.iter().map(|s| self.targets_for(s, ctx)).collect();
+        if per_spec.iter().any(|c| c.is_empty()) {
+            return None;
+        }
+        let mut combos: Vec<Vec<crate::action::Target>> = vec![Vec::new()];
+        for candidates in &per_spec {
+            let mut next = Vec::new();
+            for combo in &combos {
+                for &c in candidates {
+                    if combo.contains(&c) {
+                        continue; // one object can't be chosen twice for the same "target" word
+                    }
+                    let mut n = combo.clone();
+                    n.push(c);
+                    next.push(n);
+                    if next.len() >= ENUMERATION_CAP {
+                        break;
+                    }
+                }
+            }
+            combos = next;
+            if combos.is_empty() {
+                return None;
+            }
+        }
+        Some(combos)
+    }
+
+    /// Activated abilities (and equip) of permanents `seat` controls, with costs enumerated.
+    fn ability_actions(&self, seat: Seat, sorcery_timing: bool) -> Vec<Action> {
+        let mut acts = Vec::new();
+        let mut battlefield = self.players[seat.index()].battlefield.clone();
+        battlefield.sort();
+        for id in battlefield {
+            let def = self.card_def(id).clone();
+            let obj = &self.objects[id];
+            for (index, ability) in def.ir.activated.iter().enumerate() {
+                if ability.is_mana_ability() || (ability.sorcery_speed && !sorcery_timing) {
+                    continue;
+                }
+                let mut payments = vec![crate::action::ManaPayment::default()];
+                let mut ok = true;
+                for cost in &ability.cost {
+                    match cost {
+                        cardir::Cost::Mana(m) => {
+                            let ps = self.enumerate_payments(seat, m);
+                            if ps.is_empty() {
+                                ok = false;
+                            } else {
+                                payments = payments
+                                    .iter()
+                                    .flat_map(|base| {
+                                        ps.iter().map(move |p| {
+                                            let mut b = base.clone();
+                                            b.tap.extend(p.tap.iter().copied());
+                                            b.from_pool.extend(p.from_pool.iter().copied());
+                                            b
+                                        })
+                                    })
+                                    .collect();
                             }
+                        }
+                        cardir::Cost::Tap => {
+                            if obj.tapped || (def.is_creature() && obj.summoning_sick && !self.has_keyword(id, Keyword::Haste)) {
+                                ok = false;
+                            }
+                        }
+                        cardir::Cost::SacrificeThis => {}
+                        cardir::Cost::Sacrifice(filter) => {
+                            let ctx = Ctx::simple(seat, Some(id));
+                            let candidates: Vec<ObjectId> = self.players[seat.index()]
+                                .battlefield
+                                .iter()
+                                .copied()
+                                .filter(|&c| self.object_matches(c, filter, &ctx))
+                                .collect();
+                            if candidates.is_empty() {
+                                ok = false;
+                            } else {
+                                payments = payments
+                                    .iter()
+                                    .flat_map(|base| {
+                                        candidates.iter().map(move |&c| {
+                                            let mut b = base.clone();
+                                            b.sacrifice = vec![c];
+                                            b
+                                        })
+                                    })
+                                    .collect();
+                            }
+                        }
+                        cardir::Cost::PayLife(n) => {
+                            if self.players[seat.index()].life < *n {
+                                ok = false;
+                            }
+                        }
+                        cardir::Cost::Discard(n) => {
+                            let hand = self.sorted_hand(seat);
+                            if (hand.len() as i32) < *n {
+                                ok = false;
+                            } else {
+                                let choices = combinations(&hand, *n as usize);
+                                payments = payments
+                                    .iter()
+                                    .flat_map(|base| {
+                                        choices.iter().map(move |c| {
+                                            let mut b = base.clone();
+                                            b.discard = c.clone();
+                                            b
+                                        })
+                                    })
+                                    .collect();
+                            }
+                        }
+                    }
+                    if !ok {
+                        break;
+                    }
+                }
+                if !ok {
+                    continue;
+                }
+                let ctx = Ctx::simple(seat, Some(id));
+                let Some(combos) = self.target_combos(&ability.targets, &ctx) else { continue };
+                for targets in combos {
+                    for payment in &payments {
+                        acts.push(Action::ActivateAbility { object: id, ability: index as u8, targets: targets.clone(), payment: payment.clone() });
+                        if acts.len() > ENUMERATION_CAP * 4 {
+                            return acts;
                         }
                     }
                 }
             }
+            if let (Some(equip), true) = (&def.ir.equip, sorcery_timing) {
+                let payments = self.enumerate_payments(seat, equip);
+                let creatures: Vec<ObjectId> = self.players[seat.index()]
+                    .battlefield
+                    .iter()
+                    .copied()
+                    .filter(|&c| self.is_creature(c) && obj.attached_to != Some(c))
+                    .collect();
+                for c in creatures {
+                    for payment in &payments {
+                        acts.push(Action::ActivateAbility {
+                            object: id,
+                            ability: crate::action::EQUIP_ABILITY,
+                            targets: vec![crate::action::Target::Object(c)],
+                            payment: payment.clone(),
+                        });
+                    }
+                }
+            }
         }
-        acts.push(Action::Concede);
         acts
     }
 
@@ -122,6 +326,9 @@ impl Game {
         if blockers.is_empty() || attackers.is_empty() {
             return out;
         }
+        let legal = |blocks: &Vec<(ObjectId, ObjectId)>| {
+            blocks.iter().all(|(b, a)| self.can_block(*b, *a)) && self.blocks_satisfy_menace(blocks, &attackers)
+        };
         let base = attackers.len() + 1;
         let total = base.checked_pow(blockers.len() as u32);
         match total {
@@ -136,14 +343,22 @@ impl Game {
                             blocks.push((b, attackers[digit - 1]));
                         }
                     }
-                    out.push(Action::DeclareBlockers { blocks });
+                    if legal(&blocks) {
+                        out.push(Action::DeclareBlockers { blocks });
+                    }
                 }
             }
             _ => {
                 for &a in &attackers {
-                    out.push(Action::DeclareBlockers { blocks: blockers.iter().map(|&b| (b, a)).collect() });
+                    let all: Vec<(ObjectId, ObjectId)> = blockers.iter().filter(|&&b| self.can_block(b, a)).map(|&b| (b, a)).collect();
+                    if !all.is_empty() && legal(&all) {
+                        out.push(Action::DeclareBlockers { blocks: all });
+                    }
                     for &b in &blockers {
-                        out.push(Action::DeclareBlockers { blocks: vec![(b, a)] });
+                        let one = vec![(b, a)];
+                        if legal(&one) {
+                            out.push(Action::DeclareBlockers { blocks: one });
+                        }
                     }
                 }
             }
@@ -164,7 +379,10 @@ impl Game {
         };
         push(self.lethal_in_order(attacker, &blockers));
         for &b in &blockers {
-            push(vec![(DamageTarget::Object(b), power)]);
+            let all = vec![(DamageTarget::Object(b), power)];
+            if self.assignment_is_legal(attacker, &all).is_ok() {
+                push(all);
+            }
         }
         out
     }
@@ -210,6 +428,12 @@ impl Game {
                     if !attackers.contains(a) {
                         return Err(RulesError::illegal(format!("{a} is not attacking {seat}")));
                     }
+                    if !self.can_block(*b, *a) {
+                        return Err(RulesError::illegal(format!("{} {b} can't block {}: it has flying", self.name_or_unknown(*b), self.name_or_unknown(*a))));
+                    }
+                }
+                if !self.blocks_satisfy_menace(blocks, &attackers) {
+                    return Err(RulesError::illegal("a creature with menace can't be blocked by just one creature"));
                 }
                 Ok(())
             }
@@ -222,35 +446,7 @@ impl Game {
                         "{pending_attacker} is the attacker whose damage needs assigning, not {attacker}"
                     )));
                 }
-                let blockers = self.live_blockers(*attacker);
-                let power = self.power(*attacker).max(0);
-                let mut seen = BTreeSet::new();
-                let mut sum = 0;
-                for (to, amount) in assignments {
-                    if *amount < 0 {
-                        return Err(RulesError::illegal("damage amounts can't be negative"));
-                    }
-                    match to {
-                        DamageTarget::Object(o) => {
-                            if !blockers.contains(o) {
-                                return Err(RulesError::illegal(format!("{o} is not blocking {attacker}")));
-                            }
-                        }
-                        DamageTarget::Player(_) => {
-                            return Err(RulesError::illegal("only a creature with trample can assign damage to the player it's attacking"));
-                        }
-                    }
-                    if !seen.insert(*to) {
-                        return Err(RulesError::illegal("each recipient may appear only once"));
-                    }
-                    sum += amount;
-                }
-                if sum != power {
-                    return Err(RulesError::illegal(format!(
-                        "{attacker} must assign exactly {power} damage, got {sum}"
-                    )));
-                }
-                Ok(())
+                self.assignment_is_legal(*attacker, assignments).map_err(RulesError::illegal)
             }
             _ => Err(RulesError::illegal(format!(
                 "{} is not the choice pending for {seat}",

@@ -31,7 +31,14 @@ pub enum EventBase<D> {
     Attacked { seat: Seat, attackers: Vec<(ObjectId, AttackTarget)> },
     Blocked { seat: Seat, blocks: Vec<(ObjectId, ObjectId)> },
     DamageAssigned { attacker: ObjectId, assignments: Vec<(DamageTarget, i32)> },
-    Damage { source: ObjectId, to: DamageTarget, amount: i32 },
+    Damage { source: ObjectId, to: DamageTarget, amount: i32, #[serde(default)] combat: bool },
+    Activated { seat: Seat, object: ObjectId, ability: u8, targets: Vec<Target> },
+    Triggered { source: ObjectId, description: String, targets: Vec<Target> },
+    Countered { object: ObjectId },
+    Sacrificed { seat: Seat, object: ObjectId },
+    TokenCreated { seat: Seat, object: ObjectId },
+    CountersAdded { object: ObjectId, counter: String, count: i32 },
+    Attached { object: ObjectId, to: ObjectId },
     LifeChanged { seat: Seat, from: i32, to: i32 },
     /// Library→hand is never a `ZoneChange`; it is `Drew`. Hand→library is
     /// `MulliganTaken` / `Bottomed`. Every other transition is public.
@@ -113,11 +120,32 @@ impl Event {
                 attacker: *attacker,
                 assignments: assignments.clone(),
             },
-            EventBase::Damage { source, to, amount } => EventBase::Damage {
+            EventBase::Damage { source, to, amount, combat } => EventBase::Damage {
                 source: *source,
                 to: *to,
                 amount: *amount,
+                combat: *combat,
             },
+            EventBase::Activated { seat, object, ability, targets } => EventBase::Activated {
+                seat: *seat,
+                object: *object,
+                ability: *ability,
+                targets: targets.clone(),
+            },
+            EventBase::Triggered { source, description, targets } => EventBase::Triggered {
+                source: *source,
+                description: description.clone(),
+                targets: targets.clone(),
+            },
+            EventBase::Countered { object } => EventBase::Countered { object: *object },
+            EventBase::Sacrificed { seat, object } => EventBase::Sacrificed { seat: *seat, object: *object },
+            EventBase::TokenCreated { seat, object } => EventBase::TokenCreated { seat: *seat, object: *object },
+            EventBase::CountersAdded { object, counter, count } => EventBase::CountersAdded {
+                object: *object,
+                counter: counter.clone(),
+                count: *count,
+            },
+            EventBase::Attached { object, to } => EventBase::Attached { object: *object, to: *to },
             EventBase::LifeChanged { seat, from, to } => EventBase::LifeChanged {
                 seat: *seat,
                 from: *from,

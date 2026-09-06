@@ -1,0 +1,7 @@
+Card(
+    name: "Chaplain's Blessing",
+    cost: "{W}",
+    types: [Sorcery],
+    text: "You gain 5 life.",
+    spell: Spell(effects: [GainLife(player: You, amount: Const(5))]),
+)

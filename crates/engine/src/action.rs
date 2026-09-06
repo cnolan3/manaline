@@ -33,7 +33,16 @@ pub struct ManaPayment {
     pub tap: Vec<ObjectId>,
     #[serde(default)]
     pub from_pool: Vec<Mana>,
+    /// Permanents sacrificed to pay a "Sacrifice a creature" cost.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sacrifice: Vec<ObjectId>,
+    /// Cards discarded to pay a "Discard a card" cost.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub discard: Vec<ObjectId>,
 }
+
+/// The `ability` index that means "equip" on an Equipment.
+pub const EQUIP_ABILITY: u8 = u8::MAX;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -125,7 +134,10 @@ impl Action {
             | Action::CastCommander { payment, .. } => {
                 payment.tap.sort();
                 payment.from_pool.sort();
+                payment.sacrifice.sort();
+                payment.discard.sort();
             }
+            Action::ChooseTargets { targets } => targets.sort(),
             Action::DeclareAttackers { attackers } => attackers.sort(),
             Action::DeclareBlockers { blocks } => blocks.sort(),
             Action::AssignCombatDamage { assignments, .. } => assignments.sort(),
@@ -137,5 +149,51 @@ impl Action {
 
     pub fn is_pass(&self) -> bool {
         matches!(self, Action::PassPriority)
+    }
+
+    pub fn payment(&self) -> Option<&ManaPayment> {
+        match self {
+            Action::CastSpell { payment, .. } | Action::ActivateAbility { payment, .. } | Action::CastCommander { payment, .. } => {
+                Some(payment)
+            }
+            _ => None,
+        }
+    }
+
+    /// The same cast or activation, ignoring which permanents pay the mana.
+    pub fn same_except_mana(&self, other: &Action) -> bool {
+        match (self, other) {
+            (Action::CastSpell { object: a, targets: ta, .. }, Action::CastSpell { object: b, targets: tb, .. }) => a == b && ta == tb,
+            (
+                Action::ActivateAbility { object: a, ability: ia, targets: ta, payment: pa },
+                Action::ActivateAbility { object: b, ability: ib, targets: tb, payment: pb },
+            ) => a == b && ia == ib && ta == tb && pa.sacrifice == pb.sacrifice && pa.discard == pb.discard,
+            _ => false,
+        }
+    }
+
+    /// The mana this action must pay, if it is a cast or activation.
+    pub fn mana_cost_in(&self, game: &crate::game::Game) -> Option<crate::types::ManaCost> {
+        match self {
+            Action::CastSpell { object, .. } => game.objects.get(*object).map(|_| game.card_def(*object).cost.clone()),
+            Action::ActivateAbility { object, ability, .. } => {
+                game.objects.get(*object)?;
+                let def = game.card_def(*object);
+                if *ability == EQUIP_ABILITY {
+                    return def.ir.equip.clone();
+                }
+                let a = def.ir.activated.get(*ability as usize)?;
+                let mut total = crate::types::ManaCost::default();
+                for c in &a.cost {
+                    if let cardir::Cost::Mana(m) = c {
+                        total.generic += m.generic;
+                        total.pips.extend(m.pips.iter().copied());
+                    }
+                }
+                total.pips.sort();
+                Some(total)
+            }
+            _ => None,
+        }
     }
 }

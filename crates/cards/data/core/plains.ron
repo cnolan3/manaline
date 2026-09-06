@@ -1,0 +1,8 @@
+Card(
+    name: "Plains",
+    types: [Land],
+    supertypes: [Basic],
+    subtypes: ["Plains"],
+    text: "({T}: Add {W}.)",
+    activated: [Ability(cost: [Tap], effects: [AddMana(color: White, amount: Const(1))])],
+)

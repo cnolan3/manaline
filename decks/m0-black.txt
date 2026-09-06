@@ -1,8 +1,0 @@
-// M0 starter: mono-black vanilla creatures. 40 cards.
-Deck
-17 Swamp
-4 Muck Rats
-5 Walking Corpse
-5 Scathe Zombies
-5 Undead Minotaur
-4 Zombie Goliath

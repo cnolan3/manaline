@@ -1,0 +1,9 @@
+Card(
+    name: "Raging Goblin",
+    cost: "{R}",
+    types: [Creature],
+    subtypes: ["Goblin", "Berserker"],
+    pt: (1, 1),
+    text: "Haste (This creature can attack and {T} as soon as it comes under your control.)",
+    keywords: [Haste],
+)

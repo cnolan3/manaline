@@ -1,0 +1,7 @@
+Card(
+    name: "Revitalize",
+    cost: "{1}{W}",
+    types: [Instant],
+    text: "You gain 3 life.\nDraw a card.",
+    spell: Spell(effects: [GainLife(player: You, amount: Const(3)), Draw(player: You, count: Const(1))]),
+)

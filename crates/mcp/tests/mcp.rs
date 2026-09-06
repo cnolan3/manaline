@@ -98,7 +98,7 @@ async fn an_agent_plays_a_whole_game_through_the_tools() {
         endpoint: r.endpoint.clone(),
         token: r.tokens[1].clone(),
         name: "Claude".into(),
-        decklist: Some(cards::deck_text("m0-red").unwrap().into()),
+        decklist: Some(cards::deck_text("red").unwrap().into()),
     })
     .await
     .unwrap();
@@ -106,14 +106,14 @@ async fn an_agent_plays_a_whole_game_through_the_tools() {
     let res = server.get_game_state().await.unwrap();
     assert!(is_error(&res));
     assert!(text_of(&res).contains("has not started"), "{}", text_of(&res));
-    let res = server.wait_for_turn(Parameters(WaitParams { timeout_seconds: Some(1) })).await.unwrap();
+    let res = server.wait_for_turn(Parameters(WaitParams { timeout_seconds: Some(1), auto_pass: None })).await.unwrap();
     assert_eq!(res.structured_content.as_ref().unwrap()["timed_out"], true);
 
     // The human sits down and readies; the game starts.
     let mut human = Client::connect(&r.endpoint).await.unwrap();
     human.hello(&r.tokens[0], Some("Connor")).await.unwrap();
     human.subscribe().await.unwrap();
-    human.set_deck(cards::deck_text("m0-green").unwrap()).await.unwrap().unwrap();
+    human.set_deck(cards::deck_text("green").unwrap()).await.unwrap().unwrap();
     human.ready().await.unwrap();
     let mut status = r.handle.status();
     status.wait_for(|s| !s.must_act.is_empty()).await.unwrap();
@@ -144,9 +144,12 @@ async fn an_agent_plays_a_whole_game_through_the_tools() {
     // Play the game out: the human at random, the agent through wait_for_turn / take_action.
     let human_task = tokio::spawn(human_loop(human, 3));
     let mut turns_taken = 0;
+    let mut auto_passes = 0u64;
+    let mut pass_only_wakeups = 0;
     let outcome = loop {
-        let res = server.wait_for_turn(Parameters(WaitParams { timeout_seconds: Some(20) })).await.unwrap();
+        let res = server.wait_for_turn(Parameters(WaitParams { timeout_seconds: Some(20), auto_pass: None })).await.unwrap();
         let sc = res.structured_content.clone().unwrap();
+        auto_passes += sc.get("auto_passed").and_then(|n| n.as_u64()).unwrap_or(0);
         if sc.get("game_over").and_then(|g| g.as_bool()).unwrap_or(false) {
             break serde_json::from_value::<Outcome>(sc["outcome"].clone()).unwrap();
         }
@@ -155,6 +158,9 @@ async fn an_agent_plays_a_whole_game_through_the_tools() {
         }
         assert!(text_of(&res).contains("IT IS YOUR TURN TO ACT"), "{}", text_of(&res));
         let mut ids = legal_ids(&res);
+        if ids.iter().all(|(_, d)| d == "Pass priority" || d == "Concede") {
+            pass_only_wakeups += 1;
+        }
         loop {
             let (id, _) = ids
                 .iter()
@@ -179,11 +185,13 @@ async fn an_agent_plays_a_whole_game_through_the_tools() {
     human_task.await.unwrap();
     assert!(turns_taken > 20, "the agent took {turns_taken} actions");
     assert!(matches!(outcome, Outcome::Winner(_)));
+    assert!(auto_passes > 0, "wait_for_turn never passed a nothing-to-do moment for the agent");
+    assert!(pass_only_wakeups == 0, "woken {pass_only_wakeups} times with only pass/concede available");
 
     // Once over, tools say so instead of erroring.
     let res = server.get_game_state().await.unwrap();
     assert!(text_of(&res).contains("GAME OVER"));
-    let res = server.wait_for_turn(Parameters(WaitParams { timeout_seconds: Some(1) })).await.unwrap();
+    let res = server.wait_for_turn(Parameters(WaitParams { timeout_seconds: Some(1), auto_pass: None })).await.unwrap();
     assert_eq!(res.structured_content.as_ref().unwrap()["game_over"], true);
 
     r.handle.shutdown();
@@ -197,13 +205,13 @@ async fn stale_ids_and_wrong_turns_come_back_as_tool_errors() {
         endpoint: r.endpoint.clone(),
         token: r.tokens[1].clone(),
         name: "Agent".into(),
-        decklist: Some(cards::deck_text("m0-blue").unwrap().into()),
+        decklist: Some(cards::deck_text("blue").unwrap().into()),
     })
     .await
     .unwrap();
     let mut human = Client::connect(&r.endpoint).await.unwrap();
     human.hello(&r.tokens[0], Some("Connor")).await.unwrap();
-    human.set_deck(cards::deck_text("m0-green").unwrap()).await.unwrap().unwrap();
+    human.set_deck(cards::deck_text("green").unwrap()).await.unwrap().unwrap();
     human.ready().await.unwrap();
     let mut status = r.handle.status();
     status.wait_for(|s| !s.must_act.is_empty()).await.unwrap();

@@ -5,7 +5,7 @@
 use crate::action::{AttackTarget, Target};
 use crate::card::CardId;
 use crate::game::{ActReason, Outcome};
-use crate::types::{CardType, Color, ManaCost, ManaPool, ObjectId, Phase, Seat, Zone};
+use crate::types::{CardType, Color, Keyword, ManaCost, ManaPool, ObjectId, Phase, Seat, Zone};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -79,14 +79,34 @@ pub struct ObjectView {
     pub blocking: Vec<ObjectId>,
     /// Only meaningful for cards in `you`'s hand: whether a legal cast/play exists right now.
     pub castable: bool,
+    /// Keywords the object has right now (printed, granted, or until end of turn).
+    #[serde(default)]
+    pub keywords: Vec<Keyword>,
+    #[serde(default)]
+    pub attached_to: Option<ObjectId>,
+    #[serde(default)]
+    pub token: bool,
+    /// +1/+1 counters minus -1/-1 counters.
+    #[serde(default)]
+    pub counters: i32,
+    /// Activated abilities as text, in ability order (equip last).
+    #[serde(default)]
+    pub abilities: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StackObjectView {
+    /// The spell card, or the source of an ability or trigger.
     pub object: ObjectId,
     pub name: String,
     pub controller: Seat,
     pub targets: Vec<Target>,
+    /// "spell", "ability", "trigger", "equip"
+    #[serde(default)]
+    pub kind: String,
+    /// What it will do, as text.
+    #[serde(default)]
+    pub description: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

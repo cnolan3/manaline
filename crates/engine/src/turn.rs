@@ -18,6 +18,16 @@ impl Game {
             if self.outcome.is_some() {
                 return;
             }
+            // Triggers go on the stack before anyone receives priority (rule 117.5).
+            if self.pending.is_none() {
+                self.collect_triggers();
+                if !self.place_triggers() {
+                    return; // a controller must choose targets
+                }
+                if self.pending.is_none() && !self.fired.is_empty() {
+                    continue;
+                }
+            }
             if self.pending.is_some() || self.priority.is_some() {
                 return;
             }
@@ -43,6 +53,11 @@ impl Game {
         if self.turn_aborted {
             self.turn_aborted = false;
             self.advance_turn();
+            return;
+        }
+        // After first-strike damage and a round of priority, regular damage is dealt (rule 510.4).
+        if self.phase == Phase::CombatDamage && self.combat_round == crate::game::CombatRound::FirstStrikeDone {
+            self.begin_combat_damage(false);
             return;
         }
         match self.phase.next() {
@@ -109,9 +124,13 @@ impl Game {
                     self.pending = Some(PendingChoice::DeclareBlockers { seat: head, remaining: defenders });
                 }
             }
-            Phase::CombatDamage => self.begin_combat_damage(),
+            Phase::CombatDamage => {
+                let first_strike = self.combat_has_first_strike();
+                self.begin_combat_damage(first_strike);
+            }
             Phase::Main2 => {
                 self.remove_all_from_combat();
+                self.combat_round = crate::game::CombatRound::None;
                 self.give_priority_to_active();
             }
             Phase::Cleanup => self.cleanup_step(),
@@ -152,6 +171,7 @@ impl Game {
     pub(crate) fn finish_cleanup(&mut self) {
         for (_, obj) in self.objects.iter_mut() {
             obj.damage = 0;
+            obj.deathtouch_damaged = false;
             obj.modifiers.retain(|m| m.expires != Expiry::EndOfTurn);
         }
     }
@@ -162,8 +182,9 @@ impl Game {
         if self.passed_in_succession as usize >= self.turn_order.len() {
             self.passed_in_succession = 0;
             if let Some(top) = self.stack.pop() {
-                self.resolve(top);
-                self.give_priority_to_active();
+                if self.resolve(top) {
+                    self.give_priority_to_active();
+                }
             } else {
                 self.priority = None;
             }

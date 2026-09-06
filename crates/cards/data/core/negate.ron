@@ -1,0 +1,7 @@
+Card(
+    name: "Negate",
+    cost: "{1}{U}",
+    types: [Instant],
+    text: "Counter target noncreature spell.",
+    spell: Spell(targets: [And([Not(Creature), Spell])], effects: [CounterSpell(target: Target(0))]),
+)

@@ -1,0 +1,9 @@
+Card(
+    name: "Colossal Dreadmaw",
+    cost: "{4}{G}{G}",
+    types: [Creature],
+    subtypes: ["Dinosaur"],
+    pt: (6, 6),
+    text: "Trample",
+    keywords: [Trample],
+)

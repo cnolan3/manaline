@@ -1,0 +1,9 @@
+Card(
+    name: "Prodigal Pyromancer",
+    cost: "{2}{R}",
+    types: [Creature],
+    subtypes: ["Human", "Wizard"],
+    pt: (1, 1),
+    text: "{T}: Prodigal Pyromancer deals 1 damage to any target.",
+    activated: [Ability(cost: [Tap], targets: [Any], effects: [DealDamage(amount: Const(1), to: Target(0))])],
+)

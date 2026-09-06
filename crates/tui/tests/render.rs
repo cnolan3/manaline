@@ -232,7 +232,7 @@ fn block_and_damage_pickers() {
 #[test]
 fn mulligan_menu_and_log_lines() {
     let db = Arc::new(cards::core());
-    let green = cards::parse_decklist(cards::deck_text("m0-green").unwrap(), &db).unwrap();
+    let green = cards::parse_decklist(cards::deck_text("green").unwrap(), &db).unwrap();
     let config = engine::GameConfig {
         format: engine::Format::cube(),
         players: vec![
@@ -320,7 +320,98 @@ fn minor_priority_moments_auto_pass_and_main_phases_wait() {
     assert!(app.auto_pass_at.is_none());
     app.handle_key(key(KeyCode::Down));
     app.handle_key(key(KeyCode::Right));
-    assert_eq!(app.settings.auto_pass_ms, 2500);
+    assert_eq!(app.settings.auto_pass_ms, 2000);
     app.handle_key(key(KeyCode::Esc));
     assert!(matches!(app.mode, Mode::Normal));
+}
+
+#[test]
+fn bottoming_after_two_mulligans_uses_a_hand_picker() {
+    let db = Arc::new(cards::core());
+    let green = cards::parse_decklist(cards::deck_text("green").unwrap(), &db).unwrap();
+    let config = engine::GameConfig {
+        format: engine::Format::cube(),
+        players: vec![
+            engine::PlayerSetup { name: "Connor".into(), deck: green.clone() },
+            engine::PlayerSetup { name: "Bot".into(), deck: green },
+        ],
+        cards: db,
+        starting_player: Some(Seat(0)),
+    };
+    let mut game = engine::Game::new(config, 1).unwrap();
+    game.apply(Seat(0), &Action::Mulligan { keep: false }).unwrap();
+    game.apply(Seat(0), &Action::Mulligan { keep: false }).unwrap();
+    game.apply(Seat(0), &Action::Mulligan { keep: true }).unwrap();
+    assert!(matches!(game.pending, Some(PendingChoice::BottomCards { count: 2, .. })));
+    let mut app = app_for(&game, Seat(0));
+    assert!(matches!(app.mode, Mode::Pick(_)), "{:?}", app.mode);
+    let s = render(&app, 100, 40);
+    assert!(s.contains("Put 2 on the bottom"), "{s}");
+    assert!(s.contains("0/2 marked"), "{s}");
+    // Exactly the seven cards in hand are listed, once each.
+    assert_eq!(s.matches("[ ] ").count(), 7, "{s}");
+    assert!(app.handle_key(key(KeyCode::Char(' '))).is_empty());
+    assert!(app.handle_key(key(KeyCode::Enter)).is_empty(), "one marked card is not enough");
+    app.handle_key(key(KeyCode::Down));
+    app.handle_key(key(KeyCode::Char(' ')));
+    let cmds = app.handle_key(key(KeyCode::Enter));
+    match cmds.as_slice() {
+        [Command::Act(Action::BottomCards { objects })] => {
+            assert_eq!(objects.len(), 2);
+            game.apply(Seat(0), &cmds_action(&cmds[0])).unwrap();
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(game.players[0].hand.len(), 5);
+}
+
+fn cmds_action(c: &Command) -> Action {
+    match c {
+        Command::Act(a) => a.clone(),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn card_boxes_get_a_keyword_row_when_there_is_room_and_it_is_on() {
+    let game = TestGame::new(Arc::new(cards::core()), 2)
+        .battlefield(Seat(0), "Serra Angel")
+        .battlefield(Seat(1), "Mountain")
+        .build();
+    let mut app = app_for(&game, Seat(0));
+    app.mode = Mode::Normal;
+    // Tall terminal: boxes with the glyph row.
+    let s = render(&app, 100, 40);
+    assert!(s.contains("│✈ Vg     │"), "{s}");
+    // Not enough room for the extra row: plain boxes, no glyphs.
+    let s = render(&app, 100, 32);
+    assert!(s.contains("│Angel    │") && !s.contains("Vg"), "{s}");
+    // Toggled off in settings: plain boxes even when tall, and chips drop glyphs too.
+    let mut app = app.with_settings(tui::settings::Settings { card_keywords: false, ..Default::default() });
+    app.mode = Mode::Normal;
+    let s = render(&app, 100, 40);
+    assert!(s.contains("│Angel    │") && !s.contains("Vg"), "{s}");
+    let s = render(&app, 100, 20);
+    assert!(s.contains("[Serra Angel 4/4]"), "{s}");
+    assert_eq!(tui::settings::Settings::default().auto_pass_ms, 1500);
+}
+
+#[test]
+fn summoning_sick_creatures_show_a_star_hollow_when_hasty() {
+    let mut game = TestGame::new(Arc::new(cards::core()), 2)
+        .battlefield(Seat(0), "Grizzly Bears")
+        .battlefield(Seat(0), "Raging Goblin")
+        .battlefield(Seat(1), "Mountain")
+        .build();
+    for id in game.players[0].battlefield.clone() {
+        game.objects[id].summoning_sick = true;
+    }
+    let mut app = app_for(&game, Seat(0));
+    app.mode = Mode::Normal;
+    let s = render(&app, 100, 20);
+    assert!(s.contains("[Grizzly Bears 2/2★]"), "{s}");
+    assert!(s.contains("[Raging Goblin 1/1 Hs☆]"), "{s}");
+    let s = render(&app, 100, 40);
+    assert!(s.contains("2/2★") && s.contains("1/1☆"), "{s}");
+    assert!(engine::text::render_view(&game.view(Seat(0))).contains("sick but hasty"));
 }

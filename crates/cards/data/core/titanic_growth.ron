@@ -1,0 +1,7 @@
+Card(
+    name: "Titanic Growth",
+    cost: "{1}{G}",
+    types: [Instant],
+    text: "Target creature gets +4/+4 until end of turn.",
+    spell: Spell(targets: [Creature], effects: [ModifyPt(target: Target(0), power: Const(4), toughness: Const(4), until: EndOfTurn)]),
+)

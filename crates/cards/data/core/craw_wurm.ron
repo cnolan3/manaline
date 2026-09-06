@@ -1,0 +1,8 @@
+Card(
+    name: "Craw Wurm",
+    cost: "{4}{G}{G}",
+    types: [Creature],
+    subtypes: ["Wurm"],
+    pt: (6, 4),
+    text: "",
+)
