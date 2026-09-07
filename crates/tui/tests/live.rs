@@ -17,8 +17,13 @@ async fn joins_and_plays_the_opening_through_the_protocol() {
         tcp: None,
         parent_pid: None,
         replay_dir: Some(dir.join("games")),
-        create: Some(CreateGame { format: "cube".into(), seats: 2, seed: Some(4) }),
+        create: Some(CreateGame {
+            format: "cube".into(),
+            seats: 2,
+            seed: Some(4),
+        }),
         cards: Arc::new(cards::core()),
+        legality: None,
     };
     let d = Daemon::bind(config).await.unwrap();
     let info = d.info().clone();
@@ -44,7 +49,11 @@ async fn joins_and_plays_the_opening_through_the_protocol() {
         decklist: Some(cards::deck_text("green").unwrap().to_string()),
         hints: vec!["hello there".into()],
     };
-    let tui::Session { client, mut pushes, mut app } = tui::join(cfg).await.unwrap();
+    let tui::Session {
+        client,
+        mut pushes,
+        mut app,
+    } = tui::join(cfg).await.unwrap();
     assert_eq!(app.me, Some(Seat(0)));
     assert!(app.log.iter().any(|l| l.text == "hello there"));
     let _bot_client = bot.await.unwrap();

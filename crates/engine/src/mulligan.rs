@@ -14,7 +14,10 @@ impl Game {
             let MulliganRule::London { free_first } = self.format.mulligan;
             let bottom = if free_first { taken.saturating_sub(1) } else { taken };
             let bottom = bottom.min(self.players[i].hand.len() as u8);
-            self.emit(Event::HandKept { seat, size: self.players[i].hand.len() as u8 });
+            self.emit(Event::HandKept {
+                seat,
+                size: self.players[i].hand.len() as u8,
+            });
             if bottom > 0 {
                 self.pending = Some(PendingChoice::BottomCards { seat, count: bottom });
             } else {
@@ -42,17 +45,17 @@ impl Game {
             self.objects[id].zone = Zone::Library;
             self.players[i].library.insert(0, id);
         }
-        self.emit(Event::Bottomed { seat, count: objects.len() as u8 });
+        self.emit(Event::Bottomed {
+            seat,
+            count: objects.len() as u8,
+        });
         self.advance_mulligan(seat);
     }
 
     /// Hand the mulligan decision to the next seat in turn order, or start the game.
     pub(crate) fn advance_mulligan(&mut self, seat: Seat) {
         let pos = self.seating.iter().position(|&s| s == seat).unwrap_or(0);
-        let next = self.seating[pos + 1..]
-            .iter()
-            .copied()
-            .find(|&s| !self.is_eliminated(s));
+        let next = self.seating[pos + 1..].iter().copied().find(|&s| !self.is_eliminated(s));
         self.pending = next.map(|s| PendingChoice::Mulligan { seat: s });
     }
 }

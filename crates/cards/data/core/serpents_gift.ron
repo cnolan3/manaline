@@ -1,0 +1,7 @@
+Card(
+    name: "Serpent's Gift",
+    cost: "{2}{G}",
+    types: [Instant],
+    text: "Target creature gains deathtouch until end of turn. (Any amount of damage it deals to a creature is enough to destroy it.)",
+    spell: Spell(targets: [Creature], effects: [GrantKeyword(target: Target(0), keyword: Deathtouch, until: EndOfTurn)]),
+)

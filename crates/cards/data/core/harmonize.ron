@@ -1,0 +1,7 @@
+Card(
+    name: "Harmonize",
+    cost: "{2}{G}{G}",
+    types: [Sorcery],
+    text: "Draw three cards.",
+    spell: Spell(effects: [Draw(player: You, count: Const(3))]),
+)

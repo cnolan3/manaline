@@ -1,0 +1,9 @@
+Card(
+    name: "Frozen Shade",
+    cost: "{2}{B}",
+    types: [Creature],
+    subtypes: ["Shade"],
+    pt: (0, 1),
+    text: "{B}: This creature gets +1/+1 until end of turn.",
+    activated: [Ability(cost: [Mana("{B}")], effects: [ModifyPt(target: This, power: Const(1), toughness: Const(1), until: EndOfTurn)])],
+)

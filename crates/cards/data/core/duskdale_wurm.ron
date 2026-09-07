@@ -1,0 +1,9 @@
+Card(
+    name: "Duskdale Wurm",
+    cost: "{5}{G}{G}",
+    types: [Creature],
+    subtypes: ["Wurm"],
+    pt: (7, 7),
+    text: "Trample (This creature can deal excess combat damage to the player or planeswalker it's attacking.)",
+    keywords: [Trample],
+)

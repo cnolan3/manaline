@@ -1,0 +1,9 @@
+Card(
+    name: "Sparkmage Apprentice",
+    cost: "{1}{R}",
+    types: [Creature],
+    subtypes: ["Human", "Wizard"],
+    pt: (1, 1),
+    text: "When this creature enters, it deals 1 damage to any target.",
+    triggers: [Etb(targets: [Any], effects: [DealDamage(amount: Const(1), to: Target(0))])],
+)

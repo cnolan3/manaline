@@ -1,0 +1,21 @@
+// Starter: white-blue fliers. Evasive creatures backed by a little tempo. 40 cards.
+Deck
+9 Plains
+8 Island
+2 Suntail Hawk
+2 Storm Crow
+2 Concordia Pegasus
+2 Wind Drake
+2 Snapping Drake
+2 Cloudkin Seer
+1 Skyhunter Skirmisher
+1 Charging Griffin
+1 Serra Angel
+1 Serra Sphinx
+1 Air Elemental
+1 Mahamoti Djinn
+1 Unsummon
+1 Essence Scatter
+1 Divine Verdict
+1 Inspired Charge
+1 Angelic Blessing

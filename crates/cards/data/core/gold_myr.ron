@@ -1,0 +1,9 @@
+Card(
+    name: "Gold Myr",
+    cost: "{2}",
+    types: [Artifact, Creature],
+    subtypes: ["Myr"],
+    pt: (1, 1),
+    text: "{T}: Add {W}.",
+    activated: [Ability(cost: [Tap], effects: [AddMana(color: White, amount: Const(1))])],
+)

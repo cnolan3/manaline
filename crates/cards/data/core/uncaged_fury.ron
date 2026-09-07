@@ -1,0 +1,7 @@
+Card(
+    name: "Uncaged Fury",
+    cost: "{2}{R}",
+    types: [Instant],
+    text: "Target creature gets +1/+1 and gains double strike until end of turn.",
+    spell: Spell(targets: [Creature], effects: [ModifyPt(target: Target(0), power: Const(1), toughness: Const(1), keywords: [DoubleStrike], until: EndOfTurn)]),
+)

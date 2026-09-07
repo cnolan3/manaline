@@ -1,0 +1,10 @@
+Card(
+    name: "Wall of Fire",
+    cost: "{1}{R}{R}",
+    types: [Creature],
+    subtypes: ["Wall"],
+    pt: (0, 5),
+    text: "Defender (This creature can't attack.)\n{R}: This creature gets +1/+0 until end of turn.",
+    keywords: [Defender],
+    activated: [Ability(cost: [Mana("{R}")], effects: [ModifyPt(target: This, power: Const(1), toughness: Const(0), until: EndOfTurn)])],
+)

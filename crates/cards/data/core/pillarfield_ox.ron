@@ -1,0 +1,8 @@
+Card(
+    name: "Pillarfield Ox",
+    cost: "{3}{W}",
+    types: [Creature],
+    subtypes: ["Ox"],
+    pt: (2, 4),
+    text: "",
+)

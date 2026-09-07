@@ -2,6 +2,6 @@ Card(
     name: "Angelic Blessing",
     cost: "{2}{W}",
     types: [Sorcery],
-    text: "Target creature gets +3/+3 and gains flying until end of turn.",
+    text: "Target creature gets +3/+3 and gains flying until end of turn. (It can't be blocked except by creatures with flying or reach.)",
     spell: Spell(targets: [Creature], effects: [ModifyPt(target: Target(0), power: Const(3), toughness: Const(3), keywords: [Flying], until: EndOfTurn)]),
 )

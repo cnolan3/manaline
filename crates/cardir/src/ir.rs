@@ -84,13 +84,34 @@ pub enum Cost {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum Effect {
-    DealDamage { amount: Amount, to: Ref },
-    Destroy { target: Ref },
-    Exile { target: Ref },
-    Draw { player: PlayerRef, count: Amount },
-    Discard { player: PlayerRef, count: Amount, #[serde(default)] random: bool },
-    GainLife { player: PlayerRef, amount: Amount },
-    LoseLife { player: PlayerRef, amount: Amount },
+    DealDamage {
+        amount: Amount,
+        to: Ref,
+    },
+    Destroy {
+        target: Ref,
+    },
+    Exile {
+        target: Ref,
+    },
+    Draw {
+        player: PlayerRef,
+        count: Amount,
+    },
+    Discard {
+        player: PlayerRef,
+        count: Amount,
+        #[serde(default)]
+        random: bool,
+    },
+    GainLife {
+        player: PlayerRef,
+        amount: Amount,
+    },
+    LoseLife {
+        player: PlayerRef,
+        amount: Amount,
+    },
     /// "gets +N/+N [and gains K] until end of turn"
     ModifyPt {
         target: Ref,
@@ -100,21 +121,54 @@ pub enum Effect {
         keywords: Vec<Keyword>,
         until: Duration,
     },
-    GrantKeyword { target: Ref, keyword: Keyword, until: Duration },
-    CreateToken { spec: TokenSpec, count: Amount },
-    AddCounters { target: Ref, kind: CounterKind, count: Amount },
+    GrantKeyword {
+        target: Ref,
+        keyword: Keyword,
+        until: Duration,
+    },
+    CreateToken {
+        spec: TokenSpec,
+        count: Amount,
+    },
+    AddCounters {
+        target: Ref,
+        kind: CounterKind,
+        count: Amount,
+    },
     /// `None` colour is colourless `{C}`.
-    AddMana { color: Option<Color>, amount: Amount },
-    Tap { target: Ref },
-    Untap { target: Ref },
-    ReturnToHand { target: Ref },
-    CounterSpell { target: Ref },
-    Sacrifice { player: PlayerRef, filter: Filter, count: Amount },
+    AddMana {
+        color: Option<Color>,
+        amount: Amount,
+    },
+    Tap {
+        target: Ref,
+    },
+    Untap {
+        target: Ref,
+    },
+    ReturnToHand {
+        target: Ref,
+    },
+    CounterSpell {
+        target: Ref,
+    },
+    Sacrifice {
+        player: PlayerRef,
+        filter: Filter,
+        count: Amount,
+    },
     Sequence(Vec<Effect>),
-    Conditional { if_: Condition, then: Box<Effect>, #[serde(default)] else_: Option<Box<Effect>> },
+    Conditional {
+        if_: Condition,
+        then: Box<Effect>,
+        #[serde(default)]
+        else_: Option<Box<Effect>>,
+    },
     /// Emitted by the ingestion tool for text the vocabulary cannot express.
     /// Never valid on a committed card.
-    Unsupported { reason: String },
+    Unsupported {
+        reason: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -189,13 +243,43 @@ pub enum Filter {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum Trigger {
-    Etb { #[serde(default, skip_serializing_if = "Vec::is_empty")] targets: Vec<Filter>, effects: Vec<Effect> },
-    Dies { #[serde(default, skip_serializing_if = "Vec::is_empty")] targets: Vec<Filter>, effects: Vec<Effect> },
-    Attacks { #[serde(default, skip_serializing_if = "Vec::is_empty")] targets: Vec<Filter>, effects: Vec<Effect> },
-    CombatDamageToPlayer { #[serde(default, skip_serializing_if = "Vec::is_empty")] targets: Vec<Filter>, effects: Vec<Effect> },
-    Upkeep { whose: PlayerRef, #[serde(default, skip_serializing_if = "Vec::is_empty")] targets: Vec<Filter>, effects: Vec<Effect> },
-    EndStep { whose: PlayerRef, #[serde(default, skip_serializing_if = "Vec::is_empty")] targets: Vec<Filter>, effects: Vec<Effect> },
-    BecomesTapped { #[serde(default, skip_serializing_if = "Vec::is_empty")] targets: Vec<Filter>, effects: Vec<Effect> },
+    Etb {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        targets: Vec<Filter>,
+        effects: Vec<Effect>,
+    },
+    Dies {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        targets: Vec<Filter>,
+        effects: Vec<Effect>,
+    },
+    Attacks {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        targets: Vec<Filter>,
+        effects: Vec<Effect>,
+    },
+    CombatDamageToPlayer {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        targets: Vec<Filter>,
+        effects: Vec<Effect>,
+    },
+    Upkeep {
+        whose: PlayerRef,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        targets: Vec<Filter>,
+        effects: Vec<Effect>,
+    },
+    EndStep {
+        whose: PlayerRef,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        targets: Vec<Filter>,
+        effects: Vec<Effect>,
+    },
+    BecomesTapped {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        targets: Vec<Filter>,
+        effects: Vec<Effect>,
+    },
 }
 
 impl Trigger {
@@ -235,8 +319,14 @@ pub enum Static {
         keywords: Vec<Keyword>,
     },
     /// "[filter] have K."
-    GrantKeyword { filter: Filter, keyword: Keyword },
-    CostReduction { filter: Filter, amount: Amount },
+    GrantKeyword {
+        filter: Filter,
+        keyword: Keyword,
+    },
+    CostReduction {
+        filter: Filter,
+        amount: Amount,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

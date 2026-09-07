@@ -1,0 +1,7 @@
+Card(
+    name: "Disenchant",
+    cost: "{1}{W}",
+    types: [Instant],
+    text: "Destroy target artifact or enchantment.",
+    spell: Spell(targets: [Or([Artifact, Enchantment])], effects: [Destroy(target: Target(0))]),
+)

@@ -1,0 +1,8 @@
+Card(
+    name: "Goblin Roughrider",
+    cost: "{2}{R}",
+    types: [Creature],
+    subtypes: ["Goblin", "Knight"],
+    pt: (3, 2),
+    text: "",
+)

@@ -1,0 +1,10 @@
+Card(
+    name: "Wall of Omens",
+    cost: "{1}{W}",
+    types: [Creature],
+    subtypes: ["Wall"],
+    pt: (0, 4),
+    text: "Defender\nWhen this creature enters, draw a card.",
+    keywords: [Defender],
+    triggers: [Etb(effects: [Draw(player: You, count: Const(1))])],
+)

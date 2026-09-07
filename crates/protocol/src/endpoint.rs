@@ -111,7 +111,10 @@ mod tests {
         assert_eq!(Endpoint::parse("/tmp/x.sock").unwrap(), Endpoint::Unix("/tmp/x.sock".into()));
         assert_eq!(Endpoint::parse("unix:rel.sock").unwrap(), Endpoint::Unix("rel.sock".into()));
         assert_eq!(Endpoint::parse("127.0.0.1:7454").unwrap(), Endpoint::Tcp("127.0.0.1:7454".into()));
-        assert_eq!(Endpoint::parse("tcp:example.com:7454").unwrap(), Endpoint::Tcp("example.com:7454".into()));
+        assert_eq!(
+            Endpoint::parse("tcp:example.com:7454").unwrap(),
+            Endpoint::Tcp("example.com:7454".into())
+        );
         assert!(Endpoint::parse("nonsense").is_err());
         assert_eq!(Endpoint::parse("127.0.0.1:7454").unwrap().to_string(), "tcp:127.0.0.1:7454");
     }

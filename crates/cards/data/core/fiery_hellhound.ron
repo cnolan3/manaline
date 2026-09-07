@@ -1,0 +1,9 @@
+Card(
+    name: "Fiery Hellhound",
+    cost: "{1}{R}{R}",
+    types: [Creature],
+    subtypes: ["Elemental", "Dog"],
+    pt: (2, 2),
+    text: "{R}: This creature gets +1/+0 until end of turn.",
+    activated: [Ability(cost: [Mana("{R}")], effects: [ModifyPt(target: This, power: Const(1), toughness: Const(0), until: EndOfTurn)])],
+)

@@ -1,0 +1,7 @@
+Card(
+    name: "Shatter",
+    cost: "{1}{R}",
+    types: [Instant],
+    text: "Destroy target artifact.",
+    spell: Spell(targets: [Artifact], effects: [Destroy(target: Target(0))]),
+)

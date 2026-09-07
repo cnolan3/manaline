@@ -1,0 +1,10 @@
+Card(
+    name: "Nightwing Shade",
+    cost: "{4}{B}",
+    types: [Creature],
+    subtypes: ["Shade"],
+    pt: (2, 2),
+    text: "Flying\n{1}{B}: This creature gets +1/+1 until end of turn.",
+    keywords: [Flying],
+    activated: [Ability(cost: [Mana("{1}{B}")], effects: [ModifyPt(target: This, power: Const(1), toughness: Const(1), until: EndOfTurn)])],
+)

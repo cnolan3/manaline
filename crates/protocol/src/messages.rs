@@ -3,7 +3,7 @@
 //! An optional `req` id on a client message is echoed on the direct reply so
 //! a client can tell replies from pushed events.
 
-use engine::{Action, ActReason, EventView, Format, GameView, RulesError, Seat, Violation};
+use engine::{ActReason, Action, EventView, Format, GameView, RulesError, Seat, Violation};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -215,7 +215,12 @@ pub enum ErrorCode {
 impl ProtocolError {
     pub fn new(code: ErrorCode, message: impl Into<String>) -> ProtocolError {
         let retryable = matches!(code, ErrorCode::StaleStateVersion | ErrorCode::NotYourTurnToAct);
-        ProtocolError { code, message: message.into(), retryable, state_version: None }
+        ProtocolError {
+            code,
+            message: message.into(),
+            retryable,
+            state_version: None,
+        }
     }
 
     pub fn with_version(mut self, v: u64) -> ProtocolError {
@@ -291,7 +296,11 @@ mod tests {
     fn wire_shapes() {
         let act = ClientEnvelope {
             req: Some(7),
-            msg: ClientMessage::Act { action_id: Some(3), action: None, state_version: 12 },
+            msg: ClientMessage::Act {
+                action_id: Some(3),
+                action: None,
+                state_version: 12,
+            },
         };
         let json = serde_json::to_string(&act).unwrap();
         assert_eq!(json, r#"{"req":7,"type":"act","action_id":3,"state_version":12}"#);
@@ -306,14 +315,19 @@ mod tests {
         let json = serde_json::to_string(&full).unwrap();
         assert_eq!(json, r#"{"type":"act","action":{"kind":"play_land","object":4},"state_version":1}"#);
 
-        let hello = ClientMessage::Hello { token: Token("abc".into()), protocol_version: 1, name: None };
-        assert_eq!(serde_json::to_string(&hello).unwrap(), r#"{"type":"hello","token":"abc","protocol_version":1}"#);
+        let hello = ClientMessage::Hello {
+            token: Token("abc".into()),
+            protocol_version: 1,
+            name: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&hello).unwrap(),
+            r#"{"type":"hello","token":"abc","protocol_version":1}"#
+        );
 
         let err = ServerEnvelope {
             req: Some(7),
-            msg: ServerMessage::Error(
-                ProtocolError::new(ErrorCode::StaleStateVersion, "state moved on").with_version(13),
-            ),
+            msg: ServerMessage::Error(ProtocolError::new(ErrorCode::StaleStateVersion, "state moved on").with_version(13)),
         };
         let json = serde_json::to_string(&err).unwrap();
         assert_eq!(

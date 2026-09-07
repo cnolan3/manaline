@@ -1,0 +1,10 @@
+Card(
+    name: "Carven Caryatid",
+    cost: "{1}{G}{G}",
+    types: [Creature],
+    subtypes: ["Spirit"],
+    pt: (2, 5),
+    text: "Defender (This creature can't attack.)\nWhen this creature enters, draw a card.",
+    keywords: [Defender],
+    triggers: [Etb(effects: [Draw(player: You, count: Const(1))])],
+)

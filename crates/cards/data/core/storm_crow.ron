@@ -1,0 +1,9 @@
+Card(
+    name: "Storm Crow",
+    cost: "{1}{U}",
+    types: [Creature],
+    subtypes: ["Bird"],
+    pt: (1, 2),
+    text: "Flying (This creature can't be blocked except by creatures with flying or reach.)",
+    keywords: [Flying],
+)

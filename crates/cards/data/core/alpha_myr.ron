@@ -1,0 +1,8 @@
+Card(
+    name: "Alpha Myr",
+    cost: "{2}",
+    types: [Artifact, Creature],
+    subtypes: ["Myr"],
+    pt: (2, 1),
+    text: "",
+)

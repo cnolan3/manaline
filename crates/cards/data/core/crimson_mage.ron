@@ -1,0 +1,9 @@
+Card(
+    name: "Crimson Mage",
+    cost: "{1}{R}",
+    types: [Creature],
+    subtypes: ["Human", "Shaman"],
+    pt: (2, 1),
+    text: "{R}: Target creature you control gains haste until end of turn. (It can attack and {T} this turn.)",
+    activated: [Ability(cost: [Mana("{R}")], targets: [And([Creature, ControlledBy(You)])], effects: [GrantKeyword(target: Target(0), keyword: Haste, until: EndOfTurn)])],
+)

@@ -1,0 +1,7 @@
+Card(
+    name: "Demolish",
+    cost: "{3}{R}",
+    types: [Sorcery],
+    text: "Destroy target artifact or land.",
+    spell: Spell(targets: [Or([Artifact, Land])], effects: [Destroy(target: Target(0))]),
+)

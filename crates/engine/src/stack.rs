@@ -36,19 +36,22 @@ impl Game {
         def.ir.spell.as_ref().map(|s| s.targets.clone()).unwrap_or_default()
     }
 
-    pub(crate) fn cast_spell(
-        &mut self,
-        seat: Seat,
-        object: ObjectId,
-        targets: &[Target],
-        payment: &ManaPayment,
-    ) -> Result<(), RulesError> {
-        let cost = self.card_def(object).cost.clone();
+    pub(crate) fn cast_spell(&mut self, seat: Seat, object: ObjectId, targets: &[Target], payment: &ManaPayment) -> Result<(), RulesError> {
+        let cost = self.cast_cost(seat, object);
         self.pay_mana(seat, payment, &cost)?;
         self.objects[object].controller = seat;
         self.move_object(object, Zone::Stack);
-        self.stack.push(StackObject { object, controller: seat, targets: targets.to_vec(), kind: StackKind::Spell });
-        self.emit(Event::Cast { seat, object, targets: targets.to_vec() });
+        self.stack.push(StackObject {
+            object,
+            controller: seat,
+            targets: targets.to_vec(),
+            kind: StackKind::Spell,
+        });
+        self.emit(Event::Cast {
+            seat,
+            object,
+            targets: targets.to_vec(),
+        });
         self.give_priority(seat);
         Ok(())
     }
@@ -63,14 +66,35 @@ impl Game {
         payment: &ManaPayment,
     ) -> Result<(), RulesError> {
         if index == EQUIP_ABILITY {
-            let cost = self.card_def(object).ir.equip.clone().ok_or_else(|| RulesError::illegal("not equipment"))?;
+            let cost = self
+                .card_def(object)
+                .ir
+                .equip
+                .clone()
+                .ok_or_else(|| RulesError::illegal("not equipment"))?;
             self.pay_mana(seat, payment, &cost)?;
-            self.stack.push(StackObject { object, controller: seat, targets: targets.to_vec(), kind: StackKind::Equip { source: object } });
-            self.emit(Event::Activated { seat, object, ability: index, targets: targets.to_vec() });
+            self.stack.push(StackObject {
+                object,
+                controller: seat,
+                targets: targets.to_vec(),
+                kind: StackKind::Equip { source: object },
+            });
+            self.emit(Event::Activated {
+                seat,
+                object,
+                ability: index,
+                targets: targets.to_vec(),
+            });
             self.give_priority(seat);
             return Ok(());
         }
-        let ability = self.card_def(object).ir.activated.get(index as usize).cloned().ok_or_else(|| RulesError::illegal("no such ability"))?;
+        let ability = self
+            .card_def(object)
+            .ir
+            .activated
+            .get(index as usize)
+            .cloned()
+            .ok_or_else(|| RulesError::illegal("no such ability"))?;
         for cost in &ability.cost {
             match cost {
                 Cost::Mana(m) => self.pay_mana(seat, payment, m)?,
@@ -86,7 +110,11 @@ impl Game {
                     let ctx = Ctx::simple(seat, Some(object));
                     let mut paid = false;
                     for &id in &payment.sacrifice {
-                        if self.objects.get(id).map(|o| o.controller == seat && o.zone == Zone::Battlefield).unwrap_or(false)
+                        if self
+                            .objects
+                            .get(id)
+                            .map(|o| o.controller == seat && o.zone == Zone::Battlefield)
+                            .unwrap_or(false)
                             && self.object_matches(id, filter, &ctx)
                         {
                             self.sacrifice(seat, id);
@@ -95,7 +123,9 @@ impl Game {
                         }
                     }
                     if !paid {
-                        return Err(RulesError::illegal("the payment names nothing that can be sacrificed for this cost"));
+                        return Err(RulesError::illegal(
+                            "the payment names nothing that can be sacrificed for this cost",
+                        ));
                     }
                 }
                 Cost::PayLife(n) => {
@@ -118,12 +148,25 @@ impl Game {
                     if discarded < *n {
                         return Err(RulesError::illegal(format!("the payment must name {n} card(s) in hand to discard")));
                     }
-                    self.emit(Event::Discarded { seat, objects: payment.discard.clone() });
+                    self.emit(Event::Discarded {
+                        seat,
+                        objects: payment.discard.clone(),
+                    });
                 }
             }
         }
-        self.stack.push(StackObject { object, controller: seat, targets: targets.to_vec(), kind: StackKind::Ability { source: object, index } });
-        self.emit(Event::Activated { seat, object, ability: index, targets: targets.to_vec() });
+        self.stack.push(StackObject {
+            object,
+            controller: seat,
+            targets: targets.to_vec(),
+            kind: StackKind::Ability { source: object, index },
+        });
+        self.emit(Event::Activated {
+            seat,
+            object,
+            ability: index,
+            targets: targets.to_vec(),
+        });
         self.give_priority(seat);
         Ok(())
     }
@@ -135,12 +178,22 @@ impl Game {
 
     /// Resolve the top object. Returns `false` if resolution suspended on a choice.
     pub(crate) fn resolve(&mut self, so: StackObject) -> bool {
-        let StackObject { object, controller, targets, kind } = so;
+        let StackObject {
+            object,
+            controller,
+            targets,
+            kind,
+        } = so;
         match kind {
             StackKind::Spell => {
                 let def = self.card_def(object).clone();
                 let specs = self.cast_target_specs(object);
-                let ctx = Ctx { you: controller, this: Some(object), targets: targets.clone(), triggering: None };
+                let ctx = Ctx {
+                    you: controller,
+                    this: Some(object),
+                    targets: targets.clone(),
+                    triggering: None,
+                };
                 if self.all_targets_illegal(&specs, &ctx) {
                     // Fizzle: the spell does nothing and goes to the graveyard.
                     self.move_object(object, Zone::Graveyard);
@@ -171,7 +224,12 @@ impl Game {
             StackKind::Ability { source, index } => {
                 let def = self.card_def(source).clone();
                 let ability = def.ir.activated[index as usize].clone();
-                let ctx = Ctx { you: controller, this: Some(source), targets: targets.clone(), triggering: None };
+                let ctx = Ctx {
+                    you: controller,
+                    this: Some(source),
+                    targets: targets.clone(),
+                    triggering: None,
+                };
                 if self.all_targets_illegal(&ability.targets, &ctx) {
                     return true;
                 }
@@ -179,7 +237,11 @@ impl Game {
             }
             StackKind::Equip { source } => {
                 if let Some(Target::Object(t)) = targets.first() {
-                    let legal = self.objects.get(*t).map(|o| o.zone == Zone::Battlefield && o.controller == controller).unwrap_or(false)
+                    let legal = self
+                        .objects
+                        .get(*t)
+                        .map(|o| o.zone == Zone::Battlefield && o.controller == controller)
+                        .unwrap_or(false)
                         && self.is_creature(*t)
                         && self.objects[source].zone == Zone::Battlefield;
                     if legal {
@@ -192,7 +254,12 @@ impl Game {
             StackKind::Trigger { source, index, triggering } => {
                 let def = self.card_def(source).clone();
                 let trigger = def.ir.triggers[index as usize].clone();
-                let ctx = Ctx { you: controller, this: Some(source), targets: targets.clone(), triggering };
+                let ctx = Ctx {
+                    you: controller,
+                    this: Some(source),
+                    targets: targets.clone(),
+                    triggering,
+                };
                 if self.all_targets_illegal(trigger.targets(), &ctx) {
                     return true;
                 }
@@ -216,9 +283,10 @@ impl Game {
         if specs.is_empty() {
             return false;
         }
-        !specs.iter().enumerate().any(|(i, spec)| {
-            ctx.targets.get(i).map(|t| self.target_is_legal(*t, spec, ctx)).unwrap_or(false)
-        })
+        !specs
+            .iter()
+            .enumerate()
+            .any(|(i, spec)| ctx.targets.get(i).map(|t| self.target_is_legal(*t, spec, ctx)).unwrap_or(false))
     }
 
     /// Counter a spell: it leaves the stack for its owner's graveyard.
@@ -246,9 +314,18 @@ impl Game {
                 Ok(()) => {}
                 Err(pending) => {
                     let remaining: Vec<Effect> = work.into_iter().collect();
-                    let resume = Resume { ctx: ctx.clone(), remaining, after };
+                    let resume = Resume {
+                        ctx: ctx.clone(),
+                        remaining,
+                        after,
+                    };
                     self.pending = Some(match pending {
-                        Suspend::Sacrifice { seat, filter, count } => PendingChoice::Sacrifice { seat, filter, count, resume },
+                        Suspend::Sacrifice { seat, filter, count } => PendingChoice::Sacrifice {
+                            seat,
+                            filter,
+                            count,
+                            resume,
+                        },
                         Suspend::Discard { seat, count } => PendingChoice::EffectDiscard { seat, count, resume },
                     });
                     self.priority = None;

@@ -127,7 +127,11 @@ impl Session {
                 return p.name.clone();
             }
         }
-        self.lobby().seats.get(seat.index()).and_then(|s| s.name.clone()).unwrap_or_else(|| format!("seat {}", seat.0))
+        self.lobby()
+            .seats
+            .get(seat.index())
+            .and_then(|s| s.name.clone())
+            .unwrap_or_else(|| format!("seat {}", seat.0))
     }
 
     /// Why this seat must act right now, if it must.
@@ -178,7 +182,11 @@ impl Session {
         };
         let text = match event {
             EventBase::Chat { from, to, text } => {
-                let who = if *from == self.me { "You".to_string() } else { self.seat_name(*from) };
+                let who = if *from == self.me {
+                    "You".to_string()
+                } else {
+                    self.seat_name(*from)
+                };
                 match to {
                     Some(t) => format!("{who} → {}: {text}", self.seat_name(*t)),
                     None => format!("{who}: {text}"),
@@ -248,7 +256,9 @@ impl Session {
     /// Resolve an action id from the last `legal_actions` call.
     pub fn action_by_id(&self, id: u32) -> Result<(Action, u64)> {
         let guard = self.last_legal.lock().unwrap();
-        let (actions, version) = guard.as_ref().ok_or_else(|| anyhow!("call get_legal_actions first to get action ids"))?;
+        let (actions, version) = guard
+            .as_ref()
+            .ok_or_else(|| anyhow!("call get_legal_actions first to get action ids"))?;
         let a = actions
             .iter()
             .find(|a| a.id == id)

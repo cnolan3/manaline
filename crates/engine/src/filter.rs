@@ -20,14 +20,21 @@ pub struct Ctx {
 
 impl Ctx {
     pub fn simple(you: Seat, this: Option<ObjectId>) -> Ctx {
-        Ctx { you, this, targets: Vec::new(), triggering: None }
+        Ctx {
+            you,
+            this,
+            targets: Vec::new(),
+            triggering: None,
+        }
     }
 }
 
 impl Game {
     /// Does an object on the battlefield (or on the stack, for spell filters) match?
     pub fn object_matches(&self, id: ObjectId, filter: &Filter, ctx: &Ctx) -> bool {
-        let Some(obj) = self.objects.get(id) else { return false };
+        let Some(obj) = self.objects.get(id) else {
+            return false;
+        };
         let def = self.card_def(id);
         match filter {
             Filter::Any => obj.zone == Zone::Battlefield && (def.is_creature() || def.types.contains(&CardType::Planeswalker)),
@@ -54,6 +61,18 @@ impl Game {
             Filter::And(fs) => fs.iter().all(|f| self.object_matches(id, f, ctx)),
             Filter::Or(fs) => fs.iter().any(|f| self.object_matches(id, f, ctx)),
             Filter::Not(f) => !self.object_matches(id, f, ctx),
+        }
+    }
+
+    /// Does a card being cast (still in hand) match a spell filter? Like
+    /// `object_matches`, but `Spell` is true for it wherever it is.
+    pub fn spell_matches(&self, id: ObjectId, filter: &Filter, ctx: &Ctx) -> bool {
+        match filter {
+            Filter::Spell => true,
+            Filter::And(fs) => fs.iter().all(|f| self.spell_matches(id, f, ctx)),
+            Filter::Or(fs) => fs.iter().any(|f| self.spell_matches(id, f, ctx)),
+            Filter::Not(f) => !self.spell_matches(id, f, ctx),
+            other => self.object_matches(id, other, ctx),
         }
     }
 
@@ -130,7 +149,9 @@ impl Game {
 
     /// Hexproof: an opponent's spells and abilities can't target it.
     pub fn can_target(&self, id: ObjectId, by: Seat) -> bool {
-        let Some(obj) = self.objects.get(id) else { return false };
+        let Some(obj) = self.objects.get(id) else {
+            return false;
+        };
         if obj.zone == Zone::Battlefield && self.has_keyword(id, Keyword::Hexproof) && obj.controller != by {
             return false;
         }
@@ -141,7 +162,9 @@ impl Game {
     pub fn target_is_legal(&self, target: Target, filter: &Filter, ctx: &Ctx) -> bool {
         match target {
             Target::Object(id) => {
-                let Some(obj) = self.objects.get(id) else { return false };
+                let Some(obj) = self.objects.get(id) else {
+                    return false;
+                };
                 obj.zone == Self::filter_zone(filter) && self.object_matches(id, filter, ctx) && self.can_target(id, ctx.you)
             }
             Target::Player(s) => self.player_matches(s, filter, ctx),
@@ -163,8 +186,16 @@ impl Game {
                 Some(Target::Object(o)) => self.objects.get(o).map(|o| vec![o.controller]).unwrap_or_default(),
                 None => Vec::new(),
             },
-            PlayerRef::Controller(r) => self.objects_of(r, ctx).iter().filter_map(|id| self.objects.get(*id).map(|o| o.controller)).collect(),
-            PlayerRef::Owner(r) => self.objects_of(r, ctx).iter().filter_map(|id| self.objects.get(*id).map(|o| o.owner)).collect(),
+            PlayerRef::Controller(r) => self
+                .objects_of(r, ctx)
+                .iter()
+                .filter_map(|id| self.objects.get(*id).map(|o| o.controller))
+                .collect(),
+            PlayerRef::Owner(r) => self
+                .objects_of(r, ctx)
+                .iter()
+                .filter_map(|id| self.objects.get(*id).map(|o| o.owner))
+                .collect(),
         }
     }
 
@@ -189,7 +220,12 @@ impl Game {
                 ids.into_iter().filter(|id| self.object_matches(*id, f, ctx)).collect()
             }
             Ref::Player(_) => Vec::new(),
-            Ref::Attached => ctx.this.and_then(|t| self.objects.get(t)).and_then(|t| t.attached_to).into_iter().collect(),
+            Ref::Attached => ctx
+                .this
+                .and_then(|t| self.objects.get(t))
+                .and_then(|t| t.attached_to)
+                .into_iter()
+                .collect(),
         }
     }
 
@@ -202,7 +238,13 @@ impl Game {
             Ref::Each(f) => {
                 let mut out: Vec<Target> = self.objects_of(r, ctx).into_iter().map(Target::Object).collect();
                 if Self::filter_admits_players(f) {
-                    out.extend(self.turn_order.iter().copied().filter(|s| self.player_matches(*s, f, ctx)).map(Target::Player));
+                    out.extend(
+                        self.turn_order
+                            .iter()
+                            .copied()
+                            .filter(|s| self.player_matches(*s, f, ctx))
+                            .map(Target::Player),
+                    );
                 }
                 out
             }
@@ -214,7 +256,11 @@ impl Game {
         match a {
             Amount::Const(n) => *n,
             Amount::Count(f) => {
-                let objects = self.battlefield_objects().into_iter().filter(|id| self.object_matches(*id, f, ctx)).count();
+                let objects = self
+                    .battlefield_objects()
+                    .into_iter()
+                    .filter(|id| self.object_matches(*id, f, ctx))
+                    .count();
                 objects as i32
             }
             Amount::LifeOf(p) => self.players_of(p, ctx).first().map(|s| self.players[s.index()].life).unwrap_or(0),

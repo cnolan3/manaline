@@ -1,0 +1,7 @@
+Card(
+    name: "Go for the Throat",
+    cost: "{1}{B}",
+    types: [Instant],
+    text: "Destroy target nonartifact creature.",
+    spell: Spell(targets: [And([Not(Artifact), Creature])], effects: [Destroy(target: Target(0))]),
+)

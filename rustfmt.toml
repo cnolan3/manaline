@@ -1,0 +1,2 @@
+# Wide lines match how the code base was written; CI enforces this.
+max_width = 140

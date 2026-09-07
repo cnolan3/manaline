@@ -1,0 +1,7 @@
+Card(
+    name: "Celestial Flare",
+    cost: "{W}{W}",
+    types: [Instant],
+    text: "Target player sacrifices an attacking or blocking creature of their choice.",
+    spell: Spell(targets: [Player], effects: [Sacrifice(player: TargetPlayer(0), filter: And([Or([Attacking, Blocking]), Creature]), count: Const(1))]),
+)

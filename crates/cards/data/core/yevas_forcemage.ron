@@ -1,0 +1,9 @@
+Card(
+    name: "Yeva's Forcemage",
+    cost: "{2}{G}",
+    types: [Creature],
+    subtypes: ["Elf", "Shaman"],
+    pt: (2, 2),
+    text: "When this creature enters, target creature gets +2/+2 until end of turn.",
+    triggers: [Etb(targets: [Creature], effects: [ModifyPt(target: Target(0), power: Const(2), toughness: Const(2), until: EndOfTurn)])],
+)

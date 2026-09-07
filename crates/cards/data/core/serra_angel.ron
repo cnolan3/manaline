@@ -4,6 +4,6 @@ Card(
     types: [Creature],
     subtypes: ["Angel"],
     pt: (4, 4),
-    text: "Flying, vigilance",
+    text: "Flying\nVigilance (Attacking doesn't cause this creature to tap.)",
     keywords: [Flying, Vigilance],
 )

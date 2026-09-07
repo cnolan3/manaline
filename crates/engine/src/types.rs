@@ -144,11 +144,7 @@ impl Phase {
     pub fn is_combat(self) -> bool {
         matches!(
             self,
-            Phase::BeginCombat
-                | Phase::DeclareAttackers
-                | Phase::DeclareBlockers
-                | Phase::CombatDamage
-                | Phase::EndCombat
+            Phase::BeginCombat | Phase::DeclareAttackers | Phase::DeclareBlockers | Phase::CombatDamage | Phase::EndCombat
         )
     }
 

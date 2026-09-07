@@ -1,0 +1,8 @@
+Card(
+    name: "Vastwood Gorger",
+    cost: "{5}{G}",
+    types: [Creature],
+    subtypes: ["Wurm"],
+    pt: (5, 6),
+    text: "",
+)

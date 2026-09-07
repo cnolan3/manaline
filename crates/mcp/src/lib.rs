@@ -10,9 +10,7 @@ pub use server::McpServer;
 pub use session::{Session, SessionConfig};
 
 use anyhow::{Context, Result};
-use rmcp::transport::streamable_http_server::{
-    session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
-};
+use rmcp::transport::streamable_http_server::{session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService};
 use rmcp::ServiceExt;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -57,7 +55,9 @@ impl HttpServer {
 
 /// Serve streamable HTTP at `/mcp` on `addr`. `127.0.0.1:0` picks a free port.
 pub async fn serve_http(server: McpServer, addr: &str) -> Result<HttpServer> {
-    let listener = tokio::net::TcpListener::bind(addr).await.with_context(|| format!("binding {addr}"))?;
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .with_context(|| format!("binding {addr}"))?;
     let addr = listener.local_addr()?;
     let cancel = CancellationToken::new();
     let config = StreamableHttpServerConfig::default()

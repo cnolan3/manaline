@@ -1,0 +1,9 @@
+Card(
+    name: "Unholy Strength",
+    cost: "{B}",
+    types: [Enchantment],
+    subtypes: ["Aura"],
+    text: "Enchant creature\nEnchanted creature gets +2/+1.",
+    enchant: Creature,
+    statics: [PtBoost(filter: Attached, power: Const(2), toughness: Const(1))],
+)

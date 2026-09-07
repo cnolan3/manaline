@@ -57,13 +57,22 @@ impl ReplayWriter {
         }
         let mut file = std::fs::File::create(path)?;
         write_line(&mut file, &ReplayLine::Header(header.clone()))?;
-        Ok(ReplayWriter { path: path.to_path_buf(), file })
+        Ok(ReplayWriter {
+            path: path.to_path_buf(),
+            file,
+        })
     }
 
     /// Append one accepted action. Flushed before returning, so an ack never
     /// precedes its log line reaching the OS.
     pub fn append(&mut self, seat: Seat, action: &Action) -> Result<(), ReplayError> {
-        write_line(&mut self.file, &ReplayLine::Action { seat, action: action.clone() })
+        write_line(
+            &mut self.file,
+            &ReplayLine::Action {
+                seat,
+                action: action.clone(),
+            },
+        )
     }
 
     pub fn path(&self) -> &Path {
@@ -88,8 +97,10 @@ pub fn read(path: &Path) -> Result<(ReplayHeader, Vec<(Seat, Action)>), ReplayEr
         if line.trim().is_empty() {
             continue;
         }
-        let parsed: ReplayLine =
-            serde_json::from_str(&line).map_err(|e| ReplayError::Malformed { line: i + 1, error: e.to_string() })?;
+        let parsed: ReplayLine = serde_json::from_str(&line).map_err(|e| ReplayError::Malformed {
+            line: i + 1,
+            error: e.to_string(),
+        })?;
         match parsed {
             ReplayLine::Header(h) => header = Some(h),
             ReplayLine::Action { seat, action } => actions.push((seat, action)),
@@ -108,9 +119,17 @@ pub fn config_from_header(header: &ReplayHeader, cards: Arc<CardDb>) -> Result<G
             .iter()
             .map(|n| cards.lookup(n).ok_or_else(|| ReplayError::UnknownCard(n.clone())))
             .collect::<Result<Vec<_>, _>>()?;
-        players.push(PlayerSetup { name: p.name.clone(), deck });
+        players.push(PlayerSetup {
+            name: p.name.clone(),
+            deck,
+        });
     }
-    Ok(GameConfig { format, players, cards, starting_player: None })
+    Ok(GameConfig {
+        format,
+        players,
+        cards,
+        starting_player: None,
+    })
 }
 
 /// Reconstruct a game from its log, applying `up_to` actions (all if `None`).

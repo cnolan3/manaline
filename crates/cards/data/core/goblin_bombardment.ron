@@ -1,0 +1,7 @@
+Card(
+    name: "Goblin Bombardment",
+    cost: "{1}{R}",
+    types: [Enchantment],
+    text: "Sacrifice a creature: This enchantment deals 1 damage to any target.",
+    activated: [Ability(cost: [Sacrifice(Creature)], targets: [Any], effects: [DealDamage(amount: Const(1), to: Target(0))])],
+)

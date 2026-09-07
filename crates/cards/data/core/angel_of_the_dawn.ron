@@ -1,0 +1,10 @@
+Card(
+    name: "Angel of the Dawn",
+    cost: "{4}{W}",
+    types: [Creature],
+    subtypes: ["Angel"],
+    pt: (3, 3),
+    text: "Flying\nWhen this creature enters, creatures you control get +1/+1 and gain vigilance until end of turn.",
+    keywords: [Flying],
+    triggers: [Etb(effects: [ModifyPt(target: Each(And([Creature, ControlledBy(You)])), power: Const(1), toughness: Const(1), keywords: [Vigilance], until: EndOfTurn)])],
+)

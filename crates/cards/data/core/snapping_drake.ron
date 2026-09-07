@@ -1,0 +1,9 @@
+Card(
+    name: "Snapping Drake",
+    cost: "{3}{U}",
+    types: [Creature],
+    subtypes: ["Drake"],
+    pt: (3, 2),
+    text: "Flying (This creature can't be blocked except by creatures with flying or reach.)",
+    keywords: [Flying],
+)

@@ -1,0 +1,9 @@
+Card(
+    name: "Druid of the Cowl",
+    cost: "{1}{G}",
+    types: [Creature],
+    subtypes: ["Elf", "Druid"],
+    pt: (1, 3),
+    text: "{T}: Add {G}.",
+    activated: [Ability(cost: [Tap], effects: [AddMana(color: Green, amount: Const(1))])],
+)

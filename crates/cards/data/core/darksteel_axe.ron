@@ -1,0 +1,10 @@
+Card(
+    name: "Darksteel Axe",
+    cost: "{1}",
+    types: [Artifact],
+    subtypes: ["Equipment"],
+    text: "Indestructible (Effects that say \"destroy\" don't destroy this Equipment.)\nEquipped creature gets +2/+0.\nEquip {2}",
+    keywords: [Indestructible],
+    equip: "{2}",
+    statics: [PtBoost(filter: Attached, power: Const(2), toughness: Const(0))],
+)

@@ -1,0 +1,23 @@
+// Starter: blue-black control. Removal, counters, card draw, and a few evasive finishers. 40 cards.
+Deck
+8 Island
+9 Swamp
+2 Ravenous Rats
+2 Merfolk Looter
+1 Scroll Thief
+2 Child of Night
+1 Vampire Nighthawk
+1 Liliana's Specter
+1 Phantom Monster
+1 Deathgaze Cockatrice
+1 Nimbus of the Isles
+1 Bogstomper
+2 Doom Blade
+1 Murder
+1 Disfigure
+1 Last Gasp
+1 Counterspell
+1 Cancel
+1 Divination
+1 Mind Rot
+1 Cruel Edict

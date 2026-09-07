@@ -1,0 +1,8 @@
+Card(
+    name: "Leatherback Baloth",
+    cost: "{G}{G}{G}",
+    types: [Creature],
+    subtypes: ["Beast"],
+    pt: (4, 5),
+    text: "",
+)

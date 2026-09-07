@@ -4,7 +4,7 @@ Card(
     types: [Creature],
     subtypes: ["Goblin"],
     pt: (2, 2),
-    text: "Haste\nOther Goblin creatures you control get +1/+1 and have haste.",
+    text: "Haste (This creature can attack and {T} as soon as it comes under your control.)\nOther Goblin creatures you control get +1/+1 and have haste.",
     keywords: [Haste],
     statics: [PtBoost(filter: And([Other, Subtype("Goblin"), Creature, ControlledBy(You)]), power: Const(1), toughness: Const(1), keywords: [Haste])],
 )

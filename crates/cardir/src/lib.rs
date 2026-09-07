@@ -76,10 +76,16 @@ Card(
     #[test]
     fn loads_and_round_trips_the_spec_examples() {
         let strike = load(LIGHTNING_STRIKE).unwrap();
-        assert_eq!(render(&strike), "Lightning Strike deals 3 damage to any target.".replace("Lightning Strike", "~"));
+        assert_eq!(
+            render(&strike),
+            "Lightning Strike deals 3 damage to any target.".replace("Lightning Strike", "~")
+        );
         round_trips(&strike).unwrap();
         let druid = load(ARCHDRUID).unwrap();
-        assert_eq!(render(&druid), "Other Elf creatures you control get +1/+1.\n{T}: Add {G} for each Elf you control.");
+        assert_eq!(
+            render(&druid),
+            "Other Elf creatures you control get +1/+1.\n{T}: Add {G} for each Elf you control."
+        );
         round_trips(&druid).unwrap();
         assert!(druid.activated[0].is_mana_ability());
     }
@@ -103,7 +109,10 @@ Card(
 
     #[test]
     fn normalisation_ignores_reminder_text_and_keyword_line_breaks() {
-        let a = normalise("Flying\nDeathtouch (Any amount of damage this deals to a creature is enough to destroy it.)\nLifelink", "X");
+        let a = normalise(
+            "Flying\nDeathtouch (Any amount of damage this deals to a creature is enough to destroy it.)\nLifelink",
+            "X",
+        );
         let b = normalise("Flying, deathtouch, lifelink", "X");
         assert_eq!(a, b);
     }

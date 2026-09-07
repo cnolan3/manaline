@@ -1,0 +1,9 @@
+Card(
+    name: "Nimbus of the Isles",
+    cost: "{4}{U}",
+    types: [Creature],
+    subtypes: ["Elemental"],
+    pt: (3, 3),
+    text: "Flying (This creature can't be blocked except by creatures with flying or reach.)",
+    keywords: [Flying],
+)

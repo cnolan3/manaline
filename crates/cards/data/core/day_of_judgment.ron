@@ -1,0 +1,7 @@
+Card(
+    name: "Day of Judgment",
+    cost: "{2}{W}{W}",
+    types: [Sorcery],
+    text: "Destroy all creatures.",
+    spell: Spell(effects: [Destroy(target: Each(Creature))]),
+)

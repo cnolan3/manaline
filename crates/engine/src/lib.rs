@@ -31,10 +31,10 @@ pub use action::{Action, AttackTarget, DamageTarget, ManaPayment, Target, EQUIP_
 pub use card::{CardDb, CardDef, CardId};
 pub use error::RulesError;
 pub use event::{DrawnCards, Event, EventBase, EventView};
-pub use format::{CardPool, Format, FormatRule, Violation};
+pub use format::{format_deck_any, CardPool, Format, FormatRule, LegalitySource, Violation};
 pub use game::{
-    ActReason, CombatRound, Elimination, Game, GameConfig, GameObject, Outcome, PendingChoice, PlayerSetup,
-    PlayerState, StackKind, StackObject,
+    ActReason, CombatRound, Elimination, Game, GameConfig, GameObject, Outcome, PendingChoice, PlayerSetup, PlayerState, StackKind,
+    StackObject,
 };
 pub use objects::Objects;
 pub use types::{CardType, Color, Keyword, Mana, ManaCost, ManaPool, ObjectId, Phase, Seat, Supertype, Zone};

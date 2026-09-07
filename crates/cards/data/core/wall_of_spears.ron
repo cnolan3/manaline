@@ -1,0 +1,9 @@
+Card(
+    name: "Wall of Spears",
+    cost: "{3}",
+    types: [Artifact, Creature],
+    subtypes: ["Wall"],
+    pt: (2, 3),
+    text: "Defender (This creature can't attack.)\nFirst strike",
+    keywords: [Defender, FirstStrike],
+)

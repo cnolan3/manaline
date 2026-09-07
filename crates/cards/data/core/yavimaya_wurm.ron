@@ -1,0 +1,9 @@
+Card(
+    name: "Yavimaya Wurm",
+    cost: "{4}{G}{G}",
+    types: [Creature],
+    subtypes: ["Wurm"],
+    pt: (6, 4),
+    text: "Trample (This creature can deal excess combat damage to the player or planeswalker it's attacking.)",
+    keywords: [Trample],
+)

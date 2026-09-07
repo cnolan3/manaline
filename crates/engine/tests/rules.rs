@@ -5,8 +5,8 @@
 
 use engine::testing::{acting_seat, advance_to, advance_until, TestGame};
 use engine::{
-    ActReason, Action, AttackTarget, DamageTarget, Elimination, Format, Game, GameConfig, Outcome, PendingChoice,
-    Phase, PlayerSetup, RulesError, Seat, Zone,
+    ActReason, Action, AttackTarget, DamageTarget, Elimination, Format, Game, GameConfig, Outcome, PendingChoice, Phase, PlayerSetup,
+    RulesError, Seat, Zone,
 };
 use std::sync::Arc;
 
@@ -106,7 +106,10 @@ fn one_land_per_turn() {
     assert_eq!(game.objects[forest].zone, Zone::Battlefield);
     assert_eq!(game.priority, Some(Seat(0)), "playing a land keeps priority");
     let acts = game.legal_actions(Seat(0));
-    assert!(!acts.iter().any(|a| matches!(a, Action::PlayLand { .. })), "second land is not offered");
+    assert!(
+        !acts.iter().any(|a| matches!(a, Action::PlayLand { .. })),
+        "second land is not offered"
+    );
     let other = hand_card(&game, Seat(0), "Forest");
     let err = game.apply(Seat(0), &Action::PlayLand { object: other }).unwrap_err();
     assert!(matches!(err, RulesError::IllegalAction { .. }));
@@ -135,7 +138,10 @@ fn creature_spell_uses_the_stack_and_resolves_summoning_sick() {
 
     game.apply(Seat(0), &Action::PassPriority).unwrap();
     assert_eq!(game.priority, Some(Seat(1)));
-    assert!(game.legal_actions(Seat(1)).iter().all(|a| matches!(a, Action::PassPriority | Action::Concede)));
+    assert!(game
+        .legal_actions(Seat(1))
+        .iter()
+        .all(|a| matches!(a, Action::PassPriority | Action::Concede)));
     game.apply(Seat(1), &Action::PassPriority).unwrap();
     assert!(game.stack.is_empty());
     assert_eq!(game.objects[bears].zone, Zone::Battlefield);
@@ -180,8 +186,16 @@ fn unblocked_attacker_deals_damage_to_the_player() {
     assert_eq!(game.must_act().get(&Seat(0)), Some(&ActReason::DeclareAttackers));
     assert_eq!(game.priority, None, "no priority while the declaration is pending");
     let acts = game.legal_actions(Seat(0));
-    assert!(acts.contains(&Action::DeclareAttackers { attackers: vec![(bears, AttackTarget::Player(Seat(1)))] }));
-    game.apply(Seat(0), &Action::DeclareAttackers { attackers: vec![(bears, AttackTarget::Player(Seat(1)))] }).unwrap();
+    assert!(acts.contains(&Action::DeclareAttackers {
+        attackers: vec![(bears, AttackTarget::Player(Seat(1)))]
+    }));
+    game.apply(
+        Seat(0),
+        &Action::DeclareAttackers {
+            attackers: vec![(bears, AttackTarget::Player(Seat(1)))],
+        },
+    )
+    .unwrap();
     assert!(game.objects[bears].tapped, "attacking taps");
     assert_eq!(game.priority, Some(Seat(0)));
     pass_both(&mut game);
@@ -208,9 +222,21 @@ fn single_block_needs_no_assignment_and_lethal_damage_destroys() {
     let giant = battlefield_card(&game, Seat(0), "Hill Giant");
     let bears = battlefield_card(&game, Seat(1), "Grizzly Bears");
     advance_until(&mut game, |g| matches!(g.pending, Some(PendingChoice::DeclareAttackers { .. }))).unwrap();
-    game.apply(Seat(0), &Action::DeclareAttackers { attackers: vec![(giant, AttackTarget::Player(Seat(1)))] }).unwrap();
+    game.apply(
+        Seat(0),
+        &Action::DeclareAttackers {
+            attackers: vec![(giant, AttackTarget::Player(Seat(1)))],
+        },
+    )
+    .unwrap();
     pass_both(&mut game);
-    game.apply(Seat(1), &Action::DeclareBlockers { blocks: vec![(bears, giant)] }).unwrap();
+    game.apply(
+        Seat(1),
+        &Action::DeclareBlockers {
+            blocks: vec![(bears, giant)],
+        },
+    )
+    .unwrap();
     pass_both(&mut game);
     assert_eq!(game.phase, Phase::CombatDamage);
     assert!(game.pending.is_none(), "one blocker: no assignment choice");
@@ -233,9 +259,21 @@ fn multiple_blockers_require_a_damage_assignment_validated_by_rule() {
     let giant = battlefield_card(&game, Seat(0), "Hill Giant");
     let bears = battlefield_cards(&game, Seat(1), "Grizzly Bears");
     advance_until(&mut game, |g| matches!(g.pending, Some(PendingChoice::DeclareAttackers { .. }))).unwrap();
-    game.apply(Seat(0), &Action::DeclareAttackers { attackers: vec![(giant, AttackTarget::Player(Seat(1)))] }).unwrap();
+    game.apply(
+        Seat(0),
+        &Action::DeclareAttackers {
+            attackers: vec![(giant, AttackTarget::Player(Seat(1)))],
+        },
+    )
+    .unwrap();
     pass_both(&mut game);
-    game.apply(Seat(1), &Action::DeclareBlockers { blocks: vec![(bears[0], giant), (bears[1], giant)] }).unwrap();
+    game.apply(
+        Seat(1),
+        &Action::DeclareBlockers {
+            blocks: vec![(bears[0], giant), (bears[1], giant)],
+        },
+    )
+    .unwrap();
     pass_both(&mut game);
 
     assert_eq!(game.phase, Phase::CombatDamage);
@@ -249,9 +287,15 @@ fn multiple_blockers_require_a_damage_assignment_validated_by_rule() {
     }));
 
     // Wrong total, unknown recipient, and the player are rejected.
-    let bad_sum = Action::AssignCombatDamage { attacker: giant, assignments: vec![(DamageTarget::Object(bears[0]), 2)] };
+    let bad_sum = Action::AssignCombatDamage {
+        attacker: giant,
+        assignments: vec![(DamageTarget::Object(bears[0]), 2)],
+    };
     assert!(matches!(game.apply(Seat(0), &bad_sum), Err(RulesError::IllegalAction { .. })));
-    let to_player = Action::AssignCombatDamage { attacker: giant, assignments: vec![(DamageTarget::Player(Seat(1)), 3)] };
+    let to_player = Action::AssignCombatDamage {
+        attacker: giant,
+        assignments: vec![(DamageTarget::Player(Seat(1)), 3)],
+    };
     assert!(matches!(game.apply(Seat(0), &to_player), Err(RulesError::IllegalAction { .. })));
 
     // A split that was never listed is accepted because it satisfies the rule.
@@ -270,10 +314,19 @@ fn multiple_blockers_require_a_damage_assignment_validated_by_rule() {
 
 #[test]
 fn zero_life_eliminates_and_ends_a_two_player_game() {
-    let mut game = TestGame::new(db(), 2).battlefield(Seat(0), "Grizzly Bears").life(Seat(1), 2).build();
+    let mut game = TestGame::new(db(), 2)
+        .battlefield(Seat(0), "Grizzly Bears")
+        .life(Seat(1), 2)
+        .build();
     let bears = battlefield_card(&game, Seat(0), "Grizzly Bears");
     advance_until(&mut game, |g| matches!(g.pending, Some(PendingChoice::DeclareAttackers { .. }))).unwrap();
-    game.apply(Seat(0), &Action::DeclareAttackers { attackers: vec![(bears, AttackTarget::Player(Seat(1)))] }).unwrap();
+    game.apply(
+        Seat(0),
+        &Action::DeclareAttackers {
+            attackers: vec![(bears, AttackTarget::Player(Seat(1)))],
+        },
+    )
+    .unwrap();
     pass_both(&mut game);
     game.apply(Seat(1), &Action::DeclareBlockers { blocks: vec![] }).unwrap();
     let events = pass_both_collect(&mut game);
@@ -282,7 +335,10 @@ fn zero_life_eliminates_and_ends_a_two_player_game() {
     assert_eq!(game.is_over(), Some(Outcome::Winner(Seat(0))));
     assert!(events.iter().any(|e| matches!(e, engine::EventBase::GameOver { .. })));
     assert!(game.must_act().is_empty());
-    assert!(matches!(game.apply(Seat(0), &Action::PassPriority), Err(RulesError::GameOver { .. })));
+    assert!(matches!(
+        game.apply(Seat(0), &Action::PassPriority),
+        Err(RulesError::GameOver { .. })
+    ));
 }
 
 fn pass_both_collect(game: &mut Game) -> Vec<engine::Event> {
@@ -296,12 +352,23 @@ fn pass_both_collect(game: &mut Game) -> Vec<engine::Event> {
 
 #[test]
 fn a_pod_continues_after_an_elimination() {
-    let mut game = TestGame::new(db(), 3).battlefield(Seat(0), "Grizzly Bears").life(Seat(1), 2).build();
+    let mut game = TestGame::new(db(), 3)
+        .battlefield(Seat(0), "Grizzly Bears")
+        .life(Seat(1), 2)
+        .build();
     let bears = battlefield_card(&game, Seat(0), "Grizzly Bears");
     advance_until(&mut game, |g| matches!(g.pending, Some(PendingChoice::DeclareAttackers { .. }))).unwrap();
     let acts = game.legal_actions(Seat(0));
-    assert!(acts.contains(&Action::DeclareAttackers { attackers: vec![(bears, AttackTarget::Player(Seat(2)))] }));
-    game.apply(Seat(0), &Action::DeclareAttackers { attackers: vec![(bears, AttackTarget::Player(Seat(1)))] }).unwrap();
+    assert!(acts.contains(&Action::DeclareAttackers {
+        attackers: vec![(bears, AttackTarget::Player(Seat(2)))]
+    }));
+    game.apply(
+        Seat(0),
+        &Action::DeclareAttackers {
+            attackers: vec![(bears, AttackTarget::Player(Seat(1)))],
+        },
+    )
+    .unwrap();
     pass_both(&mut game);
     assert_eq!(acting_seat(&game), Some(Seat(1)), "only the attacked seat declares blockers");
     game.apply(Seat(1), &Action::DeclareBlockers { blocks: vec![] }).unwrap();
@@ -340,7 +407,10 @@ fn blockers_are_declared_sequentially_in_apnap_order() {
     pass_both(&mut game);
     assert_eq!(
         game.pending,
-        Some(PendingChoice::DeclareBlockers { seat: Seat(1), remaining: vec![Seat(2)] })
+        Some(PendingChoice::DeclareBlockers {
+            seat: Seat(1),
+            remaining: vec![Seat(2)]
+        })
     );
     // Seat 1 may only block what attacks seat 1.
     let wrong = Action::DeclareBlockers { blocks: vec![(b1, bears)] };
@@ -350,7 +420,13 @@ fn blockers_are_declared_sequentially_in_apnap_order() {
         Err(RulesError::NotYourTurnToAct { .. })
     ));
     game.apply(Seat(1), &Action::DeclareBlockers { blocks: vec![(b1, giant)] }).unwrap();
-    assert_eq!(game.pending, Some(PendingChoice::DeclareBlockers { seat: Seat(2), remaining: vec![] }));
+    assert_eq!(
+        game.pending,
+        Some(PendingChoice::DeclareBlockers {
+            seat: Seat(2),
+            remaining: vec![]
+        })
+    );
     game.apply(Seat(2), &Action::DeclareBlockers { blocks: vec![(b2, bears)] }).unwrap();
     assert_eq!(game.priority, Some(Seat(0)));
     pass_both(&mut game);
@@ -385,11 +461,17 @@ fn active_player_conceding_ends_their_turn() {
 fn any_seat_may_concede_at_any_time() {
     let mut game = TestGame::new(db(), 3).build();
     assert_eq!(game.priority, Some(Seat(0)));
-    assert!(!game.legal_actions(Seat(2)).contains(&Action::Concede), "not listed when it isn't their turn");
+    assert!(
+        !game.legal_actions(Seat(2)).contains(&Action::Concede),
+        "not listed when it isn't their turn"
+    );
     game.apply(Seat(2), &Action::Concede).unwrap();
     assert_eq!(game.players[2].eliminated, Some(Elimination::Conceded));
     assert_eq!(game.turn_order, vec![Seat(0), Seat(1)]);
-    assert!(matches!(game.apply(Seat(2), &Action::Concede), Err(RulesError::IllegalAction { .. })));
+    assert!(matches!(
+        game.apply(Seat(2), &Action::Concede),
+        Err(RulesError::IllegalAction { .. })
+    ));
     assert_eq!(game.priority, Some(Seat(0)), "the turn continues");
 }
 
@@ -420,8 +502,14 @@ fn cube_game(starting: Seat) -> Game {
     let config = GameConfig {
         format: Format::cube(),
         players: vec![
-            PlayerSetup { name: "Connor".into(), deck: green },
-            PlayerSetup { name: "Claude".into(), deck: red },
+            PlayerSetup {
+                name: "Connor".into(),
+                deck: green,
+            },
+            PlayerSetup {
+                name: "Claude".into(),
+                deck: red,
+            },
         ],
         cards: db,
         starting_player: Some(starting),
@@ -433,7 +521,11 @@ fn cube_game(starting: Seat) -> Game {
 fn london_mulligan_bottoms_one_card_per_mulligan() {
     let mut game = cube_game(Seat(1));
     assert_eq!(game.turn, 0);
-    assert_eq!(game.must_act().get(&Seat(1)), Some(&ActReason::Mulligan), "starting player decides first");
+    assert_eq!(
+        game.must_act().get(&Seat(1)),
+        Some(&ActReason::Mulligan),
+        "starting player decides first"
+    );
     assert!(game.legal_actions(Seat(0)).is_empty());
     game.apply(Seat(1), &Action::Mulligan { keep: false }).unwrap();
     assert_eq!(game.players[1].hand.len(), 7, "London: redraw seven");
@@ -470,16 +562,30 @@ fn views_hide_other_hands_and_all_libraries() {
     assert_eq!(v0.player(Seat(0)).library.count, 33);
     assert!(spec.players.iter().all(|p| matches!(p.hand, engine::HandView::Hidden { count: 7 })));
     // Draw events reveal cards only to the drawing seat.
-    let drew = game.log.iter().find(|e| matches!(e, engine::EventBase::Drew { seat: Seat(1), .. })).unwrap();
+    let drew = game
+        .log
+        .iter()
+        .find(|e| matches!(e, engine::EventBase::Drew { seat: Seat(1), .. }))
+        .unwrap();
     match drew.view(Some(Seat(0))).unwrap() {
-        engine::EventBase::Drew { cards: engine::DrawnCards::Hidden { count }, .. } => assert_eq!(count, 7),
+        engine::EventBase::Drew {
+            cards: engine::DrawnCards::Hidden { count },
+            ..
+        } => assert_eq!(count, 7),
         other => panic!("{other:?}"),
     }
     match drew.view(Some(Seat(1))).unwrap() {
-        engine::EventBase::Drew { cards: engine::DrawnCards::Yours(ids), .. } => assert_eq!(ids.len(), 7),
+        engine::EventBase::Drew {
+            cards: engine::DrawnCards::Yours(ids),
+            ..
+        } => assert_eq!(ids.len(), 7),
         other => panic!("{other:?}"),
     }
-    let private = engine::Event::Chat { from: Seat(0), to: Some(Seat(1)), text: "gg".into() };
+    let private = engine::Event::Chat {
+        from: Seat(0),
+        to: Some(Seat(1)),
+        text: "gg".into(),
+    };
     assert!(private.view(None).is_none());
     assert!(private.view(Some(Seat(1))).is_some());
 }
@@ -513,15 +619,31 @@ fn illegal_decks_and_player_counts_are_refused() {
         vec![PlayerSetup { name: "a".into(), deck: a }, PlayerSetup { name: "b".into(), deck: b }]
     };
     let err = Game::new(
-        GameConfig { format: Format::cube(), players: players(short, green.clone()), cards: db.clone(), starting_player: None },
+        GameConfig {
+            format: Format::cube(),
+            players: players(short, green.clone()),
+            cards: db.clone(),
+            starting_player: None,
+        },
         1,
     )
     .unwrap_err();
     assert!(matches!(err, RulesError::Setup { .. }), "{err}");
     let mut three = players(green.clone(), green.clone());
-    three.push(PlayerSetup { name: "c".into(), deck: green.clone() });
-    let err = Game::new(GameConfig { format: Format::cube(), players: three, cards: db.clone(), starting_player: None }, 1)
-        .unwrap_err();
+    three.push(PlayerSetup {
+        name: "c".into(),
+        deck: green.clone(),
+    });
+    let err = Game::new(
+        GameConfig {
+            format: Format::cube(),
+            players: three,
+            cards: db.clone(),
+            starting_player: None,
+        },
+        1,
+    )
+    .unwrap_err();
     assert!(err.to_string().contains("players"), "{err}");
     let err = Game::new(
         GameConfig {
@@ -546,8 +668,14 @@ fn same_seed_and_actions_give_the_same_game() {
         GameConfig {
             format: b.format.clone(),
             players: vec![
-                PlayerSetup { name: "Connor".into(), deck: deck_of(&a, Seat(0)) },
-                PlayerSetup { name: "Claude".into(), deck: deck_of(&a, Seat(1)) },
+                PlayerSetup {
+                    name: "Connor".into(),
+                    deck: deck_of(&a, Seat(0)),
+                },
+                PlayerSetup {
+                    name: "Claude".into(),
+                    deck: deck_of(&a, Seat(1)),
+                },
             ],
             cards: Arc::new(cards::core()),
             starting_player: Some(Seat(0)),

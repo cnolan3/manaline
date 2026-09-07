@@ -1,0 +1,10 @@
+Card(
+    name: "Vulshok Sorcerer",
+    cost: "{1}{R}{R}",
+    types: [Creature],
+    subtypes: ["Human", "Shaman", "Sorcerer"],
+    pt: (1, 1),
+    text: "Haste\n{T}: This creature deals 1 damage to any target.",
+    keywords: [Haste],
+    activated: [Ability(cost: [Tap], targets: [Any], effects: [DealDamage(amount: Const(1), to: Target(0))])],
+)

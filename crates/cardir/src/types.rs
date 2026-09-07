@@ -83,6 +83,8 @@ impl CardType {
 pub enum Supertype {
     Basic,
     Legendary,
+    /// Snow permanents: no rules weight here, kept so the type line matches.
+    Snow,
 }
 
 /// The evergreen keywords the engine implements (§4.2).
@@ -167,8 +169,8 @@ impl ManaCost {
             if let Ok(n) = sym.parse::<u8>() {
                 cost.generic = cost.generic.saturating_add(n);
             } else if sym.len() == 1 {
-                let c = Color::from_symbol(sym.chars().next().unwrap())
-                    .ok_or_else(|| format!("unknown mana symbol {{{sym}}} in {text:?}"))?;
+                let c =
+                    Color::from_symbol(sym.chars().next().unwrap()).ok_or_else(|| format!("unknown mana symbol {{{sym}}} in {text:?}"))?;
                 cost.pips.push(c);
             } else {
                 return Err(format!("unsupported mana symbol {{{sym}}} in {text:?}"));

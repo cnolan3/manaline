@@ -1,0 +1,7 @@
+Card(
+    name: "Disfigure",
+    cost: "{B}",
+    types: [Instant],
+    text: "Target creature gets -2/-2 until end of turn.",
+    spell: Spell(targets: [Creature], effects: [ModifyPt(target: Target(0), power: Const(-2), toughness: Const(-2), until: EndOfTurn)]),
+)

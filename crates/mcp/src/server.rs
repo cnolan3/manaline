@@ -8,8 +8,7 @@ use protocol::{ClientError, LegalAction};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
     CacheScope, CallToolResult, ContentBlock, ErrorData, Implementation, ListResourcesResult, PaginatedRequestParams, PromptMessage,
-    ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult, Resource, ResourceContents, Role,
-    ServerCapabilities, ServerInfo,
+    ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult, Resource, ResourceContents, Role, ServerCapabilities, ServerInfo,
 };
 use rmcp::service::RequestContext;
 use rmcp::{prompt, prompt_handler, prompt_router, tool, tool_handler, tool_router, RoleServer, ServerHandler};
@@ -154,7 +153,9 @@ impl McpServer {
     )]
     pub async fn get_game_state(&self) -> Result<CallToolResult, ErrorData> {
         self.session.refresh().await;
-        let Some(view) = self.session.view() else { return Ok(self.not_started()) };
+        let Some(view) = self.session.view() else {
+            return Ok(self.not_started());
+        };
         let legal = if view.must_act.contains_key(&self.session.me) {
             self.session.legal_actions().await.map(|(l, _, _)| l).unwrap_or_default()
         } else {
@@ -179,7 +180,11 @@ impl McpServer {
                 let text = if legal.is_empty() {
                     "It is not your turn to act. Call wait_for_turn.".to_string()
                 } else {
-                    format!("Your turn to act: {}.\n{}", reason.map(reason_text).unwrap_or("act"), render_legal(&legal))
+                    format!(
+                        "Your turn to act: {}.\n{}",
+                        reason.map(reason_text).unwrap_or("act"),
+                        render_legal(&legal)
+                    )
                 };
                 Ok(text_and_json(
                     text,
@@ -264,15 +269,26 @@ impl McpServer {
                 Wait::TimedOut => break,
                 Wait::Ready(view) => {
                     if let Some(o) = view.outcome {
-                        let text = format!("The game is over: {}.\n\n{}", outcome_text(&self.session, o), render_state(&self.session, &view, &[]));
-                        return Ok(text_and_json(text, serde_json::json!({ "game_over": true, "outcome": o, "state": view, "auto_passed": auto_passed })));
+                        let text = format!(
+                            "The game is over: {}.\n\n{}",
+                            outcome_text(&self.session, o),
+                            render_state(&self.session, &view, &[])
+                        );
+                        return Ok(text_and_json(
+                            text,
+                            serde_json::json!({ "game_over": true, "outcome": o, "state": view, "auto_passed": auto_passed }),
+                        ));
                     }
                     let (legal, version, reason) = self.session.legal_actions().await.unwrap_or_default();
                     if auto_pass && nothing_to_do(&legal) {
                         // Only pass and concede: pass on the agent's behalf and keep waiting.
                         match self.session.act(Action::PassPriority, version).await {
                             Ok(_) => auto_passed += 1,
-                            Err(ClientError::Protocol(e)) if matches!(e.code, protocol::ErrorCode::StaleStateVersion | protocol::ErrorCode::NotYourTurnToAct) => {}
+                            Err(ClientError::Protocol(e))
+                                if matches!(
+                                    e.code,
+                                    protocol::ErrorCode::StaleStateVersion | protocol::ErrorCode::NotYourTurnToAct
+                                ) => {}
                             Err(e) => return Ok(tool_error(format!("auto-pass failed: {}", describe_client_error(e)))),
                         }
                         continue;
@@ -301,12 +317,19 @@ impl McpServer {
             };
             let def = self.session.cards.lookup(&o.name).map(|c| self.session.cards.get(c).clone());
             let mut text = card_text(&o.name, &o.cost.to_string(), &o.types, &o.subtypes, o.pt, &o.text);
-            let mut state = vec![format!("{:?}", o.zone).to_lowercase(), format!("controlled by {}", self.session.seat_name(o.controller))];
+            let mut state = vec![
+                format!("{:?}", o.zone).to_lowercase(),
+                format!("controlled by {}", self.session.seat_name(o.controller)),
+            ];
             if o.tapped {
                 state.push("tapped".into());
             }
             if o.summoning_sick && o.pt.is_some() {
-                state.push(if o.keywords.contains(&engine::Keyword::Haste) { "summoning sick, but has haste so it can attack".into() } else { "summoning sick".into() });
+                state.push(if o.keywords.contains(&engine::Keyword::Haste) {
+                    "summoning sick, but has haste so it can attack".into()
+                } else {
+                    "summoning sick".into()
+                });
             }
             if o.damage > 0 {
                 state.push(format!("{} damage marked", o.damage));
@@ -315,7 +338,10 @@ impl McpServer {
                 state.push("attacking".into());
             }
             if !o.blocking.is_empty() {
-                state.push(format!("blocking {}", o.blocking.iter().map(|b| b.to_string()).collect::<Vec<_>>().join(", ")));
+                state.push(format!(
+                    "blocking {}",
+                    o.blocking.iter().map(|b| b.to_string()).collect::<Vec<_>>().join(", ")
+                ));
             }
             text.push_str(&format!("\nState: {}", state.join(", ")));
             let mut json = serde_json::json!({ "object": o });
@@ -324,7 +350,9 @@ impl McpServer {
             }
             return Ok(text_and_json(text, json));
         }
-        let Some(name) = p.name else { return Ok(tool_error("pass name or object_id")) };
+        let Some(name) = p.name else {
+            return Ok(tool_error("pass name or object_id"));
+        };
         let Some(id) = self.session.cards.lookup(&name) else {
             return Ok(tool_error(format!("no card named {name:?} in this game's card set")));
         };
@@ -337,18 +365,28 @@ impl McpServer {
         Ok(text_and_json(text, json))
     }
 
-    #[tool(name = "get_log", description = "The game log including table chat, seat-filtered, one line per event.")]
+    #[tool(
+        name = "get_log",
+        description = "The game log including table chat, seat-filtered, one line per event."
+    )]
     pub async fn get_log(&self, Parameters(p): Parameters<GetLogParams>) -> Result<CallToolResult, ErrorData> {
         let lines = self.session.log_since(p.since_turn);
         let text = if lines.is_empty() {
             "(nothing yet)".to_string()
         } else {
-            lines.iter().map(|l| format!("T{}  {}", l.turn, l.text)).collect::<Vec<_>>().join("\n")
+            lines
+                .iter()
+                .map(|l| format!("T{}  {}", l.turn, l.text))
+                .collect::<Vec<_>>()
+                .join("\n")
         };
         Ok(text_and_json(text, serde_json::json!({ "lines": lines })))
     }
 
-    #[tool(name = "say", description = "Say something to the table (parameter: text). It appears in the other players' logs.")]
+    #[tool(
+        name = "say",
+        description = "Say something to the table (parameter: text). It appears in the other players' logs."
+    )]
     pub async fn say(&self, Parameters(p): Parameters<SayParams>) -> Result<CallToolResult, ErrorData> {
         match self.session.client.chat(&p.text, None).await {
             Ok(()) => Ok(CallToolResult::success(vec![ContentBlock::text("said")])),
@@ -438,7 +476,13 @@ impl McpServer {
 #[prompt_handler]
 impl ServerHandler for McpServer {
     fn get_info(&self) -> ServerInfo {
-        let mut info = ServerInfo::new(ServerCapabilities::builder().enable_tools().enable_prompts().enable_resources().build());
+        let mut info = ServerInfo::new(
+            ServerCapabilities::builder()
+                .enable_tools()
+                .enable_prompts()
+                .enable_resources()
+                .build(),
+        );
         info.server_info = Implementation::new("manaline", env!("CARGO_PKG_VERSION")).with_title("manaline");
         info.with_instructions(format!(
                 "manaline: you are seat {} in a game of Magic: The Gathering. Read `{PRIMER_URI}` for the rules, then loop wait_for_turn → take_action. Use `say` to talk to the table.",
@@ -456,7 +500,9 @@ impl ServerHandler for McpServer {
         Ok(ListResourcesResult::with_all_items(vec![
             Resource::new(PRIMER_URI, "rules-primer")
                 .with_title("Rules primer")
-                .with_description("A plain-English summary of turn structure, priority, combat, and the stack, for an agent that has never played.")
+                .with_description(
+                    "A plain-English summary of turn structure, priority, combat, and the stack, for an agent that has never played.",
+                )
                 .with_mime_type("text/markdown"),
             Resource::new(CUBE_URI, "cube")
                 .with_title("Card list")
@@ -489,7 +535,11 @@ pub fn cube_text(db: &engine::CardDb) -> String {
     for (_, c) in db.iter() {
         let pt = c.pt.map(|(p, t)| format!(" {p}/{t}")).unwrap_or_default();
         let types: Vec<String> = c.types.iter().map(|t| format!("{t:?}")).collect();
-        let sub = if c.subtypes.is_empty() { String::new() } else { format!(" — {}", c.subtypes.join(" ")) };
+        let sub = if c.subtypes.is_empty() {
+            String::new()
+        } else {
+            format!(" — {}", c.subtypes.join(" "))
+        };
         s.push_str(&format!("{} {} · {}{sub}{pt}", c.name, c.cost, types.join(" ")));
         if !c.text.is_empty() {
             s.push_str(&format!(" · {}", c.text));

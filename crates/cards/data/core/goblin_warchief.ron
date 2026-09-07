@@ -1,0 +1,9 @@
+Card(
+    name: "Goblin Warchief",
+    cost: "{1}{R}{R}",
+    types: [Creature],
+    subtypes: ["Goblin", "Warrior"],
+    pt: (2, 2),
+    text: "Goblin spells you cast cost {1} less to cast.\nGoblins you control have haste.",
+    statics: [CostReduction(filter: And([Subtype("Goblin"), Spell]), amount: Const(1)), GrantKeyword(filter: And([Subtype("Goblin"), ControlledBy(You)]), keyword: Haste)],
+)

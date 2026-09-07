@@ -24,7 +24,10 @@ pub async fn run(settings: BotSettings) -> Result<(Seat, Option<Outcome>)> {
         .await
         .with_context(|| format!("connecting to {}", settings.endpoint))?;
     let welcome = client.hello(&settings.token, Some(&settings.name)).await?;
-    let seat = welcome.role.seat().ok_or_else(|| anyhow!("the bot needs a seat token, not a spectator token"))?;
+    let seat = welcome
+        .role
+        .seat()
+        .ok_or_else(|| anyhow!("the bot needs a seat token, not a spectator token"))?;
     client.subscribe().await?;
     if !welcome.lobby.started {
         match client.set_deck(&settings.decklist).await? {
@@ -71,7 +74,10 @@ pub async fn play(client: &mut Client, seed: u64) -> Result<Option<Outcome>> {
             return Ok(state.outcome);
         }
         match client.next_push().await {
-            Ok(ServerMessage::Event { event: engine::EventBase::GameOver { outcome }, .. }) => return Ok(Some(outcome)),
+            Ok(ServerMessage::Event {
+                event: engine::EventBase::GameOver { outcome },
+                ..
+            }) => return Ok(Some(outcome)),
             Ok(_) => continue,
             Err(ClientError::Frame(protocol::FrameError::Closed)) => return Ok(None),
             Err(e) => return Err(e.into()),

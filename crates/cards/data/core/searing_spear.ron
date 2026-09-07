@@ -1,0 +1,7 @@
+Card(
+    name: "Searing Spear",
+    cost: "{1}{R}",
+    types: [Instant],
+    text: "Searing Spear deals 3 damage to any target.",
+    spell: Spell(targets: [Any], effects: [DealDamage(amount: Const(3), to: Target(0))]),
+)

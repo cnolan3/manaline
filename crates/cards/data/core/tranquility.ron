@@ -1,0 +1,7 @@
+Card(
+    name: "Tranquility",
+    cost: "{2}{G}",
+    types: [Sorcery],
+    text: "Destroy all enchantments.",
+    spell: Spell(effects: [Destroy(target: Each(Enchantment))]),
+)

@@ -1,0 +1,9 @@
+Card(
+    name: "Lightning Elemental",
+    cost: "{3}{R}",
+    types: [Creature],
+    subtypes: ["Elemental"],
+    pt: (4, 1),
+    text: "Haste (This creature can attack and {T} as soon as it comes under your control.)",
+    keywords: [Haste],
+)

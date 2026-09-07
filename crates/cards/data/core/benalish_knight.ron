@@ -1,0 +1,9 @@
+Card(
+    name: "Benalish Knight",
+    cost: "{2}{W}",
+    types: [Creature],
+    subtypes: ["Human", "Knight"],
+    pt: (2, 2),
+    text: "Flash (You may cast this spell any time you could cast an instant.)\nFirst strike (This creature deals combat damage before creatures without first strike.)",
+    keywords: [Flash, FirstStrike],
+)

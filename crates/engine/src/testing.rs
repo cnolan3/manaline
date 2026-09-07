@@ -15,14 +15,25 @@ use std::sync::Arc;
 pub fn scenario_format(seats: usize) -> Format {
     Format {
         name: "Scenario".into(),
-        players: PlayerRange { min: 2, max: seats.max(2) as u8 },
+        players: PlayerRange {
+            min: 2,
+            max: seats.max(2) as u8,
+        },
         starting_life: 20,
         starting_hand: 0,
         max_hand_size: 7,
         mulligan: MulliganRule::London { free_first: false },
-        deck: Deck { size: DeckSize::Min(0), singleton: false, includes_commander: false },
+        deck: Deck {
+            size: DeckSize::Min(0),
+            singleton: false,
+            includes_commander: false,
+        },
         rules: Vec::new(),
-        legality: Legality { pool: CardPool::All, banned: Vec::new(), allowed: Vec::new() },
+        legality: Legality {
+            pool: CardPool::All,
+            banned: Vec::new(),
+            allowed: Vec::new(),
+        },
     }
 }
 
@@ -63,7 +74,9 @@ impl TestGame {
     }
 
     fn card(&self, name: &str) -> CardId {
-        self.db.lookup(name).unwrap_or_else(|| panic!("no card named {name:?} in the test database"))
+        self.db
+            .lookup(name)
+            .unwrap_or_else(|| panic!("no card named {name:?} in the test database"))
     }
 
     /// Put `name` onto `seat`'s battlefield, untapped and not summoning sick.
@@ -108,7 +121,10 @@ impl TestGame {
                     Some(d) => d.clone(),
                     None => forest.map(|f| vec![f; 10]).unwrap_or_default(),
                 };
-                PlayerSetup { name: format!("P{i}"), deck }
+                PlayerSetup {
+                    name: format!("P{i}"),
+                    deck,
+                }
             })
             .collect();
         let config = GameConfig {
@@ -158,7 +174,9 @@ pub fn put_in_hand(game: &mut Game, seat: Seat, card: CardId) -> ObjectId {
 /// pending choices with their first suggestion) until the game is at the
 /// start of `phase` with the active player holding priority.
 pub fn advance_to(game: &mut Game, phase: Phase) -> Result<(), RulesError> {
-    advance_until(game, |g| g.phase == phase && g.pending.is_none() && g.priority == Some(g.active_player))
+    advance_until(game, |g| {
+        g.phase == phase && g.pending.is_none() && g.priority == Some(g.active_player)
+    })
 }
 
 /// Like `advance_to`, but stops as soon as `done` holds (checked before each
@@ -173,7 +191,11 @@ pub fn advance_until(game: &mut Game, done: impl Fn(&Game) -> bool) -> Result<()
             Some(PendingChoice::DeclareBlockers { seat, .. }) => (*seat, Action::DeclareBlockers { blocks: Vec::new() }),
             Some(p) => {
                 let seat = p.seat();
-                let first = game.legal_actions(seat).into_iter().next().expect("pending seat has a legal action");
+                let first = game
+                    .legal_actions(seat)
+                    .into_iter()
+                    .next()
+                    .expect("pending seat has a legal action");
                 (seat, first)
             }
             None => (game.priority.expect("someone has priority"), Action::PassPriority),

@@ -1,0 +1,10 @@
+Card(
+    name: "Imperious Perfect",
+    cost: "{2}{G}",
+    types: [Creature],
+    subtypes: ["Elf", "Warrior"],
+    pt: (2, 2),
+    text: "Other Elves you control get +1/+1.\n{G}, {T}: Create a 1/1 green Elf Warrior creature token.",
+    statics: [PtBoost(filter: And([Other, Subtype("Elf"), ControlledBy(You)]), power: Const(1), toughness: Const(1))],
+    activated: [Ability(cost: [Mana("{G}"), Tap], effects: [CreateToken(spec: TokenSpec(name: "Elf Warrior", colors: [Green], types: [Creature], subtypes: ["Elf", "Warrior"], pt: (1, 1)), count: Const(1))])],
+)

@@ -15,13 +15,25 @@ fn key(code: KeyCode) -> KeyEvent {
 }
 
 fn app_for(game: &engine::Game, seat: Seat) -> App {
-    let mut app = App::new(Some(seat), "TEST42".into(), "Scenario".into(), LobbyView { seats: vec![], started: true });
+    let mut app = App::new(
+        Some(seat),
+        "TEST42".into(),
+        "Scenario".into(),
+        LobbyView {
+            seats: vec![],
+            started: true,
+        },
+    );
     app.set_view(game.view(seat));
     let legal: Vec<LegalAction> = game
         .legal_actions(seat)
         .into_iter()
         .enumerate()
-        .map(|(i, action)| LegalAction { id: i as u32, description: engine::text::describe_action(game, &action), action })
+        .map(|(i, action)| LegalAction {
+            id: i as u32,
+            description: engine::text::describe_action(game, &action),
+            action,
+        })
         .collect();
     let reason = game.must_act().get(&seat).copied();
     app.set_legal(legal, game.state_version(), reason);
@@ -106,7 +118,15 @@ fn compact_layout_at_80x24_keeps_every_pane() {
 #[test]
 fn spectator_and_lobby_render() {
     let game = board();
-    let mut spec = App::new(None, "TEST42".into(), "Scenario".into(), LobbyView { seats: vec![], started: true });
+    let mut spec = App::new(
+        None,
+        "TEST42".into(),
+        "Scenario".into(),
+        LobbyView {
+            seats: vec![],
+            started: true,
+        },
+    );
     spec.set_view(game.view_spectator());
     let s = render(&spec, 100, 32);
     assert!(s.contains("Spectating"));
@@ -116,8 +136,20 @@ fn spectator_and_lobby_render() {
         "Starter Cube".into(),
         LobbyView {
             seats: vec![
-                protocol::SeatStatus { seat: Seat(0), name: Some("Connor".into()), connected: true, deck_ok: true, ready: true },
-                protocol::SeatStatus { seat: Seat(1), name: None, connected: false, deck_ok: false, ready: false },
+                protocol::SeatStatus {
+                    seat: Seat(0),
+                    name: Some("Connor".into()),
+                    connected: true,
+                    deck_ok: true,
+                    ready: true,
+                },
+                protocol::SeatStatus {
+                    seat: Seat(1),
+                    name: None,
+                    connected: false,
+                    deck_ok: false,
+                    ready: false,
+                },
             ],
             started: false,
         },
@@ -162,10 +194,17 @@ fn attack_picker_auto_opens_and_declares() {
     let s = render(&app, 100, 32);
     assert!(s.contains("→ P1"), "{s}");
     let cmds = app.handle_key(key(KeyCode::Enter));
-    let bears = game.players[0].battlefield.iter().copied().find(|id| game.object_name(*id) == "Grizzly Bears").unwrap();
+    let bears = game.players[0]
+        .battlefield
+        .iter()
+        .copied()
+        .find(|id| game.object_name(*id) == "Grizzly Bears")
+        .unwrap();
     assert_eq!(
         cmds,
-        vec![Command::Act(Action::DeclareAttackers { attackers: vec![(bears, AttackTarget::Player(Seat(1)))] })]
+        vec![Command::Act(Action::DeclareAttackers {
+            attackers: vec![(bears, AttackTarget::Player(Seat(1)))]
+        })]
     );
     // Escape closes; 'a' reopens.
     app.mode = Mode::Normal;
@@ -184,7 +223,13 @@ fn block_and_damage_pickers() {
         .build();
     advance_until(&mut game, |g| matches!(g.pending, Some(PendingChoice::DeclareAttackers { .. }))).unwrap();
     let giant = game.players[0].battlefield[0];
-    game.apply(Seat(0), &Action::DeclareAttackers { attackers: vec![(giant, AttackTarget::Player(Seat(1)))] }).unwrap();
+    game.apply(
+        Seat(0),
+        &Action::DeclareAttackers {
+            attackers: vec![(giant, AttackTarget::Player(Seat(1)))],
+        },
+    )
+    .unwrap();
     for _ in 0..2 {
         let s = game.priority.unwrap();
         game.apply(s, &Action::PassPriority).unwrap();
@@ -224,7 +269,9 @@ fn block_and_damage_pickers() {
     app.handle_key(key(KeyCode::Char('+')));
     let cmds = app.handle_key(key(KeyCode::Enter));
     let Command::Act(action) = &cmds[0] else { panic!() };
-    let Action::AssignCombatDamage { assignments, .. } = action else { panic!() };
+    let Action::AssignCombatDamage { assignments, .. } = action else {
+        panic!()
+    };
     assert_eq!(assignments.iter().map(|(_, n)| *n).sum::<i32>(), 3);
     game.apply(Seat(0), action).unwrap();
 }
@@ -236,8 +283,14 @@ fn mulligan_menu_and_log_lines() {
     let config = engine::GameConfig {
         format: engine::Format::cube(),
         players: vec![
-            engine::PlayerSetup { name: "Connor".into(), deck: green.clone() },
-            engine::PlayerSetup { name: "Bot".into(), deck: green },
+            engine::PlayerSetup {
+                name: "Connor".into(),
+                deck: green.clone(),
+            },
+            engine::PlayerSetup {
+                name: "Bot".into(),
+                deck: green,
+            },
         ],
         cards: db,
         starting_player: Some(Seat(0)),
@@ -255,14 +308,21 @@ fn mulligan_menu_and_log_lines() {
     // Pushed events become log lines with names from the view; hidden draws stay hidden.
     for e in &game.log {
         if let Some(v) = e.view(Some(Seat(0))) {
-            app.handle_push(protocol::ServerMessage::Event { event: v, state_version: 1 });
+            app.handle_push(protocol::ServerMessage::Event {
+                event: v,
+                state_version: 1,
+            });
         }
     }
     let text: Vec<&str> = app.log.iter().map(|l| l.text.as_str()).collect();
     assert!(text.iter().any(|t| t.contains("Connor draws 7 card(s)")), "{text:?}");
     assert!(text.iter().any(|t| t.contains("Bot draws 7 card(s)")));
     app.handle_push(protocol::ServerMessage::Event {
-        event: engine::EventBase::Chat { from: Seat(1), to: None, text: "gl hf".into() },
+        event: engine::EventBase::Chat {
+            from: Seat(1),
+            to: None,
+            text: "gl hf".into(),
+        },
         state_version: 1,
     });
     assert_eq!(app.log.last().unwrap().text, "Bot: gl hf");
@@ -272,7 +332,6 @@ fn mulligan_menu_and_log_lines() {
     let s = render(&app, 100, 32);
     assert!(s.contains("Bot: gl hf"));
 }
-
 
 #[test]
 fn minor_priority_moments_auto_pass_and_main_phases_wait() {
@@ -289,7 +348,10 @@ fn minor_priority_moments_auto_pass_and_main_phases_wait() {
     let mut game = board();
     advance_to(&mut game, Phase::BeginCombat).unwrap();
     assert_eq!(game.phase, Phase::BeginCombat);
-    let mut app = app_for(&game, Seat(0)).with_settings(Settings { auto_pass_ms: 500, ..Settings::default() });
+    let mut app = app_for(&game, Seat(0)).with_settings(Settings {
+        auto_pass_ms: 500,
+        ..Settings::default()
+    });
     app.set_legal(app.legal.clone(), app.legal_version, app.reason);
     assert!(app.priority_is_minor());
     assert!(app.auto_pass_at.is_some());
@@ -332,8 +394,14 @@ fn bottoming_after_two_mulligans_uses_a_hand_picker() {
     let config = engine::GameConfig {
         format: engine::Format::cube(),
         players: vec![
-            engine::PlayerSetup { name: "Connor".into(), deck: green.clone() },
-            engine::PlayerSetup { name: "Bot".into(), deck: green },
+            engine::PlayerSetup {
+                name: "Connor".into(),
+                deck: green.clone(),
+            },
+            engine::PlayerSetup {
+                name: "Bot".into(),
+                deck: green,
+            },
         ],
         cards: db,
         starting_player: Some(Seat(0)),
@@ -387,7 +455,10 @@ fn card_boxes_get_a_keyword_row_when_there_is_room_and_it_is_on() {
     let s = render(&app, 100, 32);
     assert!(s.contains("│Angel    │") && !s.contains("Vg"), "{s}");
     // Toggled off in settings: plain boxes even when tall, and chips drop glyphs too.
-    let mut app = app.with_settings(tui::settings::Settings { card_keywords: false, ..Default::default() });
+    let mut app = app.with_settings(tui::settings::Settings {
+        card_keywords: false,
+        ..Default::default()
+    });
     app.mode = Mode::Normal;
     let s = render(&app, 100, 40);
     assert!(s.contains("│Angel    │") && !s.contains("Vg"), "{s}");

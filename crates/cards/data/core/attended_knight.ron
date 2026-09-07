@@ -1,0 +1,10 @@
+Card(
+    name: "Attended Knight",
+    cost: "{2}{W}",
+    types: [Creature],
+    subtypes: ["Human", "Knight"],
+    pt: (2, 2),
+    text: "First strike\nWhen this creature enters, create a 1/1 white Soldier creature token.",
+    keywords: [FirstStrike],
+    triggers: [Etb(effects: [CreateToken(spec: TokenSpec(name: "Soldier", colors: [White], types: [Creature], subtypes: ["Soldier"], pt: (1, 1)), count: Const(1))])],
+)

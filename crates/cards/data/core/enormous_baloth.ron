@@ -1,0 +1,8 @@
+Card(
+    name: "Enormous Baloth",
+    cost: "{6}{G}",
+    types: [Creature],
+    subtypes: ["Beast"],
+    pt: (7, 7),
+    text: "",
+)

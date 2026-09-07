@@ -45,6 +45,7 @@ async fn start(seats: u8, seed: u64, tcp: bool) -> Running {
             seed: Some(seed),
         }),
         cards: Arc::new(cards::core()),
+        legality: None,
     };
     let daemon = Daemon::bind(config).await.unwrap();
     let info = daemon.info().clone();
@@ -94,7 +95,10 @@ async fn bot_loop(mut c: Client, seed: u64) -> Client {
         }
         // Not our turn: wait for something to happen.
         match c.next_push().await.unwrap() {
-            ServerMessage::Event { event: engine::EventBase::GameOver { .. }, .. } => return c,
+            ServerMessage::Event {
+                event: engine::EventBase::GameOver { .. },
+                ..
+            } => return c,
             _ => continue,
         }
     }
@@ -134,11 +138,7 @@ async fn bots_play_a_whole_game_over_a_unix_socket_and_the_log_replays_it() {
     r.task.await.unwrap();
 }
 
-async fn b_ready_and_start(
-    b: Client,
-    a: &mut Client,
-    status: &mut tokio::sync::watch::Receiver<daemon::Status>,
-) {
+async fn b_ready_and_start(b: Client, a: &mut Client, status: &mut tokio::sync::watch::Receiver<daemon::Status>) {
     let mut b = b;
     b.ready().await.unwrap();
     status.wait_for(|s| s.state_version > 0 || !s.must_act.is_empty()).await.unwrap();
@@ -168,7 +168,11 @@ async fn bots_play_over_tcp_at_four_seats() {
         c.ready().await.unwrap();
         clients.push(c);
     }
-    let tasks: Vec<_> = clients.into_iter().enumerate().map(|(i, c)| tokio::spawn(bot_loop(c, i as u64))).collect();
+    let tasks: Vec<_> = clients
+        .into_iter()
+        .enumerate()
+        .map(|(i, c)| tokio::spawn(bot_loop(c, i as u64)))
+        .collect();
     for t in tasks {
         t.await.unwrap();
     }
@@ -186,7 +190,11 @@ async fn versions_tokens_and_turn_order_are_enforced() {
     let err = bad.hello(&Token("nope".into()), None).await.unwrap_err();
     assert!(matches!(err, ClientError::Protocol(e) if e.code == ErrorCode::BadToken));
     let err = bad
-        .request(ClientMessage::Hello { token: r.tokens[0].clone(), protocol_version: 99, name: None })
+        .request(ClientMessage::Hello {
+            token: r.tokens[0].clone(),
+            protocol_version: 99,
+            name: None,
+        })
         .await
         .unwrap_err();
     assert!(matches!(err, ClientError::Protocol(e) if e.code == ErrorCode::UnsupportedVersion));
@@ -309,10 +317,17 @@ async fn the_wire_never_carries_another_seats_hidden_information() {
         lines: 0,
         pushed: Default::default(),
     };
-    raw.request(ClientMessage::Hello { token: r.tokens[1].clone(), protocol_version: 1, name: Some("B".into()) })
-        .await;
-    raw.request(ClientMessage::SetDeck { decklist: cards::deck_text("red").unwrap().into(), commander: None })
-        .await;
+    raw.request(ClientMessage::Hello {
+        token: r.tokens[1].clone(),
+        protocol_version: 1,
+        name: Some("B".into()),
+    })
+    .await;
+    raw.request(ClientMessage::SetDeck {
+        decklist: cards::deck_text("red").unwrap().into(),
+        commander: None,
+    })
+    .await;
     raw.request(ClientMessage::Subscribe).await;
     let a = a_ready.await;
     raw.request(ClientMessage::Ready).await;
@@ -322,12 +337,21 @@ async fn the_wire_never_carries_another_seats_hidden_information() {
     loop {
         let reply = raw.request(ClientMessage::GetLegalActions).await;
         let (acts, version) = match reply {
-            ServerMessage::LegalActions { actions, state_version, .. } => (actions, state_version),
+            ServerMessage::LegalActions {
+                actions, state_version, ..
+            } => (actions, state_version),
             other => panic!("{other:?}"),
         };
         let playable: Vec<_> = acts.iter().filter(|x| !matches!(x.action, Action::Concede)).collect();
         if let Some(pick) = playable.choose(&mut rng) {
-            match raw.request(ClientMessage::Act { action_id: Some(pick.id), action: None, state_version: version }).await {
+            match raw
+                .request(ClientMessage::Act {
+                    action_id: Some(pick.id),
+                    action: None,
+                    state_version: version,
+                })
+                .await
+            {
                 ServerMessage::Ack { state, .. } if state.outcome.is_some() => break,
                 ServerMessage::Ack { .. } | ServerMessage::Error(_) => continue,
                 other => panic!("{other:?}"),
@@ -399,7 +423,10 @@ fn check_value(v: &serde_json::Value, me: Seat, line: &str) {
         // An ObjectView: must be public, or in my hand.
         if let (Some(zone), Some(owner)) = (obj.get("zone").and_then(|z| z.as_str()), obj.get("owner").and_then(|o| o.as_u64())) {
             let public = matches!(zone, "battlefield" | "graveyard" | "exile" | "stack" | "command");
-            assert!(public || (zone == "hand" && owner == me_n), "leaked object in {zone} owned by {owner}: {line}");
+            assert!(
+                public || (zone == "hand" && owner == me_n),
+                "leaked object in {zone} owned by {owner}: {line}"
+            );
         }
         // A PlayerView: hands of others hidden, libraries always a count.
         if let (Some(seat), Some(hand)) = (obj.get("seat").and_then(|s| s.as_u64()), obj.get("hand")) {
@@ -407,7 +434,10 @@ fn check_value(v: &serde_json::Value, me: Seat, line: &str) {
                 assert_eq!(seat, me_n, "another seat's hand contents on the wire: {line}");
             }
             if let Some(lib) = obj.get("library") {
-                assert!(lib.get("count").is_some() && lib.as_object().map(|o| o.len()) == Some(1), "library contents on the wire: {line}");
+                assert!(
+                    lib.get("count").is_some() && lib.as_object().map(|o| o.len()) == Some(1),
+                    "library contents on the wire: {line}"
+                );
             }
             assert!(obj.get("mana_pool").map(|m| m.is_null() || seat == me_n).unwrap_or(true));
         }

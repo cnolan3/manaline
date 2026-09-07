@@ -1,0 +1,9 @@
+Card(
+    name: "Leaden Myr",
+    cost: "{2}",
+    types: [Artifact, Creature],
+    subtypes: ["Myr"],
+    pt: (1, 1),
+    text: "{T}: Add {B}.",
+    activated: [Ability(cost: [Tap], effects: [AddMana(color: Black, amount: Const(1))])],
+)

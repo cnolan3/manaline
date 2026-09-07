@@ -1,0 +1,7 @@
+Card(
+    name: "Sunlance",
+    cost: "{W}",
+    types: [Sorcery],
+    text: "Sunlance deals 3 damage to target nonwhite creature.",
+    spell: Spell(targets: [And([Not(Color(White)), Creature])], effects: [DealDamage(amount: Const(3), to: Target(0))]),
+)

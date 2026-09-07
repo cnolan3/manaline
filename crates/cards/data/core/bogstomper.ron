@@ -1,0 +1,8 @@
+Card(
+    name: "Bogstomper",
+    cost: "{4}{B}{B}",
+    types: [Creature],
+    subtypes: ["Beast"],
+    pt: (6, 5),
+    text: "",
+)

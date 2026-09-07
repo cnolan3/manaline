@@ -1,0 +1,7 @@
+Card(
+    name: "Glorious Charge",
+    cost: "{1}{W}",
+    types: [Instant],
+    text: "Creatures you control get +1/+1 until end of turn.",
+    spell: Spell(effects: [ModifyPt(target: Each(And([Creature, ControlledBy(You)])), power: Const(1), toughness: Const(1), until: EndOfTurn)]),
+)

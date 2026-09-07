@@ -1,0 +1,7 @@
+Card(
+    name: "Deathmark",
+    cost: "{B}",
+    types: [Sorcery],
+    text: "Destroy target green or white creature.",
+    spell: Spell(targets: [And([Or([Color(Green), Color(White)]), Creature])], effects: [Destroy(target: Target(0))]),
+)

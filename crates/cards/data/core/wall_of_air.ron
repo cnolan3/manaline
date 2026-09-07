@@ -1,0 +1,9 @@
+Card(
+    name: "Wall of Air",
+    cost: "{1}{U}{U}",
+    types: [Creature],
+    subtypes: ["Wall"],
+    pt: (1, 5),
+    text: "Defender, flying (This creature can't attack, and it can block creatures with flying.)",
+    keywords: [Defender, Flying],
+)

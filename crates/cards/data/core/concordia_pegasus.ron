@@ -1,0 +1,9 @@
+Card(
+    name: "Concordia Pegasus",
+    cost: "{1}{W}",
+    types: [Creature],
+    subtypes: ["Pegasus"],
+    pt: (1, 3),
+    text: "Flying",
+    keywords: [Flying],
+)

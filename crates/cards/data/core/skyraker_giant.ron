@@ -1,0 +1,9 @@
+Card(
+    name: "Skyraker Giant",
+    cost: "{2}{R}{R}",
+    types: [Creature],
+    subtypes: ["Giant"],
+    pt: (4, 3),
+    text: "Reach (This creature can block creatures with flying.)",
+    keywords: [Reach],
+)

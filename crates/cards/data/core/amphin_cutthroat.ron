@@ -1,0 +1,8 @@
+Card(
+    name: "Amphin Cutthroat",
+    cost: "{3}{U}",
+    types: [Creature],
+    subtypes: ["Salamander", "Rogue"],
+    pt: (2, 4),
+    text: "",
+)

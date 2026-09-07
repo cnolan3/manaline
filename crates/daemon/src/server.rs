@@ -9,8 +9,8 @@ use engine::text::describe_action;
 use engine::{ActReason, Action, CardDb, Event, Format, Game, GameConfig, PlayerSetup, Seat, Violation};
 use protocol::messages::{ClientEnvelope, ServerEnvelope};
 use protocol::{
-    ClientMessage, ErrorCode, FramedReader, FramedWriter, GameId, LegalAction, LobbyView, ProtocolError, Role,
-    ServerMessage, Token, PROTOCOL_VERSION,
+    ClientMessage, ErrorCode, FramedReader, FramedWriter, GameId, LegalAction, LobbyView, ProtocolError, Role, ServerMessage, Token,
+    PROTOCOL_VERSION,
 };
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -41,6 +41,8 @@ pub struct DaemonConfig {
     pub replay_dir: Option<PathBuf>,
     pub create: Option<CreateGame>,
     pub cards: Arc<CardDb>,
+    /// Per-format legality for Scryfall-pool formats (the carddb cache), if available.
+    pub legality: Option<Arc<dyn engine::LegalitySource + Send + Sync>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -76,7 +78,10 @@ pub struct Status {
 #[derive(Clone, Debug)]
 enum Broadcast {
     /// Unfiltered engine events; every connection filters for its own role before sending.
-    Events { events: Arc<Vec<Event>>, state_version: u64 },
+    Events {
+        events: Arc<Vec<Event>>,
+        state_version: u64,
+    },
     Lobby(LobbyView),
 }
 
@@ -88,6 +93,7 @@ struct State {
 
 pub(crate) struct Shared {
     cards: Arc<CardDb>,
+    legality: Option<Arc<dyn engine::LegalitySource + Send + Sync>>,
     state: Mutex<State>,
     status: watch::Sender<Status>,
     broadcast: broadcast::Sender<Broadcast>,
@@ -156,7 +162,12 @@ impl Daemon {
         let replay_dir = config.replay_dir.unwrap_or_else(|| protocol::endpoint::data_dir().join("games"));
         let shared = Arc::new(Shared {
             cards: config.cards,
-            state: Mutex::new(State { lobby: None, game: None, replay: None }),
+            legality: config.legality,
+            state: Mutex::new(State {
+                lobby: None,
+                game: None,
+                replay: None,
+            }),
             status,
             broadcast,
             shutdown,
@@ -203,7 +214,13 @@ impl Daemon {
             shared.state.lock().await.lobby = Some(lobby);
         }
 
-        Ok(Daemon { shared, unix, tcp, info, parent_pid: config.parent_pid })
+        Ok(Daemon {
+            shared,
+            unix,
+            tcp,
+            info,
+            parent_pid: config.parent_pid,
+        })
     }
 
     pub fn info(&self) -> &StartupInfo {
@@ -211,12 +228,20 @@ impl Daemon {
     }
 
     pub fn handle(&self) -> DaemonHandle {
-        DaemonHandle { shared: self.shared.clone() }
+        DaemonHandle {
+            shared: self.shared.clone(),
+        }
     }
 
     /// Serve until shut down. Removes the socket file on exit.
     pub async fn run(self) -> Result<(), DaemonError> {
-        let Daemon { shared, unix, tcp, info, parent_pid } = self;
+        let Daemon {
+            shared,
+            unix,
+            tcp,
+            info,
+            parent_pid,
+        } = self;
         let mut shutdown = shared.shutdown.subscribe();
         if let Some(pid) = parent_pid {
             tokio::spawn(watch_parent(pid, shared.clone()));
@@ -279,8 +304,7 @@ fn random_name() -> String {
 }
 
 fn create_lobby(format_name: &str, seats: u8, seed: Option<u64>) -> Result<Lobby, DaemonError> {
-    let format = Format::builtin(format_name)
-        .ok_or_else(|| DaemonError::Setup(format!("unknown format {format_name:?}")))?;
+    let format = Format::builtin(format_name).ok_or_else(|| DaemonError::Setup(format!("unknown format {format_name:?}")))?;
     if !format.allows_player_count(seats as usize) {
         return Err(DaemonError::Setup(format!(
             "{} needs {}–{} players, not {seats}",
@@ -310,7 +334,11 @@ where
 {
     let mut reader: FramedReader<R, ClientEnvelope> = FramedReader::new(reader);
     let mut writer: FramedWriter<W, ServerEnvelope> = FramedWriter::new(writer);
-    let mut conn = Conn { role: None, subscribed: None, peer };
+    let mut conn = Conn {
+        role: None,
+        subscribed: None,
+        peer,
+    };
     debug!(peer = %conn.peer, "connection opened");
     loop {
         tokio::select! {
@@ -381,12 +409,20 @@ fn legal_actions_for(game: &Game, seat: Seat) -> Vec<LegalAction> {
     game.legal_actions(seat)
         .into_iter()
         .enumerate()
-        .map(|(i, action)| LegalAction { id: i as u32, description: describe_action(game, &action), action })
+        .map(|(i, action)| LegalAction {
+            id: i as u32,
+            description: describe_action(game, &action),
+            action,
+        })
         .collect()
 }
 
 fn status_of(game: &Game) -> Status {
-    Status { state_version: game.state_version(), must_act: game.must_act(), game_over: game.is_over().is_some() }
+    Status {
+        state_version: game.state_version(),
+        must_act: game.must_act(),
+        game_over: game.is_over().is_some(),
+    }
 }
 
 fn view_for(game: &Game, role: Role) -> engine::GameView {
@@ -434,7 +470,11 @@ async fn handle_inner(shared: &Arc<Shared>, conn: &mut Conn, msg: ClientMessage)
             Ok(reply)
         }
 
-        ClientMessage::Hello { token, protocol_version, name } => {
+        ClientMessage::Hello {
+            token,
+            protocol_version,
+            name,
+        } => {
             if protocol_version != PROTOCOL_VERSION {
                 return Err(ProtocolError::new(
                     ErrorCode::UnsupportedVersion,
@@ -443,7 +483,9 @@ async fn handle_inner(shared: &Arc<Shared>, conn: &mut Conn, msg: ClientMessage)
             }
             let mut state = shared.state.lock().await;
             let State { lobby, game, .. } = &mut *state;
-            let lobby = lobby.as_mut().ok_or_else(|| ProtocolError::bad_request("no game has been created yet"))?;
+            let lobby = lobby
+                .as_mut()
+                .ok_or_else(|| ProtocolError::bad_request("no game has been created yet"))?;
             let role = lobby
                 .resolve(&token)
                 .ok_or_else(|| ProtocolError::new(ErrorCode::BadToken, "that token does not belong to this game"))?;
@@ -487,10 +529,13 @@ async fn handle_inner(shared: &Arc<Shared>, conn: &mut Conn, msg: ClientMessage)
             let deck = match cards::parse_decklist(&decklist, &shared.cards) {
                 Ok(d) => d,
                 Err(reason) => {
-                    return Ok(ServerMessage::DeckRejected { violations: vec![Violation::Unparsable { reason }] })
+                    return Ok(ServerMessage::DeckRejected {
+                        violations: vec![Violation::Unparsable { reason }],
+                    })
                 }
             };
-            let violations = lobby.format.check_deck(&deck, &shared.cards);
+            let legality = shared.legality.as_deref().map(|l| l as &dyn engine::LegalitySource);
+            let violations = lobby.format.check_deck_with(&deck, &shared.cards, legality);
             if !violations.is_empty() {
                 return Ok(ServerMessage::DeckRejected { violations });
             }
@@ -523,26 +568,44 @@ async fn handle_inner(shared: &Arc<Shared>, conn: &mut Conn, msg: ClientMessage)
         ClientMessage::GetState => {
             let role = require_role(conn)?;
             let state = shared.state.lock().await;
-            let game = state.game.as_ref().ok_or_else(|| ProtocolError::bad_request("the game has not started"))?;
-            Ok(ServerMessage::State { state: view_for(game, role) })
+            let game = state
+                .game
+                .as_ref()
+                .ok_or_else(|| ProtocolError::bad_request("the game has not started"))?;
+            Ok(ServerMessage::State {
+                state: view_for(game, role),
+            })
         }
 
         ClientMessage::GetLegalActions => {
             let role = require_role(conn)?;
             let state = shared.state.lock().await;
-            let game = state.game.as_ref().ok_or_else(|| ProtocolError::bad_request("the game has not started"))?;
+            let game = state
+                .game
+                .as_ref()
+                .ok_or_else(|| ProtocolError::bad_request("the game has not started"))?;
             let (actions, reason) = match role {
                 Role::Seat(s) => (legal_actions_for(game, s), game.must_act().get(&s).copied()),
                 Role::Spectator => (Vec::new(), None),
             };
-            Ok(ServerMessage::LegalActions { actions, state_version: game.state_version(), reason })
+            Ok(ServerMessage::LegalActions {
+                actions,
+                state_version: game.state_version(),
+                reason,
+            })
         }
 
-        ClientMessage::Act { action_id, action, state_version } => {
+        ClientMessage::Act {
+            action_id,
+            action,
+            state_version,
+        } => {
             let seat = require_seat(conn)?;
             let mut state = shared.state.lock().await;
             let State { game, replay, .. } = &mut *state;
-            let game = game.as_mut().ok_or_else(|| ProtocolError::bad_request("the game has not started"))?;
+            let game = game
+                .as_mut()
+                .ok_or_else(|| ProtocolError::bad_request("the game has not started"))?;
             let current = game.state_version();
             if state_version != current {
                 return Err(ProtocolError::new(
@@ -552,9 +615,7 @@ async fn handle_inner(shared: &Arc<Shared>, conn: &mut Conn, msg: ClientMessage)
                 .with_version(current));
             }
             let action: Action = match (action_id, action) {
-                (Some(_), Some(_)) | (None, None) => {
-                    return Err(ProtocolError::bad_request("send exactly one of action_id or action"))
-                }
+                (Some(_), Some(_)) | (None, None) => return Err(ProtocolError::bad_request("send exactly one of action_id or action")),
                 (None, Some(a)) => a,
                 (Some(id), None) => game
                     .legal_actions(seat)
@@ -562,7 +623,9 @@ async fn handle_inner(shared: &Arc<Shared>, conn: &mut Conn, msg: ClientMessage)
                     .nth(id as usize)
                     .ok_or_else(|| ProtocolError::bad_request(format!("no legal action with id {id}")))?,
             };
-            let events = game.apply(seat, &action).map_err(|e| ProtocolError::from(e).with_version(current))?;
+            let events = game
+                .apply(seat, &action)
+                .map_err(|e| ProtocolError::from(e).with_version(current))?;
             if let Some(w) = replay.as_mut() {
                 if let Err(e) = w.append(seat, &action) {
                     warn!("replay log write failed: {e}");
@@ -570,8 +633,15 @@ async fn handle_inner(shared: &Arc<Shared>, conn: &mut Conn, msg: ClientMessage)
             }
             let version = game.state_version();
             shared.status.send_replace(status_of(game));
-            let _ = shared.broadcast.send(Broadcast::Events { events: Arc::new(events.clone()), state_version: version });
-            let legal_actions = if game.must_act().contains_key(&seat) { legal_actions_for(game, seat) } else { Vec::new() };
+            let _ = shared.broadcast.send(Broadcast::Events {
+                events: Arc::new(events.clone()),
+                state_version: version,
+            });
+            let legal_actions = if game.must_act().contains_key(&seat) {
+                legal_actions_for(game, seat)
+            } else {
+                Vec::new()
+            };
             Ok(ServerMessage::Ack {
                 applied: action,
                 events: events.iter().filter_map(|e| e.view(Some(seat))).collect(),
@@ -591,7 +661,10 @@ async fn handle_inner(shared: &Arc<Shared>, conn: &mut Conn, msg: ClientMessage)
             let state = shared.state.lock().await;
             let version = state.game.as_ref().map(|g| g.state_version()).unwrap_or(0);
             let event = Event::Chat { from: seat, to, text };
-            let _ = shared.broadcast.send(Broadcast::Events { events: Arc::new(vec![event]), state_version: version });
+            let _ = shared.broadcast.send(Broadcast::Events {
+                events: Arc::new(vec![event]),
+                state_version: version,
+            });
             Ok(ServerMessage::Ok)
         }
     }
@@ -604,9 +677,17 @@ fn start_game(shared: &Arc<Shared>, state: &mut State) -> Result<(), ProtocolErr
         .seats
         .iter()
         .enumerate()
-        .map(|(i, s)| PlayerSetup { name: lobby.seat_name(Seat(i as u8)), deck: s.deck.clone().unwrap_or_default() })
+        .map(|(i, s)| PlayerSetup {
+            name: lobby.seat_name(Seat(i as u8)),
+            deck: s.deck.clone().unwrap_or_default(),
+        })
         .collect();
-    let config = GameConfig { format: lobby.format.clone(), players, cards: shared.cards.clone(), starting_player: None };
+    let config = GameConfig {
+        format: lobby.format.clone(),
+        players,
+        cards: shared.cards.clone(),
+        starting_player: None,
+    };
     let game = Game::new(config, lobby.seed).map_err(|e| ProtocolError::internal(e.to_string()))?;
 
     let header = ReplayHeader {
@@ -617,7 +698,10 @@ fn start_game(shared: &Arc<Shared>, state: &mut State) -> Result<(), ProtocolErr
             .seats
             .iter()
             .enumerate()
-            .map(|(i, s)| ReplayPlayer { name: lobby.seat_name(Seat(i as u8)), deck: s.deck_names.clone() })
+            .map(|(i, s)| ReplayPlayer {
+                name: lobby.seat_name(Seat(i as u8)),
+                deck: s.deck_names.clone(),
+            })
             .collect(),
     };
     let path = shared.replay_dir.join(format!("{}.jsonl", lobby.game_id));

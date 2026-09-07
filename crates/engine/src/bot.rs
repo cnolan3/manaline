@@ -14,7 +14,9 @@ pub struct RandomBot {
 
 impl RandomBot {
     pub fn new(seed: u64) -> RandomBot {
-        RandomBot { rng: ChaCha8Rng::seed_from_u64(seed) }
+        RandomBot {
+            rng: ChaCha8Rng::seed_from_u64(seed),
+        }
     }
 
     /// A uniformly random legal action for `seat`. The bot never concedes

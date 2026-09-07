@@ -1,0 +1,7 @@
+Card(
+    name: "Inspiration",
+    cost: "{3}{U}",
+    types: [Instant],
+    text: "Target player draws two cards.",
+    spell: Spell(targets: [Player], effects: [Draw(player: TargetPlayer(0), count: Const(2))]),
+)

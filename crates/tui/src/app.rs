@@ -2,9 +2,9 @@
 //! driven and rendered in tests. Keys produce `Command`s; the runtime
 //! executes them against the daemon.
 
+use crate::settings::Settings;
 use engine::text::describe_event_view;
 use engine::{ActReason, Action, AttackTarget, DamageTarget, EventBase, EventView, GameView, Keyword, ObjectId, Outcome, Seat};
-use crate::settings::Settings;
 use protocol::{LegalAction, LobbyView, ServerMessage};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::HashMap;
@@ -180,14 +180,18 @@ impl App {
     /// A priority moment where passing is the only choice, outside your own
     /// main phases: the kind the countdown handles.
     pub fn priority_is_minor(&self) -> bool {
-        let (Some(me), Some(view)) = (self.me, &self.view) else { return false };
+        let (Some(me), Some(view)) = (self.me, &self.view) else {
+            return false;
+        };
         if self.my_reason() != Some(ActReason::Priority) || view.outcome.is_some() {
             return false;
         }
         if view.phase.is_main() && view.active_player == me {
             return false;
         }
-        self.legal.iter().all(|l| matches!(l.action, Action::PassPriority | Action::Concede))
+        self.legal
+            .iter()
+            .all(|l| matches!(l.action, Action::PassPriority | Action::Concede))
     }
 
     fn arm_auto_pass(&mut self) {
@@ -401,20 +405,32 @@ impl App {
             .legal
             .iter()
             .filter(|l| !matches!(l.action, Action::Concede))
-            .map(|l| MenuItem { label: l.description.clone(), action: Some(l.action.clone()), inspect: None })
+            .map(|l| MenuItem {
+                label: l.description.clone(),
+                action: Some(l.action.clone()),
+                inspect: None,
+            })
             .collect();
         if items.is_empty() {
             return false;
         }
-        self.mode = Mode::Menu(Menu { title: title.into(), items, selected: 0 });
+        self.mode = Mode::Menu(Menu {
+            title: title.into(),
+            items,
+            selected: 0,
+        });
         true
     }
 
     /// A checkbox list over my hand: exactly as many cards as the engine asks
     /// for (the length of every listed action).
     fn open_card_picker(&mut self, reason: ActReason) -> bool {
-        let (Some(me), Some(view)) = (self.me, &self.view) else { return false };
-        let engine::HandView::Yours(hand) = &view.player(me).hand else { return false };
+        let (Some(me), Some(view)) = (self.me, &self.view) else {
+            return false;
+        };
+        let engine::HandView::Yours(hand) = &view.player(me).hand else {
+            return false;
+        };
         let count = self
             .legal
             .iter()
@@ -432,12 +448,21 @@ impl App {
             _ => format!("Discard {count} down to hand size"),
         };
         let n = cards.len();
-        self.mode = Mode::Pick(CardPicker { title, cards, marked: vec![false; n], count, cursor: 0, reason });
+        self.mode = Mode::Pick(CardPicker {
+            title,
+            cards,
+            marked: vec![false; n],
+            count,
+            cursor: 0,
+            reason,
+        });
         true
     }
 
     fn open_attack(&mut self) -> bool {
-        let (Some(me), Some(view)) = (self.me, &self.view) else { return false };
+        let (Some(me), Some(view)) = (self.me, &self.view) else {
+            return false;
+        };
         let mut candidates: Vec<ObjectId> = view
             .player(me)
             .battlefield
@@ -455,17 +480,29 @@ impl App {
             })
             .collect();
         candidates.sort();
-        let targets: Vec<Seat> = view.players.iter().filter(|p| !p.eliminated && p.seat != me).map(|p| p.seat).collect();
+        let targets: Vec<Seat> = view
+            .players
+            .iter()
+            .filter(|p| !p.eliminated && p.seat != me)
+            .map(|p| p.seat)
+            .collect();
         if candidates.is_empty() || targets.is_empty() {
             return false;
         }
         let n = candidates.len();
-        self.mode = Mode::Attack(AttackPicker { candidates, targets, choice: vec![None; n], cursor: 0 });
+        self.mode = Mode::Attack(AttackPicker {
+            candidates,
+            targets,
+            choice: vec![None; n],
+            cursor: 0,
+        });
         true
     }
 
     fn open_block(&mut self) -> bool {
-        let (Some(me), Some(view)) = (self.me, &self.view) else { return false };
+        let (Some(me), Some(view)) = (self.me, &self.view) else {
+            return false;
+        };
         let mut blockers: Vec<ObjectId> = view
             .player(me)
             .battlefield
@@ -485,7 +522,12 @@ impl App {
             return false;
         }
         let n = blockers.len();
-        self.mode = Mode::Block(BlockPicker { blockers, attackers, choice: vec![None; n], cursor: 0 });
+        self.mode = Mode::Block(BlockPicker {
+            blockers,
+            attackers,
+            choice: vec![None; n],
+            cursor: 0,
+        });
         true
     }
 
@@ -500,7 +542,12 @@ impl App {
         let (attacker, suggested) = first;
         let Some(view) = &self.view else { return false };
         let power = view.object(attacker).and_then(|o| o.pt).map(|(p, _)| p).unwrap_or(0).max(0);
-        let mut blockers: Vec<ObjectId> = view.objects.values().filter(|o| o.blocking.contains(&attacker)).map(|o| o.id).collect();
+        let mut blockers: Vec<ObjectId> = view
+            .objects
+            .values()
+            .filter(|o| o.blocking.contains(&attacker))
+            .map(|o| o.id)
+            .collect();
         blockers.sort();
         let amounts: Vec<i32> = blockers
             .iter()
@@ -512,7 +559,13 @@ impl App {
                     .unwrap_or(0)
             })
             .collect();
-        self.mode = Mode::Damage(DamagePicker { attacker, blockers, amounts, power, cursor: 0 });
+        self.mode = Mode::Damage(DamagePicker {
+            attacker,
+            blockers,
+            amounts,
+            power,
+            cursor: 0,
+        });
         true
     }
 
@@ -520,10 +573,10 @@ impl App {
     /// blocks the daemon would refuse.
     pub fn can_block(&self, blocker: ObjectId, attacker: ObjectId) -> bool {
         let Some(view) = &self.view else { return true };
-        let (Some(b), Some(a)) = (view.object(blocker), view.object(attacker)) else { return true };
-        if a.keywords.contains(&Keyword::Flying)
-            && !(b.keywords.contains(&Keyword::Flying) || b.keywords.contains(&Keyword::Reach))
-        {
+        let (Some(b), Some(a)) = (view.object(blocker), view.object(attacker)) else {
+            return true;
+        };
+        if a.keywords.contains(&Keyword::Flying) && !(b.keywords.contains(&Keyword::Flying) || b.keywords.contains(&Keyword::Reach)) {
             return false;
         }
         true
@@ -535,13 +588,21 @@ impl App {
             .legal
             .iter()
             .filter(|l| matches!(l.action, Action::ActivateAbility { .. }))
-            .map(|l| MenuItem { label: l.description.clone(), action: Some(l.action.clone()), inspect: None })
+            .map(|l| MenuItem {
+                label: l.description.clone(),
+                action: Some(l.action.clone()),
+                inspect: None,
+            })
             .collect();
         if items.is_empty() {
             self.set_status("No abilities to activate right now");
             return;
         }
-        self.mode = Mode::Menu(Menu { title: "Activate".into(), items, selected: 0 });
+        self.mode = Mode::Menu(Menu {
+            title: "Activate".into(),
+            items,
+            selected: 0,
+        });
     }
 
     fn open_inspect_menu(&mut self) {
@@ -579,7 +640,11 @@ impl App {
             self.set_status("Nothing to inspect");
             return;
         }
-        self.mode = Mode::Menu(Menu { title: "Inspect".into(), items, selected: 0 });
+        self.mode = Mode::Menu(Menu {
+            title: "Inspect".into(),
+            items,
+            selected: 0,
+        });
     }
 
     // ----- keys -----
@@ -721,19 +786,31 @@ impl App {
 
     /// Enter while waiting: tell whoever must act that the table is waiting on them.
     fn nudge(&mut self) -> Vec<Command> {
-        let Some(view) = &self.view else { return Vec::new() };
+        let Some(view) = &self.view else {
+            return Vec::new();
+        };
         let mut cmds = Vec::new();
         for (seat, reason) in &view.must_act {
-            let text = format!("[system] {}, the table is waiting on you to {}.", self.seat_name(*seat), reason_verb(*reason));
+            let text = format!(
+                "[system] {}, the table is waiting on you to {}.",
+                self.seat_name(*seat),
+                reason_verb(*reason)
+            );
             cmds.push(Command::Chat(text));
         }
         cmds
     }
 
     fn play_hand_index(&mut self, idx: usize) -> Vec<Command> {
-        let (Some(me), Some(view)) = (self.me, &self.view) else { return Vec::new() };
-        let engine::HandView::Yours(hand) = &view.player(me).hand else { return Vec::new() };
-        let Some(&id) = hand.get(idx) else { return Vec::new() };
+        let (Some(me), Some(view)) = (self.me, &self.view) else {
+            return Vec::new();
+        };
+        let engine::HandView::Yours(hand) = &view.player(me).hand else {
+            return Vec::new();
+        };
+        let Some(&id) = hand.get(idx) else {
+            return Vec::new();
+        };
         let options: Vec<&LegalAction> = self
             .legal
             .iter()
@@ -749,9 +826,17 @@ impl App {
             _ => {
                 let items = options
                     .iter()
-                    .map(|l| MenuItem { label: l.description.clone(), action: Some(l.action.clone()), inspect: None })
+                    .map(|l| MenuItem {
+                        label: l.description.clone(),
+                        action: Some(l.action.clone()),
+                        inspect: None,
+                    })
                     .collect();
-                self.mode = Mode::Menu(Menu { title: format!("Pay for {}", self.name_of(id)), items, selected: 0 });
+                self.mode = Mode::Menu(Menu {
+                    title: format!("Pay for {}", self.name_of(id)),
+                    items,
+                    selected: 0,
+                });
                 Vec::new()
             }
         }
@@ -779,7 +864,9 @@ impl App {
     }
 
     fn select_menu_item(&mut self, menu: Menu) -> Vec<Command> {
-        let Some(item) = menu.items.get(menu.selected) else { return Vec::new() };
+        let Some(item) = menu.items.get(menu.selected) else {
+            return Vec::new();
+        };
         if let Some(id) = item.inspect {
             self.mode = Mode::Inspect(id);
             return Vec::new();
@@ -964,7 +1051,10 @@ impl App {
                     .filter(|(_, n)| **n > 0)
                     .map(|(b, n)| (DamageTarget::Object(*b), *n))
                     .collect();
-                return vec![Command::Act(Action::AssignCombatDamage { attacker: p.attacker, assignments })];
+                return vec![Command::Act(Action::AssignCombatDamage {
+                    attacker: p.attacker,
+                    assignments,
+                })];
             }
             _ => {}
         }
@@ -994,7 +1084,9 @@ impl App {
 
     /// Whether the footer should suggest nudging the seat that must act.
     pub fn waiting_long(&self) -> bool {
-        self.waiting_since.map(|t| t.elapsed().as_secs() >= NUDGE_AFTER_SECS).unwrap_or(false)
+        self.waiting_since
+            .map(|t| t.elapsed().as_secs() >= NUDGE_AFTER_SECS)
+            .unwrap_or(false)
     }
 
     /// The footer text: every legal action has a key, so it is generated from state.
@@ -1023,13 +1115,28 @@ impl App {
         match self.my_reason() {
             Some(ActReason::Priority) => {
                 let mut parts = vec!["[Space] pass".to_string()];
-                if self.legal.iter().any(|l| matches!(l.action, Action::PlayLand { .. } | Action::CastSpell { .. })) {
+                if self
+                    .legal
+                    .iter()
+                    .any(|l| matches!(l.action, Action::PlayLand { .. } | Action::CastSpell { .. }))
+                {
                     parts.push("[1-9] play/cast".into());
                 }
                 if self.legal.iter().any(|l| matches!(l.action, Action::ActivateAbility { .. })) {
                     parts.push("[e] abilities".into());
                 }
-                parts.extend(["[i] inspect", "[c] chat", "[l] log", "[s] stack", "[o] settings", "[x] concede", "[?] help"].map(String::from));
+                parts.extend(
+                    [
+                        "[i] inspect",
+                        "[c] chat",
+                        "[l] log",
+                        "[s] stack",
+                        "[o] settings",
+                        "[x] concede",
+                        "[?] help",
+                    ]
+                    .map(String::from),
+                );
                 parts.join("  ")
             }
             Some(reason) => {
@@ -1050,7 +1157,10 @@ impl App {
                     .map(|(s, r)| format!("{} to {}", self.seat_name(*s), reason_verb(*r)))
                     .collect();
                 if self.waiting_long() && !self.is_spectator() {
-                    format!("Waiting on {} — nudge them with [Enter]  [c] chat  [l] log  [?] help", waiting.join(", "))
+                    format!(
+                        "Waiting on {} — nudge them with [Enter]  [c] chat  [l] log  [?] help",
+                        waiting.join(", ")
+                    )
                 } else {
                     format!("Waiting on {}…  [i] inspect  [c] chat  [l] log  [?] help", waiting.join(", "))
                 }

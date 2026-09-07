@@ -1,0 +1,9 @@
+Card(
+    name: "Deadly Recluse",
+    cost: "{1}{G}",
+    types: [Creature],
+    subtypes: ["Spider"],
+    pt: (1, 2),
+    text: "Reach (This creature can block creatures with flying.)\nDeathtouch (Any amount of damage this deals to a creature is enough to destroy it.)",
+    keywords: [Reach, Deathtouch],
+)

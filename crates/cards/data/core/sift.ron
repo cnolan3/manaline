@@ -1,0 +1,7 @@
+Card(
+    name: "Sift",
+    cost: "{3}{U}",
+    types: [Sorcery],
+    text: "Draw three cards, then discard a card.",
+    spell: Spell(effects: [Sequence([Draw(player: You, count: Const(3)), Discard(player: You, count: Const(1))])]),
+)

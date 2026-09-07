@@ -1,0 +1,8 @@
+Card(
+    name: "Kraken Hatchling",
+    cost: "{U}",
+    types: [Creature],
+    subtypes: ["Kraken"],
+    pt: (0, 4),
+    text: "",
+)

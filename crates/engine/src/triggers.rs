@@ -31,10 +31,18 @@ impl Game {
 
     fn triggers_for_event(&mut self, event: &Event) {
         match event {
-            EventBase::ZoneChange { object, to: Zone::Battlefield, .. } => {
+            EventBase::ZoneChange {
+                object,
+                to: Zone::Battlefield,
+                ..
+            } => {
                 self.fire_matching(*object, |t| matches!(t, Trigger::Etb { .. }), Some(Target::Object(*object)));
             }
-            EventBase::ZoneChange { object, from: Zone::Battlefield, to: Zone::Graveyard } => {
+            EventBase::ZoneChange {
+                object,
+                from: Zone::Battlefield,
+                to: Zone::Graveyard,
+            } => {
                 self.fire_matching(*object, |t| matches!(t, Trigger::Dies { .. }), Some(Target::Object(*object)));
             }
             EventBase::Attacked { attackers, .. } => {
@@ -42,11 +50,24 @@ impl Game {
                     self.fire_matching(*a, |t| matches!(t, Trigger::Attacks { .. }), Some(Target::Object(*a)));
                 }
             }
-            EventBase::Damage { source, to: DamageTarget::Player(s), amount, combat: true } if *amount > 0 => {
-                self.fire_matching(*source, |t| matches!(t, Trigger::CombatDamageToPlayer { .. }), Some(Target::Player(*s)));
+            EventBase::Damage {
+                source,
+                to: DamageTarget::Player(s),
+                amount,
+                combat: true,
+            } if *amount > 0 => {
+                self.fire_matching(
+                    *source,
+                    |t| matches!(t, Trigger::CombatDamageToPlayer { .. }),
+                    Some(Target::Player(*s)),
+                );
             }
             EventBase::Tapped { object } => {
-                self.fire_matching(*object, |t| matches!(t, Trigger::BecomesTapped { .. }), Some(Target::Object(*object)));
+                self.fire_matching(
+                    *object,
+                    |t| matches!(t, Trigger::BecomesTapped { .. }),
+                    Some(Target::Object(*object)),
+                );
             }
             EventBase::PhaseChanged { phase: Phase::Upkeep } => self.fire_step_triggers(true),
             EventBase::PhaseChanged { phase: Phase::End } => self.fire_step_triggers(false),
@@ -55,7 +76,12 @@ impl Game {
                     // Prowess on each creature the caster controls.
                     for id in self.players[seat.index()].battlefield.clone() {
                         if self.is_creature(id) && self.has_keyword(id, Keyword::Prowess) {
-                            self.fired.push(FiredTrigger { source: id, controller: *seat, index: None, triggering: Some(Target::Object(*object)) });
+                            self.fired.push(FiredTrigger {
+                                source: id,
+                                controller: *seat,
+                                index: None,
+                                triggering: Some(Target::Object(*object)),
+                            });
                         }
                     }
                 }
@@ -65,12 +91,19 @@ impl Game {
     }
 
     fn fire_matching(&mut self, source: ObjectId, pred: impl Fn(&Trigger) -> bool, triggering: Option<Target>) {
-        let Some(obj) = self.objects.get(source) else { return };
+        let Some(obj) = self.objects.get(source) else {
+            return;
+        };
         let controller = obj.controller;
         let def = self.card_def(source).clone();
         for (i, t) in def.ir.triggers.iter().enumerate() {
             if pred(t) {
-                self.fired.push(FiredTrigger { source, controller, index: Some(i as u8), triggering });
+                self.fired.push(FiredTrigger {
+                    source,
+                    controller,
+                    index: Some(i as u8),
+                    triggering,
+                });
             }
         }
     }
@@ -88,7 +121,12 @@ impl Game {
                 };
                 let ctx = Ctx::simple(controller, Some(id));
                 if self.players_of(whose, &ctx).contains(&active) {
-                    self.fired.push(FiredTrigger { source: id, controller, index: Some(i as u8), triggering: Some(Target::Player(active)) });
+                    self.fired.push(FiredTrigger {
+                        source: id,
+                        controller,
+                        index: Some(i as u8),
+                        triggering: Some(Target::Player(active)),
+                    });
                 }
             }
         }
@@ -118,14 +156,23 @@ impl Game {
                 self.push_trigger(&f, Vec::new());
                 continue;
             }
-            let ctx = Ctx { you: f.controller, this: Some(f.source), targets: Vec::new(), triggering: f.triggering };
+            let ctx = Ctx {
+                you: f.controller,
+                this: Some(f.source),
+                targets: Vec::new(),
+                triggering: f.triggering,
+            };
             let candidates: Vec<Vec<Target>> = specs.iter().map(|s| self.targets_for(s, &ctx)).collect();
             if candidates.iter().any(|c| c.is_empty()) {
                 continue; // no legal target: the trigger is removed from the stack (rule 603.3d)
             }
             // Ask the controller.
             self.fired = queue.into_iter().collect();
-            self.pending = Some(PendingChoice::ChooseTargets { seat: f.controller, specs, trigger: f.clone() });
+            self.pending = Some(PendingChoice::ChooseTargets {
+                seat: f.controller,
+                specs,
+                trigger: f.clone(),
+            });
             return false;
         }
         true
@@ -133,12 +180,25 @@ impl Game {
 
     fn push_trigger(&mut self, f: &FiredTrigger, targets: Vec<Target>) {
         let kind = match f.index {
-            Some(i) => StackKind::Trigger { source: f.source, index: i, triggering: f.triggering },
+            Some(i) => StackKind::Trigger {
+                source: f.source,
+                index: i,
+                triggering: f.triggering,
+            },
             None => StackKind::Prowess { source: f.source },
         };
         let description = self.describe_stack_kind(&kind);
-        self.stack.push(StackObject { object: f.source, controller: f.controller, targets: targets.clone(), kind });
-        self.emit(Event::Triggered { source: f.source, description, targets });
+        self.stack.push(StackObject {
+            object: f.source,
+            controller: f.controller,
+            targets: targets.clone(),
+            kind,
+        });
+        self.emit(Event::Triggered {
+            source: f.source,
+            description,
+            targets,
+        });
     }
 
     /// Answer a `ChooseTargets` for a trigger, then keep placing the rest.

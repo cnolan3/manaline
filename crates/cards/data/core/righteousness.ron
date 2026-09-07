@@ -1,0 +1,7 @@
+Card(
+    name: "Righteousness",
+    cost: "{W}",
+    types: [Instant],
+    text: "Target blocking creature gets +7/+7 until end of turn.",
+    spell: Spell(targets: [And([Blocking, Creature])], effects: [ModifyPt(target: Target(0), power: Const(7), toughness: Const(7), until: EndOfTurn)]),
+)

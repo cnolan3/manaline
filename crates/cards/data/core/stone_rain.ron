@@ -1,0 +1,7 @@
+Card(
+    name: "Stone Rain",
+    cost: "{2}{R}",
+    types: [Sorcery],
+    text: "Destroy target land.",
+    spell: Spell(targets: [Land], effects: [Destroy(target: Target(0))]),
+)

@@ -1,0 +1,9 @@
+Card(
+    name: "Giant Spider",
+    cost: "{3}{G}",
+    types: [Creature],
+    subtypes: ["Spider"],
+    pt: (2, 4),
+    text: "Reach (This creature can block creatures with flying.)",
+    keywords: [Reach],
+)

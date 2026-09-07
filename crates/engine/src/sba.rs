@@ -37,9 +37,7 @@ impl Game {
                         acted = true;
                         continue;
                     }
-                    if (obj.damage >= toughness || obj.deathtouch_damaged)
-                        && !self.has_keyword(id, crate::types::Keyword::Indestructible)
-                    {
+                    if (obj.damage >= toughness || obj.deathtouch_damaged) && !self.has_keyword(id, crate::types::Keyword::Indestructible) {
                         self.move_object(id, Zone::Graveyard);
                         acted = true;
                         continue;
@@ -172,17 +170,13 @@ impl Game {
         if self.pending.as_ref().map(|p| p.seat()) == Some(seat) {
             match self.pending.take() {
                 Some(PendingChoice::DeclareBlockers { remaining, .. }) => self.continue_blockers(remaining),
-                Some(PendingChoice::Mulligan { .. }) | Some(PendingChoice::BottomCards { .. }) => {
-                    self.advance_mulligan(seat)
-                }
+                Some(PendingChoice::Mulligan { .. }) | Some(PendingChoice::BottomCards { .. }) => self.advance_mulligan(seat),
                 Some(PendingChoice::ChooseTargets { .. }) => {
                     if self.place_triggers() && self.priority.is_none() {
                         self.give_priority_to_active();
                     }
                 }
-                Some(PendingChoice::Sacrifice { resume, .. }) | Some(PendingChoice::EffectDiscard { resume, .. }) => {
-                    self.resume(resume)
-                }
+                Some(PendingChoice::Sacrifice { resume, .. }) | Some(PendingChoice::EffectDiscard { resume, .. }) => self.resume(resume),
                 _ => {}
             }
         }

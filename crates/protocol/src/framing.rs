@@ -41,7 +41,11 @@ pub struct FramedReader<R, In> {
 
 impl<R: AsyncRead + Unpin, In: DeserializeOwned> FramedReader<R, In> {
     pub fn new(reader: R) -> Self {
-        FramedReader { reader: BufReader::new(reader), buf: Vec::with_capacity(4096), _t: PhantomData }
+        FramedReader {
+            reader: BufReader::new(reader),
+            buf: Vec::with_capacity(4096),
+            _t: PhantomData,
+        }
     }
 
     /// The next message, or `Closed` at end of stream. Blank lines are skipped.
@@ -128,7 +132,10 @@ where
     Out: Serialize,
 {
     pub fn new(reader: R, writer: W) -> Self {
-        Connection { reader: FramedReader::new(reader), writer: FramedWriter::new(writer) }
+        Connection {
+            reader: FramedReader::new(reader),
+            writer: FramedWriter::new(writer),
+        }
     }
 
     pub async fn send(&mut self, msg: &Out) -> Result<(), FrameError> {
@@ -165,11 +172,20 @@ mod tests {
         let mut client: Connection<_, _, ServerEnvelope, ClientEnvelope> = Connection::new(ar, aw);
         let mut server: Connection<_, _, ClientEnvelope, ServerEnvelope> = Connection::new(br, bw);
 
-        let ping = ClientEnvelope { req: Some(1), msg: ClientMessage::Ping };
+        let ping = ClientEnvelope {
+            req: Some(1),
+            msg: ClientMessage::Ping,
+        };
         client.send(&ping).await.unwrap();
         let got = server.recv().await.unwrap();
         assert_eq!(got, ping);
-        server.send(&ServerEnvelope { req: Some(1), msg: ServerMessage::Pong }).await.unwrap();
+        server
+            .send(&ServerEnvelope {
+                req: Some(1),
+                msg: ServerMessage::Pong,
+            })
+            .await
+            .unwrap();
         // Blank lines between messages are ignored.
         server.writer.send_raw(b"\n\r\n").await.unwrap();
         server.send(&ServerEnvelope::from(ServerMessage::Pong)).await.unwrap();

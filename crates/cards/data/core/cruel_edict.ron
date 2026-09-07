@@ -2,6 +2,6 @@ Card(
     name: "Cruel Edict",
     cost: "{1}{B}",
     types: [Sorcery],
-    text: "Target opponent sacrifices a creature.",
+    text: "Target opponent sacrifices a creature of their choice.",
     spell: Spell(targets: [Opponent], effects: [Sacrifice(player: TargetOpponent(0), filter: Creature, count: Const(1))]),
 )

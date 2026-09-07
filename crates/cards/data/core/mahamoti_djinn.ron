@@ -1,0 +1,9 @@
+Card(
+    name: "Mahamoti Djinn",
+    cost: "{4}{U}{U}",
+    types: [Creature],
+    subtypes: ["Djinn"],
+    pt: (5, 6),
+    text: "Flying (This creature can't be blocked except by creatures with flying or reach.)",
+    keywords: [Flying],
+)

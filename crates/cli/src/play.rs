@@ -88,7 +88,11 @@ pub async fn play(args: PlayArgs) -> Result<()> {
         }
         Opponent::Human => {
             let mut lines = vec!["To seat the other player, run this in another terminal:".to_string()];
-            lines.push(format!("  manaline join {} --token {} --deck <their deck>", socket.display(), tokens[1]));
+            lines.push(format!(
+                "  manaline join {} --token {} --deck <their deck>",
+                socket.display(),
+                tokens[1]
+            ));
             if let Some(addr) = info.tcp {
                 lines.push("or from another machine on the same network:".to_string());
                 lines.push(format!("  manaline join {addr} --token {} --deck <their deck>", tokens[1]));
@@ -170,7 +174,9 @@ fn agent_hints(kind: AgentKind, url: &str, socket: &std::path::Path, token: &pro
         }
         AgentKind::Generic => {}
     }
-    lines.push(format!("  Config snippet:  {{\"mcpServers\":{{\"manaline\":{{\"type\":\"http\",\"url\":\"{url}\"}}}}}}"));
+    lines.push(format!(
+        "  Config snippet:  {{\"mcpServers\":{{\"manaline\":{{\"type\":\"http\",\"url\":\"{url}\"}}}}}}"
+    ));
     lines.push(format!("  stdio alternative:  {stdio}"));
     lines.push("Then tell it: \"You're playing Magic against me. Pull the play-a-game prompt from the manaline server and go.\"".into());
     lines.join("\n")
@@ -225,7 +231,9 @@ fn describe_outcome(o: engine::Outcome, _info: &StartupInfo) -> String {
 }
 
 fn whoami() -> String {
-    std::env::var("USER").or_else(|_| std::env::var("USERNAME")).unwrap_or_else(|_| "You".into())
+    std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .unwrap_or_else(|_| "You".into())
 }
 
 fn default_opponent_deck(mine: &str) -> String {
@@ -238,11 +246,9 @@ fn default_opponent_deck(mine: &str) -> String {
 }
 
 fn check_deck(decklist: &str, format: &Format, db: &engine::CardDb, label: &str) -> Result<()> {
-    let deck = cards::parse_decklist(decklist, db).map_err(|e| anyhow!("{label}: {e}"))?;
-    let violations = format.check_deck(&deck, db);
-    if !violations.is_empty() {
-        let list: Vec<String> = violations.iter().map(|v| format!("  - {v}")).collect();
-        bail!("{label} is not legal in {}:\n{}", format.name, list.join("\n"));
+    let report = crate::deck::check_text(decklist, format, db, None)?;
+    if !report.is_legal() {
+        bail!("{}", crate::deck::render_check(&report, label, format).trim_end());
     }
     Ok(())
 }
@@ -294,8 +300,7 @@ pub async fn spawn_daemon(format: &str, seats: u8, seed: Option<u64>, tcp: Optio
         .context("the game daemon did not start in time")?
         .context("reading from the game daemon")?
         .ok_or_else(|| anyhow!("the game daemon exited before it was ready (see {})", log_path.display()))?;
-    let info: StartupInfo = serde_json::from_str(&first)
-        .with_context(|| format!("the game daemon said something unexpected: {first}"))?;
+    let info: StartupInfo = serde_json::from_str(&first).with_context(|| format!("the game daemon said something unexpected: {first}"))?;
     // Keep draining stdout so the child never blocks on a full pipe.
     tokio::spawn(async move { while let Ok(Some(_)) = lines.next_line().await {} });
     Ok(DaemonChild { child, info })
@@ -320,10 +325,13 @@ pub async fn join(args: JoinArgs) -> Result<()> {
     let config = tui::config(&args.endpoint, &args.token, &name, Some(decklist))?;
     let outcome = tui::run(config).await?;
     if let Some(o) = outcome {
-        println!("{}", match o {
-            engine::Outcome::Winner(s) => format!("Seat {} won.", s.0),
-            engine::Outcome::Draw => "The game was a draw.".into(),
-        });
+        println!(
+            "{}",
+            match o {
+                engine::Outcome::Winner(s) => format!("Seat {} won.", s.0),
+                engine::Outcome::Draw => "The game was a draw.".into(),
+            }
+        );
     }
     Ok(())
 }

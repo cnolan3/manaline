@@ -16,6 +16,9 @@ manaline-protocol = { path = "../protocol" }
 manaline-daemon = { path = "../daemon" }
 manaline-tui = { path = "../tui" }
 manaline-mcp = { path = "../mcp" }
+manaline-carddb = { path = "../carddb" }
+manaline-deckstats = { path = "../deckstats" }
+manaline-ingest = { path = "../ingest" }
 clap.workspace = true
 anyhow.workspace = true
 serde_json.workspace = true

@@ -1,0 +1,8 @@
+Card(
+    name: "Phyrexian Hulk",
+    cost: "{6}",
+    types: [Artifact, Creature],
+    subtypes: ["Phyrexian", "Golem"],
+    pt: (5, 4),
+    text: "",
+)

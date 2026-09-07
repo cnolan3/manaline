@@ -1,0 +1,19 @@
+[package]
+name = "manaline-deckstats"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Deck-file parsing and deck analysis for manaline"
+
+[lib]
+name = "deckstats"
+path = "src/lib.rs"
+
+[dependencies]
+manaline-engine = { path = "../engine" }
+manaline-cardir = { path = "../cardir" }
+serde.workspace = true
+
+[dev-dependencies]
+manaline-cards = { path = "../cards" }

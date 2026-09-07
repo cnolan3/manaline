@@ -1,0 +1,8 @@
+Card(
+    name: "Silverback Ape",
+    cost: "{3}{G}{G}",
+    types: [Creature],
+    subtypes: ["Ape"],
+    pt: (5, 5),
+    text: "",
+)

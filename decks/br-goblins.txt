@@ -1,0 +1,22 @@
+// Starter: black-red goblins. Cheap attackers, burn, and sacrifice outlets. 40 cards.
+Deck
+9 Mountain
+8 Swamp
+2 Raging Goblin
+2 Goblin Piker
+2 Typhoid Rats
+1 Festering Goblin
+2 Goblin Instigator
+1 Bloodthrone Vampire
+1 Goblin Chieftain
+1 Fiery Hellhound
+1 Nantuko Husk
+1 Child of Night
+1 Furnace Whelp
+1 Volcanic Dragon
+2 Lightning Bolt
+1 Shock
+1 Dragon Fodder
+1 Krenko's Command
+1 Doom Blade
+1 Trumpet Blast

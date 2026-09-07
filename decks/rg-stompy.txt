@@ -1,0 +1,23 @@
+// Starter: red-green stompy. Mana creatures into big bodies, with pump and burn. 40 cards.
+Deck
+9 Forest
+8 Mountain
+2 Llanowar Elves
+1 Fyndhorn Elves
+2 Grizzly Bears
+1 Kalonian Tusker
+2 Centaur Courser
+1 Bloodfire Expert
+1 Borderland Minotaur
+1 Stampeding Rhino
+1 Hill Giant
+1 Rumbling Baloth
+1 Skyraker Giant
+1 Yavimaya Wurm
+1 Craw Wurm
+2 Giant Growth
+1 Lightning Strike
+1 Volcanic Hammer
+1 Predator's Strike
+1 Brute Force
+1 Overrun

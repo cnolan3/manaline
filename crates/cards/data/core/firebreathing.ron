@@ -1,0 +1,9 @@
+Card(
+    name: "Firebreathing",
+    cost: "{R}",
+    types: [Enchantment],
+    subtypes: ["Aura"],
+    text: "Enchant creature\n{R}: Enchanted creature gets +1/+0 until end of turn.",
+    enchant: Creature,
+    activated: [Ability(cost: [Mana("{R}")], effects: [ModifyPt(target: Attached, power: Const(1), toughness: Const(0), until: EndOfTurn)])],
+)

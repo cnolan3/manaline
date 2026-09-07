@@ -1,0 +1,9 @@
+Card(
+    name: "Ajani's Sunstriker",
+    cost: "{W}{W}",
+    types: [Creature],
+    subtypes: ["Cat", "Cleric"],
+    pt: (2, 2),
+    text: "Lifelink (Damage dealt by this creature also causes you to gain that much life.)",
+    keywords: [Lifelink],
+)

@@ -62,9 +62,7 @@ impl Game {
             .into_iter()
             .filter(|&id| match self.objects[id].attacking {
                 Some(AttackTarget::Player(s)) => s == seat,
-                Some(AttackTarget::Planeswalker(pw)) => {
-                    self.objects.get(pw).map(|o| o.controller == seat).unwrap_or(false)
-                }
+                Some(AttackTarget::Planeswalker(pw)) => self.objects.get(pw).map(|o| o.controller == seat).unwrap_or(false),
                 None => false,
             })
             .collect()
@@ -114,7 +112,10 @@ impl Game {
                 self.emit(Event::Tapped { object: id });
             }
         }
-        self.emit(Event::Attacked { seat, attackers: attackers.to_vec() });
+        self.emit(Event::Attacked {
+            seat,
+            attackers: attackers.to_vec(),
+        });
         self.pending = None;
         self.give_priority_to_active();
     }
@@ -126,7 +127,10 @@ impl Game {
             a.blocked = true;
             a.blocked_by.push(blocker);
         }
-        self.emit(Event::Blocked { seat, blocks: blocks.to_vec() });
+        self.emit(Event::Blocked {
+            seat,
+            blocks: blocks.to_vec(),
+        });
         let remaining = match self.pending.take() {
             Some(PendingChoice::DeclareBlockers { remaining, .. }) => remaining,
             _ => Vec::new(),
@@ -177,7 +181,11 @@ impl Game {
     /// ask the attacking player to divide damage wherever a real choice exists,
     /// then deal it all at once.
     pub(crate) fn begin_combat_damage(&mut self, first_strike_round: bool) {
-        self.combat_round = if first_strike_round { CombatRound::FirstStrikeDone } else { CombatRound::Done };
+        self.combat_round = if first_strike_round {
+            CombatRound::FirstStrikeDone
+        } else {
+            CombatRound::Done
+        };
         let queue: Vec<ObjectId> = self
             .attacking_creatures()
             .into_iter()
@@ -192,14 +200,12 @@ impl Game {
         self.continue_damage_assignment(queue, first_strike_round);
     }
 
-    pub(crate) fn assign_combat_damage(
-        &mut self,
-        _seat: Seat,
-        attacker: ObjectId,
-        assignments: &[(DamageTarget, i32)],
-    ) {
+    pub(crate) fn assign_combat_damage(&mut self, _seat: Seat, attacker: ObjectId, assignments: &[(DamageTarget, i32)]) {
         self.damage_assignments.insert(attacker, assignments.to_vec());
-        self.emit(Event::DamageAssigned { attacker, assignments: assignments.to_vec() });
+        self.emit(Event::DamageAssigned {
+            attacker,
+            assignments: assignments.to_vec(),
+        });
         let queue = match self.pending.take() {
             Some(PendingChoice::AssignDamage { queue, .. }) => queue,
             _ => Vec::new(),
@@ -234,7 +240,8 @@ impl Game {
             remaining -= give;
         }
         if remaining > 0 {
-            if let (true, Some(AttackTarget::Player(s))) = (self.has_keyword(attacker, Keyword::Trample), self.objects[attacker].attacking) {
+            if let (true, Some(AttackTarget::Player(s))) = (self.has_keyword(attacker, Keyword::Trample), self.objects[attacker].attacking)
+            {
                 out.push((DamageTarget::Player(s), remaining));
             } else if let Some(last) = out.last_mut() {
                 last.1 += remaining;
@@ -284,7 +291,11 @@ impl Game {
         }
         if to_player > 0 {
             for b in &blockers {
-                let got = assignments.iter().find(|(t, _)| *t == DamageTarget::Object(*b)).map(|(_, n)| *n).unwrap_or(0);
+                let got = assignments
+                    .iter()
+                    .find(|(t, _)| *t == DamageTarget::Object(*b))
+                    .map(|(_, n)| *n)
+                    .unwrap_or(0);
                 if got < self.lethal_for(attacker, *b) {
                     return Err(format!("trample: {b} must be assigned lethal damage before any goes to the player"));
                 }

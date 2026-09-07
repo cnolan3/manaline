@@ -53,10 +53,7 @@ impl Lobby {
         if *token == self.spectator_token {
             return Some(Role::Spectator);
         }
-        self.seats
-            .iter()
-            .position(|s| s.token == *token)
-            .map(|i| Role::Seat(Seat(i as u8)))
+        self.seats.iter().position(|s| s.token == *token).map(|i| Role::Seat(Seat(i as u8)))
     }
 
     pub fn seat_tokens(&self) -> Vec<Token> {
@@ -68,10 +65,7 @@ impl Lobby {
     }
 
     pub fn seat_name(&self, seat: Seat) -> String {
-        self.seats[seat.index()]
-            .name
-            .clone()
-            .unwrap_or_else(|| format!("Seat {}", seat.0))
+        self.seats[seat.index()].name.clone().unwrap_or_else(|| format!("Seat {}", seat.0))
     }
 
     pub fn view(&self) -> LobbyView {

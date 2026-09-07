@@ -1,0 +1,9 @@
+Card(
+    name: "Perilous Myr",
+    cost: "{2}",
+    types: [Artifact, Creature],
+    subtypes: ["Phyrexian", "Myr"],
+    pt: (1, 1),
+    text: "When this creature dies, it deals 2 damage to any target.",
+    triggers: [Dies(targets: [Any], effects: [DealDamage(amount: Const(2), to: Target(0))])],
+)

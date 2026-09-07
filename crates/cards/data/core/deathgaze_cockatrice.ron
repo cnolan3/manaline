@@ -1,0 +1,9 @@
+Card(
+    name: "Deathgaze Cockatrice",
+    cost: "{2}{B}{B}",
+    types: [Creature],
+    subtypes: ["Cockatrice"],
+    pt: (2, 2),
+    text: "Flying\nDeathtouch (Any amount of damage this deals to a creature is enough to destroy it.)",
+    keywords: [Flying, Deathtouch],
+)

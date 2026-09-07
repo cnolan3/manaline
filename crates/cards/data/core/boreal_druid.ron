@@ -1,0 +1,10 @@
+Card(
+    name: "Boreal Druid",
+    cost: "{G}",
+    types: [Creature],
+    supertypes: [Snow],
+    subtypes: ["Elf", "Druid"],
+    pt: (1, 1),
+    text: "{T}: Add {C}.",
+    activated: [Ability(cost: [Tap], effects: [AddMana(color: None, amount: Const(1))])],
+)

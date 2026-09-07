@@ -1,0 +1,9 @@
+Card(
+    name: "Accorder's Shield",
+    cost: "{0}",
+    types: [Artifact],
+    subtypes: ["Equipment"],
+    text: "Equipped creature gets +0/+3 and has vigilance. (Attacking doesn't cause it to tap.)\nEquip {3} ({3}: Attach to target creature you control. Equip only as a sorcery.)",
+    equip: "{3}",
+    statics: [PtBoost(filter: Attached, power: Const(0), toughness: Const(3), keywords: [Vigilance])],
+)

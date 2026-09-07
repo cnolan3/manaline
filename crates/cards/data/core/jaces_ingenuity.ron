@@ -1,0 +1,7 @@
+Card(
+    name: "Jace's Ingenuity",
+    cost: "{3}{U}{U}",
+    types: [Instant],
+    text: "Draw three cards.",
+    spell: Spell(effects: [Draw(player: You, count: Const(3))]),
+)

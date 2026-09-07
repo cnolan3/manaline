@@ -13,42 +13,142 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EventBase<D> {
-    GameStarted { starting_player: Seat, seats: u8 },
-    Drew { seat: Seat, cards: D },
-    Shuffled { seat: Seat },
-    MulliganTaken { seat: Seat, to: u8 },
-    HandKept { seat: Seat, size: u8 },
-    Bottomed { seat: Seat, count: u8 },
-    TurnStarted { turn: u32, active: Seat },
-    PhaseChanged { phase: Phase },
-    PriorityPassed { seat: Seat },
-    LandPlayed { seat: Seat, object: ObjectId },
-    Cast { seat: Seat, object: ObjectId, targets: Vec<Target> },
-    Resolved { object: ObjectId },
-    Tapped { object: ObjectId },
-    Untapped { object: ObjectId },
-    ManaAdded { seat: Seat, mana: Mana, amount: u8 },
-    Attacked { seat: Seat, attackers: Vec<(ObjectId, AttackTarget)> },
-    Blocked { seat: Seat, blocks: Vec<(ObjectId, ObjectId)> },
-    DamageAssigned { attacker: ObjectId, assignments: Vec<(DamageTarget, i32)> },
-    Damage { source: ObjectId, to: DamageTarget, amount: i32, #[serde(default)] combat: bool },
-    Activated { seat: Seat, object: ObjectId, ability: u8, targets: Vec<Target> },
-    Triggered { source: ObjectId, description: String, targets: Vec<Target> },
-    Countered { object: ObjectId },
-    Sacrificed { seat: Seat, object: ObjectId },
-    TokenCreated { seat: Seat, object: ObjectId },
-    CountersAdded { object: ObjectId, counter: String, count: i32 },
-    Attached { object: ObjectId, to: ObjectId },
-    LifeChanged { seat: Seat, from: i32, to: i32 },
+    GameStarted {
+        starting_player: Seat,
+        seats: u8,
+    },
+    Drew {
+        seat: Seat,
+        cards: D,
+    },
+    Shuffled {
+        seat: Seat,
+    },
+    MulliganTaken {
+        seat: Seat,
+        to: u8,
+    },
+    HandKept {
+        seat: Seat,
+        size: u8,
+    },
+    Bottomed {
+        seat: Seat,
+        count: u8,
+    },
+    TurnStarted {
+        turn: u32,
+        active: Seat,
+    },
+    PhaseChanged {
+        phase: Phase,
+    },
+    PriorityPassed {
+        seat: Seat,
+    },
+    LandPlayed {
+        seat: Seat,
+        object: ObjectId,
+    },
+    Cast {
+        seat: Seat,
+        object: ObjectId,
+        targets: Vec<Target>,
+    },
+    Resolved {
+        object: ObjectId,
+    },
+    Tapped {
+        object: ObjectId,
+    },
+    Untapped {
+        object: ObjectId,
+    },
+    ManaAdded {
+        seat: Seat,
+        mana: Mana,
+        amount: u8,
+    },
+    Attacked {
+        seat: Seat,
+        attackers: Vec<(ObjectId, AttackTarget)>,
+    },
+    Blocked {
+        seat: Seat,
+        blocks: Vec<(ObjectId, ObjectId)>,
+    },
+    DamageAssigned {
+        attacker: ObjectId,
+        assignments: Vec<(DamageTarget, i32)>,
+    },
+    Damage {
+        source: ObjectId,
+        to: DamageTarget,
+        amount: i32,
+        #[serde(default)]
+        combat: bool,
+    },
+    Activated {
+        seat: Seat,
+        object: ObjectId,
+        ability: u8,
+        targets: Vec<Target>,
+    },
+    Triggered {
+        source: ObjectId,
+        description: String,
+        targets: Vec<Target>,
+    },
+    Countered {
+        object: ObjectId,
+    },
+    Sacrificed {
+        seat: Seat,
+        object: ObjectId,
+    },
+    TokenCreated {
+        seat: Seat,
+        object: ObjectId,
+    },
+    CountersAdded {
+        object: ObjectId,
+        counter: String,
+        count: i32,
+    },
+    Attached {
+        object: ObjectId,
+        to: ObjectId,
+    },
+    LifeChanged {
+        seat: Seat,
+        from: i32,
+        to: i32,
+    },
     /// Library→hand is never a `ZoneChange`; it is `Drew`. Hand→library is
     /// `MulliganTaken` / `Bottomed`. Every other transition is public.
-    ZoneChange { object: ObjectId, from: Zone, to: Zone },
-    Discarded { seat: Seat, objects: Vec<ObjectId> },
-    Eliminated { seat: Seat, reason: Elimination },
-    GameOver { outcome: Outcome },
+    ZoneChange {
+        object: ObjectId,
+        from: Zone,
+        to: Zone,
+    },
+    Discarded {
+        seat: Seat,
+        objects: Vec<ObjectId>,
+    },
+    Eliminated {
+        seat: Seat,
+        reason: Elimination,
+    },
+    GameOver {
+        outcome: Outcome,
+    },
     /// Table talk. The engine never produces this; the daemon injects it into
     /// the stream so the type lives with the others.
-    Chat { from: Seat, to: Option<Seat>, text: String },
+    Chat {
+        from: Seat,
+        to: Option<Seat>,
+        text: String,
+    },
 }
 
 /// The full event, as the engine emits it. Holds hidden information.
@@ -84,7 +184,11 @@ impl Event {
                         return None;
                     }
                 }
-                EventBase::Chat { from: *from, to: *to, text: text.clone() }
+                EventBase::Chat {
+                    from: *from,
+                    to: *to,
+                    text: text.clone(),
+                }
             }
             EventBase::GameStarted { starting_player, seats } => EventBase::GameStarted {
                 starting_player: *starting_player,
@@ -93,11 +197,20 @@ impl Event {
             EventBase::Shuffled { seat } => EventBase::Shuffled { seat: *seat },
             EventBase::MulliganTaken { seat, to } => EventBase::MulliganTaken { seat: *seat, to: *to },
             EventBase::HandKept { seat, size } => EventBase::HandKept { seat: *seat, size: *size },
-            EventBase::Bottomed { seat, count } => EventBase::Bottomed { seat: *seat, count: *count },
-            EventBase::TurnStarted { turn, active } => EventBase::TurnStarted { turn: *turn, active: *active },
+            EventBase::Bottomed { seat, count } => EventBase::Bottomed {
+                seat: *seat,
+                count: *count,
+            },
+            EventBase::TurnStarted { turn, active } => EventBase::TurnStarted {
+                turn: *turn,
+                active: *active,
+            },
             EventBase::PhaseChanged { phase } => EventBase::PhaseChanged { phase: *phase },
             EventBase::PriorityPassed { seat } => EventBase::PriorityPassed { seat: *seat },
-            EventBase::LandPlayed { seat, object } => EventBase::LandPlayed { seat: *seat, object: *object },
+            EventBase::LandPlayed { seat, object } => EventBase::LandPlayed {
+                seat: *seat,
+                object: *object,
+            },
             EventBase::Cast { seat, object, targets } => EventBase::Cast {
                 seat: *seat,
                 object: *object,
@@ -115,31 +228,54 @@ impl Event {
                 seat: *seat,
                 attackers: attackers.clone(),
             },
-            EventBase::Blocked { seat, blocks } => EventBase::Blocked { seat: *seat, blocks: blocks.clone() },
+            EventBase::Blocked { seat, blocks } => EventBase::Blocked {
+                seat: *seat,
+                blocks: blocks.clone(),
+            },
             EventBase::DamageAssigned { attacker, assignments } => EventBase::DamageAssigned {
                 attacker: *attacker,
                 assignments: assignments.clone(),
             },
-            EventBase::Damage { source, to, amount, combat } => EventBase::Damage {
+            EventBase::Damage {
+                source,
+                to,
+                amount,
+                combat,
+            } => EventBase::Damage {
                 source: *source,
                 to: *to,
                 amount: *amount,
                 combat: *combat,
             },
-            EventBase::Activated { seat, object, ability, targets } => EventBase::Activated {
+            EventBase::Activated {
+                seat,
+                object,
+                ability,
+                targets,
+            } => EventBase::Activated {
                 seat: *seat,
                 object: *object,
                 ability: *ability,
                 targets: targets.clone(),
             },
-            EventBase::Triggered { source, description, targets } => EventBase::Triggered {
+            EventBase::Triggered {
+                source,
+                description,
+                targets,
+            } => EventBase::Triggered {
                 source: *source,
                 description: description.clone(),
                 targets: targets.clone(),
             },
             EventBase::Countered { object } => EventBase::Countered { object: *object },
-            EventBase::Sacrificed { seat, object } => EventBase::Sacrificed { seat: *seat, object: *object },
-            EventBase::TokenCreated { seat, object } => EventBase::TokenCreated { seat: *seat, object: *object },
+            EventBase::Sacrificed { seat, object } => EventBase::Sacrificed {
+                seat: *seat,
+                object: *object,
+            },
+            EventBase::TokenCreated { seat, object } => EventBase::TokenCreated {
+                seat: *seat,
+                object: *object,
+            },
             EventBase::CountersAdded { object, counter, count } => EventBase::CountersAdded {
                 object: *object,
                 counter: counter.clone(),

@@ -1,0 +1,9 @@
+Card(
+    name: "Bishop's Soldier",
+    cost: "{1}{W}",
+    types: [Creature],
+    subtypes: ["Vampire", "Soldier"],
+    pt: (2, 2),
+    text: "Lifelink (Damage dealt by this creature also causes you to gain that much life.)",
+    keywords: [Lifelink],
+)

@@ -1,0 +1,10 @@
+Card(
+    name: "Necrogen Scudder",
+    cost: "{2}{B}",
+    types: [Creature],
+    subtypes: ["Phyrexian", "Horror"],
+    pt: (3, 3),
+    text: "Flying\nWhen this creature enters, you lose 3 life.",
+    keywords: [Flying],
+    triggers: [Etb(effects: [LoseLife(player: You, amount: Const(3))])],
+)

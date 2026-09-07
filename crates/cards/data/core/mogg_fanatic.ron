@@ -1,0 +1,9 @@
+Card(
+    name: "Mogg Fanatic",
+    cost: "{R}",
+    types: [Creature],
+    subtypes: ["Goblin"],
+    pt: (1, 1),
+    text: "Sacrifice this creature: It deals 1 damage to any target.",
+    activated: [Ability(cost: [SacrificeThis], targets: [Any], effects: [DealDamage(amount: Const(1), to: Target(0))])],
+)

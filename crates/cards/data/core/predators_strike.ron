@@ -1,0 +1,7 @@
+Card(
+    name: "Predator's Strike",
+    cost: "{1}{G}",
+    types: [Instant],
+    text: "Target creature gets +3/+3 and gains trample until end of turn. (It can deal excess combat damage to the player or planeswalker it's attacking.)",
+    spell: Spell(targets: [Creature], effects: [ModifyPt(target: Target(0), power: Const(3), toughness: Const(3), keywords: [Trample], until: EndOfTurn)]),
+)

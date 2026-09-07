@@ -1,0 +1,10 @@
+Card(
+    name: "Cloudkin Seer",
+    cost: "{2}{U}",
+    types: [Creature],
+    subtypes: ["Elemental", "Wizard"],
+    pt: (2, 1),
+    text: "Flying\nWhen this creature enters, draw a card.",
+    keywords: [Flying],
+    triggers: [Etb(effects: [Draw(player: You, count: Const(1))])],
+)

@@ -77,12 +77,23 @@ impl Game {
             StackKind::Spell => "spell".into(),
             StackKind::Ability { source, index } => {
                 let def = self.card_def(*source);
-                def.ir.activated.get(*index as usize).map(|a| cardir::render_ability(&def.ir, a)).unwrap_or_default()
+                def.ir
+                    .activated
+                    .get(*index as usize)
+                    .map(|a| cardir::render_ability(&def.ir, a))
+                    .unwrap_or_default()
             }
-            StackKind::Equip { source } => format!("Equip {}", self.card_def(*source).ir.equip.as_ref().map(|c| c.to_string()).unwrap_or_default()),
+            StackKind::Equip { source } => format!(
+                "Equip {}",
+                self.card_def(*source).ir.equip.as_ref().map(|c| c.to_string()).unwrap_or_default()
+            ),
             StackKind::Trigger { source, index, .. } => {
                 let def = self.card_def(*source);
-                def.ir.triggers.get(*index as usize).map(|t| cardir::render_trigger(&def.ir, t)).unwrap_or_default()
+                def.ir
+                    .triggers
+                    .get(*index as usize)
+                    .map(|t| cardir::render_trigger(&def.ir, t))
+                    .unwrap_or_default()
             }
             StackKind::Prowess { .. } => "Prowess: gets +1/+1 until end of turn".into(),
         }
@@ -113,7 +124,9 @@ fn describe_event_with<D>(
         EventBase::Shuffled { seat } => format!("{} shuffles", who(*seat)),
         EventBase::MulliganTaken { seat, to } => format!("{} mulligans to {to}", who(*seat)),
         EventBase::HandKept { seat, size } => format!("{} keeps {size}", who(*seat)),
-        EventBase::Bottomed { seat, count } => format!("{} puts {count} card(s) on the bottom", who(*seat)),
+        EventBase::Bottomed { seat, count } => {
+            format!("{} puts {count} card(s) on the bottom", who(*seat))
+        }
         EventBase::TurnStarted { turn, active } => format!("--- Turn {turn}: {} ---", who(*active)),
         EventBase::PhaseChanged { phase } => format!("[{phase}]"),
         EventBase::PriorityPassed { seat } => format!("{} passes", who(*seat)),
@@ -122,7 +135,9 @@ fn describe_event_with<D>(
         EventBase::Resolved { object } => format!("{} resolves", obj(*object)),
         EventBase::Tapped { object } => format!("{} taps", obj(*object)),
         EventBase::Untapped { object } => format!("{} untaps", obj(*object)),
-        EventBase::ManaAdded { seat, mana, amount } => format!("{} adds {amount}×{mana}", who(*seat)),
+        EventBase::ManaAdded { seat, mana, amount } => {
+            format!("{} adds {amount}×{mana}", who(*seat))
+        }
         EventBase::Attacked { seat, attackers } => {
             if attackers.is_empty() {
                 return format!("{} declares no attackers", who(*seat));
@@ -137,34 +152,46 @@ fn describe_event_with<D>(
             if blocks.is_empty() {
                 return format!("{} declares no blockers", who(*seat));
             }
-            let list: Vec<String> = blocks
-                .iter()
-                .map(|(b, a)| format!("{} blocks {}", obj(*b), obj(*a)))
-                .collect();
+            let list: Vec<String> = blocks.iter().map(|(b, a)| format!("{} blocks {}", obj(*b), obj(*a))).collect();
             format!("{}: {}", who(*seat), list.join(", "))
         }
         EventBase::DamageAssigned { attacker, assignments } => {
-            let list: Vec<String> = assignments
-                .iter()
-                .map(|(t, n)| format!("{n} to {}", damage_target(*t)))
-                .collect();
+            let list: Vec<String> = assignments.iter().map(|(t, n)| format!("{n} to {}", damage_target(*t))).collect();
             format!("{} assigns {}", obj(*attacker), list.join(", "))
         }
-        EventBase::Damage { source, to, amount, combat } => {
+        EventBase::Damage {
+            source,
+            to,
+            amount,
+            combat,
+        } => {
             let how = if *combat { "combat damage" } else { "damage" };
             format!("{} deals {amount} {how} to {}", obj(*source), damage_target(*to))
         }
-        EventBase::Activated { seat, object, ability, targets } => {
+        EventBase::Activated {
+            seat,
+            object,
+            ability,
+            targets,
+        } => {
             let tail = if targets.is_empty() {
                 String::new()
             } else {
                 let list: Vec<String> = targets.iter().map(|t| target_text(*t, &obj, &who)).collect();
                 format!(" → {}", list.join(", "))
             };
-            let what = if *ability == crate::action::EQUIP_ABILITY { "equip" } else { "an ability" };
+            let what = if *ability == crate::action::EQUIP_ABILITY {
+                "equip"
+            } else {
+                "an ability"
+            };
             format!("{} activates {what} of {}{tail}", who(*seat), obj(*object))
         }
-        EventBase::Triggered { source, description, targets } => {
+        EventBase::Triggered {
+            source,
+            description,
+            targets,
+        } => {
             let tail = if targets.is_empty() {
                 String::new()
             } else {
@@ -174,8 +201,12 @@ fn describe_event_with<D>(
             format!("{} triggers: {description}{tail}", obj(*source))
         }
         EventBase::Countered { object } => format!("{} is countered", obj(*object)),
-        EventBase::Sacrificed { seat, object } => format!("{} sacrifices {}", who(*seat), obj(*object)),
-        EventBase::TokenCreated { seat, object } => format!("{} creates {}", who(*seat), obj(*object)),
+        EventBase::Sacrificed { seat, object } => {
+            format!("{} sacrifices {}", who(*seat), obj(*object))
+        }
+        EventBase::TokenCreated { seat, object } => {
+            format!("{} creates {}", who(*seat), obj(*object))
+        }
         EventBase::CountersAdded { object, counter, count } => {
             let kind = match counter.as_str() {
                 "Plus1Plus1" => "+1/+1",
@@ -184,7 +215,9 @@ fn describe_event_with<D>(
             };
             format!("{} gets {count} {kind} counter(s)", obj(*object))
         }
-        EventBase::Attached { object, to } => format!("{} is attached to {}", obj(*object), obj(*to)),
+        EventBase::Attached { object, to } => {
+            format!("{} is attached to {}", obj(*object), obj(*to))
+        }
         EventBase::LifeChanged { seat, from, to } => format!("{}: {from} → {to} life", who(*seat)),
         EventBase::ZoneChange { object, from, to } => {
             let verb = match (from, to) {
@@ -217,7 +250,11 @@ pub fn describe_action(game: &Game, a: &Action) -> String {
         Action::PassPriority => "Pass priority".into(),
         Action::PlayLand { object } => format!("Play {}", obj(game, *object)),
         Action::CastSpell { object, payment, targets } | Action::CastCommander { object, payment, targets } => {
-            let cost = game.objects.get(*object).map(|_| game.card_def(*object).cost.to_string()).unwrap_or_default();
+            let cost = game
+                .objects
+                .get(*object)
+                .map(|_| game.card_def(*object).cost.to_string())
+                .unwrap_or_default();
             let mut s = format!("Cast {} {cost}", obj(game, *object));
             if !targets.is_empty() {
                 let list: Vec<String> = targets
@@ -239,11 +276,23 @@ pub fn describe_action(game: &Game, a: &Action) -> String {
             }
             s
         }
-        Action::ActivateAbility { object, ability, targets, payment } => {
+        Action::ActivateAbility {
+            object,
+            ability,
+            targets,
+            payment,
+        } => {
             let def = game.objects.get(*object).map(|_| game.card_def(*object));
             let what = match (def, *ability) {
-                (Some(d), crate::action::EQUIP_ABILITY) => format!("Equip {}", d.ir.equip.as_ref().map(|c| c.to_string()).unwrap_or_default()),
-                (Some(d), i) => d.ir.activated.get(i as usize).map(|a| cardir::render_ability(&d.ir, a)).unwrap_or_else(|| format!("ability {i}")),
+                (Some(d), crate::action::EQUIP_ABILITY) => {
+                    format!("Equip {}", d.ir.equip.as_ref().map(|c| c.to_string()).unwrap_or_default())
+                }
+                (Some(d), i) => {
+                    d.ir.activated
+                        .get(i as usize)
+                        .map(|a| cardir::render_ability(&d.ir, a))
+                        .unwrap_or_else(|| format!("ability {i}"))
+                }
                 (None, i) => format!("ability {i}"),
             };
             let mut s = format!("{}: {what}", obj(game, *object));
@@ -319,7 +368,9 @@ pub fn describe_action(game: &Game, a: &Action) -> String {
             let list: Vec<String> = objects.iter().map(|o| obj(game, *o)).collect();
             format!("Put on the bottom: {}", list.join(", "))
         }
-        Action::CommanderToCommandZone { object } => format!("Return {} to the command zone", obj(game, *object)),
+        Action::CommanderToCommandZone { object } => {
+            format!("Return {} to the command zone", obj(game, *object))
+        }
         Action::Concede => "Concede".into(),
     }
 }
@@ -352,7 +403,11 @@ pub fn render_view(v: &GameView) -> String {
     } else {
         writeln!(s, "Stack (top last):").unwrap();
         for so in &v.stack {
-            let what = if so.kind == "spell" { String::new() } else { format!(" [{}: {}]", so.kind, so.description) };
+            let what = if so.kind == "spell" {
+                String::new()
+            } else {
+                format!(" [{}: {}]", so.kind, so.description)
+            };
             let targets: Vec<String> = so
                 .targets
                 .iter()
@@ -361,12 +416,18 @@ pub fn render_view(v: &GameView) -> String {
                     crate::action::Target::Player(p) => seat_label(*p),
                 })
                 .collect();
-            let arrow = if targets.is_empty() { String::new() } else { format!(" → {}", targets.join(", ")) };
+            let arrow = if targets.is_empty() {
+                String::new()
+            } else {
+                format!(" → {}", targets.join(", "))
+            };
             writeln!(s, "  {} {}{what}{arrow} ({})", so.name, so.object, seat_label(so.controller)).unwrap();
         }
     }
     let describe = |id: crate::types::ObjectId| -> String {
-        let Some(o) = v.objects.get(&id) else { return id.to_string() };
+        let Some(o) = v.objects.get(&id) else {
+            return id.to_string();
+        };
         let mut d = format!("{} {}", id, o.name);
         if let Some((p, t)) = o.pt {
             write!(d, " {p}/{t}").unwrap();
@@ -391,7 +452,11 @@ pub fn render_view(v: &GameView) -> String {
             flags.push("T");
         }
         if o.summoning_sick && o.pt.is_some() {
-            flags.push(if o.keywords.contains(&crate::Keyword::Haste) { "sick but hasty" } else { "sick" });
+            flags.push(if o.keywords.contains(&crate::Keyword::Haste) {
+                "sick but hasty"
+            } else {
+                "sick"
+            });
         }
         if o.attacking.is_some() {
             flags.push("attacking");

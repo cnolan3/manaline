@@ -1,0 +1,9 @@
+Card(
+    name: "Skyhunter Skirmisher",
+    cost: "{1}{W}{W}",
+    types: [Creature],
+    subtypes: ["Cat", "Knight"],
+    pt: (1, 1),
+    text: "Flying, double strike",
+    keywords: [Flying, DoubleStrike],
+)

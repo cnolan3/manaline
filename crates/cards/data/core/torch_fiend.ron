@@ -1,0 +1,9 @@
+Card(
+    name: "Torch Fiend",
+    cost: "{1}{R}",
+    types: [Creature],
+    subtypes: ["Devil"],
+    pt: (2, 1),
+    text: "{R}, Sacrifice this creature: Destroy target artifact.",
+    activated: [Ability(cost: [Mana("{R}"), SacrificeThis], targets: [Artifact], effects: [Destroy(target: Target(0))])],
+)

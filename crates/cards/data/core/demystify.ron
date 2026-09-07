@@ -1,0 +1,7 @@
+Card(
+    name: "Demystify",
+    cost: "{W}",
+    types: [Instant],
+    text: "Destroy target enchantment.",
+    spell: Spell(targets: [Enchantment], effects: [Destroy(target: Target(0))]),
+)

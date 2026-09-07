@@ -14,8 +14,8 @@ pub use client::{Client, ClientError, Welcome};
 pub use endpoint::Endpoint;
 pub use framing::{Connection, FrameError, FramedReader, FramedWriter};
 pub use messages::{
-    ClientEnvelope, ClientMessage, ErrorCode, GameId, LegalAction, LobbyView, ProtocolError, Role, SeatStatus,
-    ServerEnvelope, ServerMessage, Token, PROTOCOL_VERSION,
+    ClientEnvelope, ClientMessage, ErrorCode, GameId, LegalAction, LobbyView, ProtocolError, Role, SeatStatus, ServerEnvelope,
+    ServerMessage, Token, PROTOCOL_VERSION,
 };
 
 pub use engine::{EventView, GameView};

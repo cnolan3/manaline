@@ -1,0 +1,7 @@
+Card(
+    name: "Rod of Ruin",
+    cost: "{4}",
+    types: [Artifact],
+    text: "{3}, {T}: This artifact deals 1 damage to any target.",
+    activated: [Ability(cost: [Mana("{3}"), Tap], targets: [Any], effects: [DealDamage(amount: Const(1), to: Target(0))])],
+)

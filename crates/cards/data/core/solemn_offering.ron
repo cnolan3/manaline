@@ -1,0 +1,7 @@
+Card(
+    name: "Solemn Offering",
+    cost: "{2}{W}",
+    types: [Sorcery],
+    text: "Destroy target artifact or enchantment. You gain 4 life.",
+    spell: Spell(targets: [Or([Artifact, Enchantment])], effects: [Destroy(target: Target(0)), GainLife(player: You, amount: Const(4))]),
+)

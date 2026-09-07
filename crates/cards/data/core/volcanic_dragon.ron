@@ -1,0 +1,9 @@
+Card(
+    name: "Volcanic Dragon",
+    cost: "{4}{R}{R}",
+    types: [Creature],
+    subtypes: ["Dragon"],
+    pt: (4, 4),
+    text: "Flying, haste",
+    keywords: [Flying, Haste],
+)

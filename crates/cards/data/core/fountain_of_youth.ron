@@ -1,0 +1,7 @@
+Card(
+    name: "Fountain of Youth",
+    cost: "{0}",
+    types: [Artifact],
+    text: "{2}, {T}: You gain 1 life.",
+    activated: [Ability(cost: [Mana("{2}"), Tap], effects: [GainLife(player: You, amount: Const(1))])],
+)

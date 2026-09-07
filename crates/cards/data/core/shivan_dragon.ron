@@ -1,0 +1,10 @@
+Card(
+    name: "Shivan Dragon",
+    cost: "{4}{R}{R}",
+    types: [Creature],
+    subtypes: ["Dragon"],
+    pt: (5, 5),
+    text: "Flying\n{R}: This creature gets +1/+0 until end of turn.",
+    keywords: [Flying],
+    activated: [Ability(cost: [Mana("{R}")], effects: [ModifyPt(target: This, power: Const(1), toughness: Const(0), until: EndOfTurn)])],
+)

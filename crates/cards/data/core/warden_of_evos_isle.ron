@@ -1,0 +1,10 @@
+Card(
+    name: "Warden of Evos Isle",
+    cost: "{2}{U}",
+    types: [Creature],
+    subtypes: ["Bird", "Wizard"],
+    pt: (2, 2),
+    text: "Flying\nCreature spells with flying you cast cost {1} less to cast.",
+    keywords: [Flying],
+    statics: [CostReduction(filter: And([Creature, Spell, HasKeyword(Flying)]), amount: Const(1))],
+)

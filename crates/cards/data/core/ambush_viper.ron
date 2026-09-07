@@ -1,0 +1,9 @@
+Card(
+    name: "Ambush Viper",
+    cost: "{1}{G}",
+    types: [Creature],
+    subtypes: ["Snake"],
+    pt: (2, 1),
+    text: "Flash\nDeathtouch",
+    keywords: [Flash, Deathtouch],
+)

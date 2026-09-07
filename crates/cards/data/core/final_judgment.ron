@@ -1,0 +1,7 @@
+Card(
+    name: "Final Judgment",
+    cost: "{4}{W}{W}",
+    types: [Sorcery],
+    text: "Exile all creatures.",
+    spell: Spell(effects: [Exile(target: Each(Creature))]),
+)

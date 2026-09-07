@@ -1,0 +1,9 @@
+Card(
+    name: "Kavu Climber",
+    cost: "{3}{G}{G}",
+    types: [Creature],
+    subtypes: ["Kavu"],
+    pt: (3, 3),
+    text: "When this creature enters, draw a card.",
+    triggers: [Etb(effects: [Draw(player: You, count: Const(1))])],
+)

@@ -17,7 +17,12 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Settings {
-        Settings { auto_pass: true, auto_pass_ms: 1500, card_keywords: true, verbose_log: false }
+        Settings {
+            auto_pass: true,
+            auto_pass_ms: 1500,
+            card_keywords: true,
+            verbose_log: false,
+        }
     }
 }
 
@@ -28,7 +33,9 @@ impl Settings {
 
     /// Saved settings, or the defaults if there are none or they are unreadable.
     pub fn load() -> Settings {
-        let Some(path) = Settings::path() else { return Settings::default() };
+        let Some(path) = Settings::path() else {
+            return Settings::default();
+        };
         std::fs::read_to_string(&path)
             .ok()
             .and_then(|text| serde_json::from_str(&text).ok())
@@ -36,7 +43,9 @@ impl Settings {
     }
 
     pub fn save(&self) -> std::io::Result<()> {
-        let Some(path) = Settings::path() else { return Ok(()) };
+        let Some(path) = Settings::path() else {
+            return Ok(());
+        };
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }

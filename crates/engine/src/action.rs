@@ -118,9 +118,7 @@ impl Action {
     pub fn is_division(&self) -> bool {
         matches!(
             self,
-            Action::AssignCombatDamage { .. }
-                | Action::DeclareAttackers { .. }
-                | Action::DeclareBlockers { .. }
+            Action::AssignCombatDamage { .. } | Action::DeclareAttackers { .. } | Action::DeclareBlockers { .. }
         )
     }
 
@@ -129,9 +127,7 @@ impl Action {
     pub fn canonical(&self) -> Action {
         let mut a = self.clone();
         match &mut a {
-            Action::CastSpell { payment, .. }
-            | Action::ActivateAbility { payment, .. }
-            | Action::CastCommander { payment, .. } => {
+            Action::CastSpell { payment, .. } | Action::ActivateAbility { payment, .. } | Action::CastCommander { payment, .. } => {
                 payment.tap.sort();
                 payment.from_pool.sort();
                 payment.sacrifice.sort();
@@ -163,10 +159,27 @@ impl Action {
     /// The same cast or activation, ignoring which permanents pay the mana.
     pub fn same_except_mana(&self, other: &Action) -> bool {
         match (self, other) {
-            (Action::CastSpell { object: a, targets: ta, .. }, Action::CastSpell { object: b, targets: tb, .. }) => a == b && ta == tb,
             (
-                Action::ActivateAbility { object: a, ability: ia, targets: ta, payment: pa },
-                Action::ActivateAbility { object: b, ability: ib, targets: tb, payment: pb },
+                Action::CastSpell {
+                    object: a, targets: ta, ..
+                },
+                Action::CastSpell {
+                    object: b, targets: tb, ..
+                },
+            ) => a == b && ta == tb,
+            (
+                Action::ActivateAbility {
+                    object: a,
+                    ability: ia,
+                    targets: ta,
+                    payment: pa,
+                },
+                Action::ActivateAbility {
+                    object: b,
+                    ability: ib,
+                    targets: tb,
+                    payment: pb,
+                },
             ) => a == b && ia == ib && ta == tb && pa.sacrifice == pb.sacrifice && pa.discard == pb.discard,
             _ => false,
         }
@@ -175,7 +188,7 @@ impl Action {
     /// The mana this action must pay, if it is a cast or activation.
     pub fn mana_cost_in(&self, game: &crate::game::Game) -> Option<crate::types::ManaCost> {
         match self {
-            Action::CastSpell { object, .. } => game.objects.get(*object).map(|_| game.card_def(*object).cost.clone()),
+            Action::CastSpell { object, .. } => game.objects.get(*object).map(|o| game.cast_cost(o.controller, *object)),
             Action::ActivateAbility { object, ability, .. } => {
                 game.objects.get(*object)?;
                 let def = game.card_def(*object);

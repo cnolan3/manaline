@@ -1,0 +1,9 @@
+Card(
+    name: "Lone Missionary",
+    cost: "{1}{W}",
+    types: [Creature],
+    subtypes: ["Kor", "Monk"],
+    pt: (2, 1),
+    text: "When this creature enters, you gain 4 life.",
+    triggers: [Etb(effects: [GainLife(player: You, amount: Const(4))])],
+)

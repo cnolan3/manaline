@@ -1,0 +1,9 @@
+Card(
+    name: "Bottle Gnomes",
+    cost: "{3}",
+    types: [Artifact, Creature],
+    subtypes: ["Gnome"],
+    pt: (1, 3),
+    text: "Sacrifice this creature: You gain 3 life.",
+    activated: [Ability(cost: [SacrificeThis], effects: [GainLife(player: You, amount: Const(3))])],
+)

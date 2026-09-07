@@ -1,0 +1,7 @@
+Card(
+    name: "Concentrate",
+    cost: "{2}{U}{U}",
+    types: [Sorcery],
+    text: "Draw three cards.",
+    spell: Spell(effects: [Draw(player: You, count: Const(3))]),
+)

@@ -51,7 +51,9 @@ pub enum CardPool {
     /// A directory of IR files relative to the manaline data dir (custom/community sets).
     Dir(PathBuf),
     /// Scryfall `legalities[format] == "legal"`, joined at load.
-    Scryfall { format: String },
+    Scryfall {
+        format: String,
+    },
     /// Set codes.
     Sets(Vec<String>),
     All,
@@ -85,31 +87,89 @@ fn default_max_hand_size() -> u8 {
     7
 }
 
+/// Deck rules that accept anything, for sample hands and scenarios.
+pub fn format_deck_any() -> Deck {
+    Deck {
+        size: DeckSize::Min(0),
+        singleton: false,
+        includes_commander: false,
+    }
+}
+
+/// Where per-format legality comes from for a `CardPool::Scryfall` pool:
+/// the Scryfall cache in `carddb`, or a table in a test. `None` means the
+/// card is unknown to the source.
+pub trait LegalitySource {
+    fn legal_in(&self, card_name: &str, format: &str) -> Option<bool>;
+}
+
+impl<F: Fn(&str, &str) -> Option<bool>> LegalitySource for F {
+    fn legal_in(&self, card_name: &str, format: &str) -> Option<bool> {
+        self(card_name, format)
+    }
+}
+
 /// One reason a deck is not legal in a format.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Violation {
-    TooFewCards { have: usize, need: usize },
-    TooManyCards { have: usize, max: usize },
-    NotSingleton { name: String, count: usize },
-    Banned { name: String },
-    NotInPool { name: String },
-    UnsupportedPool { pool: String },
-    UnsupportedRule { rule: String },
+    TooFewCards {
+        have: usize,
+        need: usize,
+    },
+    TooManyCards {
+        have: usize,
+        max: usize,
+    },
+    NotSingleton {
+        name: String,
+        count: usize,
+    },
+    Banned {
+        name: String,
+    },
+    NotInPool {
+        name: String,
+    },
+    UnsupportedPool {
+        pool: String,
+    },
+    UnsupportedRule {
+        rule: String,
+    },
     /// The decklist could not be parsed (unknown card name, bad line).
-    Unparsable { reason: String },
+    Unparsable {
+        reason: String,
+    },
+    /// The pool needs the Scryfall card data and none is cached.
+    NeedsCardData {
+        format: String,
+    },
 }
 
 impl std::fmt::Display for Violation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Violation::TooFewCards { have, need } => write!(f, "deck has {have} cards, needs at least {need}"),
-            Violation::TooManyCards { have, max } => write!(f, "deck has {have} cards, at most {max} allowed"),
-            Violation::NotSingleton { name, count } => write!(f, "{name}: {count} copies in a singleton format"),
+            Violation::TooFewCards { have, need } => {
+                write!(f, "deck has {have} cards, needs at least {need}")
+            }
+            Violation::TooManyCards { have, max } => {
+                write!(f, "deck has {have} cards, at most {max} allowed")
+            }
+            Violation::NotSingleton { name, count } => {
+                write!(f, "{name}: {count} copies in a singleton format")
+            }
             Violation::Banned { name } => write!(f, "{name} is banned"),
             Violation::NotInPool { name } => write!(f, "{name} is not in this format's card pool"),
-            Violation::UnsupportedPool { pool } => write!(f, "card pool {pool} is not supported yet"),
-            Violation::UnsupportedRule { rule } => write!(f, "format rule {rule} is not implemented yet"),
+            Violation::UnsupportedPool { pool } => {
+                write!(f, "card pool {pool} is not supported yet")
+            }
+            Violation::UnsupportedRule { rule } => {
+                write!(f, "format rule {rule} is not implemented yet")
+            }
             Violation::Unparsable { reason } => write!(f, "could not read the decklist: {reason}"),
+            Violation::NeedsCardData { format } => {
+                write!(f, "legality in {format} needs the Scryfall card data: run `manaline cards update`")
+            }
         }
     }
 }
@@ -156,8 +216,14 @@ impl Format {
             .collect()
     }
 
-    /// Check a deck against this format's construction rules and card pool.
+    /// Check a deck against this format's construction rules and card pool,
+    /// without card data (a Scryfall pool then reports `NeedsCardData`).
     pub fn check_deck(&self, deck: &[CardId], db: &CardDb) -> Vec<Violation> {
+        self.check_deck_with(deck, db, None)
+    }
+
+    /// Check a deck, consulting `legality` for Scryfall-pool formats.
+    pub fn check_deck_with(&self, deck: &[CardId], db: &CardDb, legality: Option<&dyn LegalitySource>) -> Vec<Violation> {
         let mut out = Vec::new();
         let n = deck.len();
         match self.deck.size {
@@ -175,7 +241,10 @@ impl Format {
             }
             DeckSize::Range(lo, hi) => {
                 if n < lo as usize {
-                    out.push(Violation::TooFewCards { have: n, need: lo as usize });
+                    out.push(Violation::TooFewCards {
+                        have: n,
+                        need: lo as usize,
+                    });
                 } else if n > hi as usize {
                     out.push(Violation::TooManyCards { have: n, max: hi as usize });
                 }
@@ -192,7 +261,10 @@ impl Format {
             let card = db.get(id);
             let count = counts[&id];
             if self.deck.singleton && count > 1 && !card.is_basic() {
-                out.push(Violation::NotSingleton { name: card.name.clone(), count });
+                out.push(Violation::NotSingleton {
+                    name: card.name.clone(),
+                    count,
+                });
             }
             let banned = self.legality.banned.iter().any(|b| b.eq_ignore_ascii_case(&card.name));
             if banned {
@@ -210,9 +282,24 @@ impl Format {
                         out.push(Violation::NotInPool { name: card.name.clone() });
                     }
                 }
+                CardPool::Scryfall { format } => match legality {
+                    None => {
+                        if !out.iter().any(|v| matches!(v, Violation::NeedsCardData { .. })) {
+                            out.push(Violation::NeedsCardData { format: format.clone() });
+                        }
+                    }
+                    Some(src) => {
+                        if src.legal_in(&card.name, format) != Some(true) {
+                            out.push(Violation::NotInPool { name: card.name.clone() });
+                        }
+                    }
+                },
                 other => {
                     let pool = format!("{other:?}");
-                    if !out.iter().any(|v| matches!(v, Violation::UnsupportedPool { pool: p } if *p == pool)) {
+                    if !out
+                        .iter()
+                        .any(|v| matches!(v, Violation::UnsupportedPool { pool: p } if *p == pool))
+                    {
                         out.push(Violation::UnsupportedPool { pool });
                     }
                 }

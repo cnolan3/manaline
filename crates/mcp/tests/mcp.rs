@@ -30,14 +30,24 @@ async fn start(seed: u64) -> Running {
         tcp: None,
         parent_pid: None,
         replay_dir: Some(dir.join("games")),
-        create: Some(CreateGame { format: "cube".into(), seats: 2, seed: Some(seed) }),
+        create: Some(CreateGame {
+            format: "cube".into(),
+            seats: 2,
+            seed: Some(seed),
+        }),
         cards: Arc::new(cards::core()),
+        legality: None,
     };
     let d = Daemon::bind(config).await.unwrap();
     let info = d.info().clone();
     let handle = d.handle();
     let task = tokio::spawn(async move { d.run().await.unwrap() });
-    Running { handle, endpoint: Endpoint::Unix(info.socket.unwrap()), tokens: info.seat_tokens, task }
+    Running {
+        handle,
+        endpoint: Endpoint::Unix(info.socket.unwrap()),
+        tokens: info.seat_tokens,
+        task,
+    }
 }
 
 fn text_of(r: &CallToolResult) -> String {
@@ -57,7 +67,12 @@ fn is_error(r: &CallToolResult) -> bool {
 
 fn legal_ids(r: &CallToolResult) -> Vec<(u32, String)> {
     let v = r.structured_content.as_ref().unwrap();
-    let list = v.get("legal_actions").or_else(|| v.get("actions")).and_then(|a| a.as_array()).cloned().unwrap_or_default();
+    let list = v
+        .get("legal_actions")
+        .or_else(|| v.get("actions"))
+        .and_then(|a| a.as_array())
+        .cloned()
+        .unwrap_or_default();
     list.iter()
         .map(|a| (a["id"].as_u64().unwrap() as u32, a["description"].as_str().unwrap().to_string()))
         .collect()
@@ -82,7 +97,10 @@ async fn human_loop(mut c: Client, seed: u64) -> Client {
             return c;
         }
         match c.next_push().await {
-            Ok(ServerMessage::Event { event: engine::EventBase::GameOver { .. }, .. }) => return c,
+            Ok(ServerMessage::Event {
+                event: engine::EventBase::GameOver { .. },
+                ..
+            }) => return c,
             Ok(_) => continue,
             Err(_) => return c,
         }
@@ -106,7 +124,13 @@ async fn an_agent_plays_a_whole_game_through_the_tools() {
     let res = server.get_game_state().await.unwrap();
     assert!(is_error(&res));
     assert!(text_of(&res).contains("has not started"), "{}", text_of(&res));
-    let res = server.wait_for_turn(Parameters(WaitParams { timeout_seconds: Some(1), auto_pass: None })).await.unwrap();
+    let res = server
+        .wait_for_turn(Parameters(WaitParams {
+            timeout_seconds: Some(1),
+            auto_pass: None,
+        }))
+        .await
+        .unwrap();
     assert_eq!(res.structured_content.as_ref().unwrap()["timed_out"], true);
 
     // The human sits down and readies; the game starts.
@@ -123,7 +147,10 @@ async fn an_agent_plays_a_whole_game_through_the_tools() {
     assert!(!is_error(&res));
     loop {
         match human.next_push().await.unwrap() {
-            ServerMessage::Event { event: engine::EventBase::Chat { from, text, .. }, .. } => {
+            ServerMessage::Event {
+                event: engine::EventBase::Chat { from, text, .. },
+                ..
+            } => {
                 assert_eq!(from, Seat(1));
                 assert_eq!(text, "gl hf");
                 break;
@@ -137,7 +164,14 @@ async fn an_agent_plays_a_whole_game_through_the_tools() {
     assert!(text_of(&log).contains("Game started"), "{}", text_of(&log));
 
     // Card lookup by name.
-    let card = server.get_card(Parameters(GetCardParams { name: Some("hill giant".into()), object_id: None, include_ir: None })).await.unwrap();
+    let card = server
+        .get_card(Parameters(GetCardParams {
+            name: Some("hill giant".into()),
+            object_id: None,
+            include_ir: None,
+        }))
+        .await
+        .unwrap();
     assert!(text_of(&card).contains("Hill Giant {3}{R}"), "{}", text_of(&card));
     assert!(text_of(&card).contains("3/3"));
 
@@ -147,7 +181,13 @@ async fn an_agent_plays_a_whole_game_through_the_tools() {
     let mut auto_passes = 0u64;
     let mut pass_only_wakeups = 0;
     let outcome = loop {
-        let res = server.wait_for_turn(Parameters(WaitParams { timeout_seconds: Some(20), auto_pass: None })).await.unwrap();
+        let res = server
+            .wait_for_turn(Parameters(WaitParams {
+                timeout_seconds: Some(20),
+                auto_pass: None,
+            }))
+            .await
+            .unwrap();
         let sc = res.structured_content.clone().unwrap();
         auto_passes += sc.get("auto_passed").and_then(|n| n.as_u64()).unwrap_or(0);
         if sc.get("game_over").and_then(|g| g.as_bool()).unwrap_or(false) {
@@ -168,7 +208,13 @@ async fn an_agent_plays_a_whole_game_through_the_tools() {
                 .or_else(|| ids.iter().find(|(_, d)| d != "Concede"))
                 .cloned()
                 .expect("a non-concede action");
-            let res = server.take_action(Parameters(TakeActionParams { action_id: Some(id), action: None })).await.unwrap();
+            let res = server
+                .take_action(Parameters(TakeActionParams {
+                    action_id: Some(id),
+                    action: None,
+                }))
+                .await
+                .unwrap();
             assert!(!is_error(&res), "{}", text_of(&res));
             turns_taken += 1;
             let sc = res.structured_content.clone().unwrap();
@@ -186,12 +232,21 @@ async fn an_agent_plays_a_whole_game_through_the_tools() {
     assert!(turns_taken > 20, "the agent took {turns_taken} actions");
     assert!(matches!(outcome, Outcome::Winner(_)));
     assert!(auto_passes > 0, "wait_for_turn never passed a nothing-to-do moment for the agent");
-    assert!(pass_only_wakeups == 0, "woken {pass_only_wakeups} times with only pass/concede available");
+    assert!(
+        pass_only_wakeups == 0,
+        "woken {pass_only_wakeups} times with only pass/concede available"
+    );
 
     // Once over, tools say so instead of erroring.
     let res = server.get_game_state().await.unwrap();
     assert!(text_of(&res).contains("GAME OVER"));
-    let res = server.wait_for_turn(Parameters(WaitParams { timeout_seconds: Some(1), auto_pass: None })).await.unwrap();
+    let res = server
+        .wait_for_turn(Parameters(WaitParams {
+            timeout_seconds: Some(1),
+            auto_pass: None,
+        }))
+        .await
+        .unwrap();
     assert_eq!(res.structured_content.as_ref().unwrap()["game_over"], true);
 
     r.handle.shutdown();
@@ -216,17 +271,39 @@ async fn stale_ids_and_wrong_turns_come_back_as_tool_errors() {
     let mut status = r.handle.status();
     status.wait_for(|s| !s.must_act.is_empty()).await.unwrap();
 
-    let res = server.take_action(Parameters(TakeActionParams { action_id: Some(0), action: None })).await.unwrap();
+    let res = server
+        .take_action(Parameters(TakeActionParams {
+            action_id: Some(0),
+            action: None,
+        }))
+        .await
+        .unwrap();
     assert!(is_error(&res));
     assert!(text_of(&res).contains("get_legal_actions first"), "{}", text_of(&res));
-    let res = server.take_action(Parameters(TakeActionParams { action_id: None, action: None })).await.unwrap();
+    let res = server
+        .take_action(Parameters(TakeActionParams {
+            action_id: None,
+            action: None,
+        }))
+        .await
+        .unwrap();
     assert!(is_error(&res));
     let res = server
-        .take_action(Parameters(TakeActionParams { action_id: None, action: Some(serde_json::json!({"kind": "pass_priority"})) }))
+        .take_action(Parameters(TakeActionParams {
+            action_id: None,
+            action: Some(serde_json::json!({"kind": "pass_priority"})),
+        }))
         .await
         .unwrap();
     assert!(is_error(&res), "acting out of turn or illegally is reported: {}", text_of(&res));
-    let res = server.get_card(Parameters(GetCardParams { name: Some("Black Lotus".into()), object_id: None, include_ir: None })).await.unwrap();
+    let res = server
+        .get_card(Parameters(GetCardParams {
+            name: Some("Black Lotus".into()),
+            object_id: None,
+            include_ir: None,
+        }))
+        .await
+        .unwrap();
     assert!(is_error(&res));
     let res = server.concede().await.unwrap();
     assert!(!is_error(&res), "{}", text_of(&res));
@@ -255,9 +332,11 @@ async fn rpc(addr: &std::net::SocketAddr, session: &Option<String>, body: serde_
     s.read_to_end(&mut raw).await.unwrap();
     let text = String::from_utf8_lossy(&raw).to_string();
     let (head, body) = text.split_once("\r\n\r\n").expect("http response");
-    let sid = head
-        .lines()
-        .find_map(|l| l.split_once(':').filter(|(k, _)| k.eq_ignore_ascii_case("mcp-session-id")).map(|(_, v)| v.trim().to_string()));
+    let sid = head.lines().find_map(|l| {
+        l.split_once(':')
+            .filter(|(k, _)| k.eq_ignore_ascii_case("mcp-session-id"))
+            .map(|(_, v)| v.trim().to_string())
+    });
     // Chunked bodies: strip chunk sizes; SSE bodies: take data: lines.
     let mut payload = String::new();
     let chunked = head.to_ascii_lowercase().contains("transfer-encoding: chunked");
@@ -284,7 +363,11 @@ async fn rpc(addr: &std::net::SocketAddr, session: &Option<String>, body: serde_
     if payload.is_empty() {
         payload = body.trim().to_string();
     }
-    let value = if payload.is_empty() { serde_json::Value::Null } else { serde_json::from_str(&payload).unwrap_or_else(|e| panic!("{e}: {payload}")) };
+    let value = if payload.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::from_str(&payload).unwrap_or_else(|e| panic!("{e}: {payload}"))
+    };
     (sid, value)
 }
 
@@ -311,42 +394,109 @@ async fn streamable_http_lists_tools_and_serves_resources() {
     .await;
     assert_eq!(init["result"]["serverInfo"]["name"], "manaline", "{init}");
     assert!(init["result"]["instructions"].as_str().unwrap().contains("seat 1"));
-    let _ = rpc(&addr, &sid, serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"})).await;
+    let _ = rpc(
+        &addr,
+        &sid,
+        serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+    )
+    .await;
 
     let (_, tools) = rpc(&addr, &sid, serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})).await;
-    let names: Vec<&str> = tools["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
-    for expected in ["get_game_state", "get_legal_actions", "take_action", "wait_for_turn", "get_card", "get_log", "say", "concede", "submit_deck"] {
+    let names: Vec<&str> = tools["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    for expected in [
+        "get_game_state",
+        "get_legal_actions",
+        "take_action",
+        "wait_for_turn",
+        "get_card",
+        "get_log",
+        "say",
+        "concede",
+        "submit_deck",
+    ] {
         assert!(names.contains(&expected), "missing {expected} in {names:?}");
     }
-    let take = tools["result"]["tools"].as_array().unwrap().iter().find(|t| t["name"] == "take_action").unwrap();
+    let take = tools["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "take_action")
+        .unwrap();
     assert!(take["inputSchema"]["properties"]["action_id"].is_object(), "{take}");
 
     let (_, res) = rpc(&addr, &sid, serde_json::json!({"jsonrpc":"2.0","id":3,"method":"resources/list"})).await;
-    let uris: Vec<&str> = res["result"]["resources"].as_array().unwrap().iter().map(|t| t["uri"].as_str().unwrap()).collect();
-    assert!(uris.contains(&"manaline://rules-primer") && uris.contains(&"manaline://cube"), "{uris:?}");
+    let uris: Vec<&str> = res["result"]["resources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["uri"].as_str().unwrap())
+        .collect();
+    assert!(
+        uris.contains(&"manaline://rules-primer") && uris.contains(&"manaline://cube"),
+        "{uris:?}"
+    );
     // Strict 2026-07-28 clients require the cache hints on every result.
     assert_eq!(res["result"]["ttlMs"], 0, "{res}");
     assert_eq!(res["result"]["cacheScope"], "public");
-    let (_, primer) = rpc(&addr, &sid, serde_json::json!({"jsonrpc":"2.0","id":4,"method":"resources/read","params":{"uri":"manaline://rules-primer"}})).await;
-    assert!(primer["result"]["contents"][0]["text"].as_str().unwrap().contains("Priority and passing"));
+    let (_, primer) = rpc(
+        &addr,
+        &sid,
+        serde_json::json!({"jsonrpc":"2.0","id":4,"method":"resources/read","params":{"uri":"manaline://rules-primer"}}),
+    )
+    .await;
+    assert!(primer["result"]["contents"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("Priority and passing"));
     assert_eq!(primer["result"]["ttlMs"], 0, "{primer}");
     assert_eq!(primer["result"]["cacheScope"], "public");
     let (_, tl) = rpc(&addr, &sid, serde_json::json!({"jsonrpc":"2.0","id":30,"method":"tools/list"})).await;
     let _ = tl;
-    let (_, cube) = rpc(&addr, &sid, serde_json::json!({"jsonrpc":"2.0","id":5,"method":"resources/read","params":{"uri":"manaline://cube"}})).await;
-    assert!(cube["result"]["contents"][0]["text"].as_str().unwrap().contains("Grizzly Bears {1}{G}"));
+    let (_, cube) = rpc(
+        &addr,
+        &sid,
+        serde_json::json!({"jsonrpc":"2.0","id":5,"method":"resources/read","params":{"uri":"manaline://cube"}}),
+    )
+    .await;
+    assert!(cube["result"]["contents"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("Grizzly Bears {1}{G}"));
 
     let (_, prompts) = rpc(&addr, &sid, serde_json::json!({"jsonrpc":"2.0","id":6,"method":"prompts/list"})).await;
     assert_eq!(prompts["result"]["prompts"][0]["name"], "play-a-game");
-    let (_, prompt) = rpc(&addr, &sid, serde_json::json!({"jsonrpc":"2.0","id":7,"method":"prompts/get","params":{"name":"play-a-game"}})).await;
-    assert!(prompt["result"]["messages"][0]["content"]["text"].as_str().unwrap().contains("wait_for_turn"));
+    let (_, prompt) = rpc(
+        &addr,
+        &sid,
+        serde_json::json!({"jsonrpc":"2.0","id":7,"method":"prompts/get","params":{"name":"play-a-game"}}),
+    )
+    .await;
+    assert!(prompt["result"]["messages"][0]["content"]["text"]
+        .as_str()
+        .unwrap()
+        .contains("wait_for_turn"));
 
     // `say` accepts `message` as well as `text`.
-    let (_, said) = rpc(&addr, &sid, serde_json::json!({"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"say","arguments":{"message":"hello table"}}})).await;
+    let (_, said) = rpc(
+        &addr,
+        &sid,
+        serde_json::json!({"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"say","arguments":{"message":"hello table"}}}),
+    )
+    .await;
     assert_eq!(said["result"]["content"][0]["text"], "said", "{said}");
 
     // A tool call over the wire: the game has not started, which is a tool error, not a protocol error.
-    let (_, call) = rpc(&addr, &sid, serde_json::json!({"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"get_game_state","arguments":{}}})).await;
+    let (_, call) = rpc(
+        &addr,
+        &sid,
+        serde_json::json!({"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"get_game_state","arguments":{}}}),
+    )
+    .await;
     assert_eq!(call["result"]["isError"], true, "{call}");
     assert!(call["result"]["content"][0]["text"].as_str().unwrap().contains("not started"));
 

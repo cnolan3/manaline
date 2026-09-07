@@ -16,7 +16,9 @@ impl Game {
         match effect {
             Effect::DealDamage { amount, to } => {
                 let n = self.eval_amount(amount, ctx);
-                let Some(source) = ctx.this else { return Ok(()) };
+                let Some(source) = ctx.this else {
+                    return Ok(());
+                };
                 for target in self.refs_of(to, ctx) {
                     let dt = match target {
                         Target::Object(o) => DamageTarget::Object(o),
@@ -80,7 +82,13 @@ impl Game {
                     self.emit(Event::LifeChanged { seat, from, to: from - n });
                 }
             }
-            Effect::ModifyPt { target, power, toughness, keywords, until: _ } => {
+            Effect::ModifyPt {
+                target,
+                power,
+                toughness,
+                keywords,
+                until: _,
+            } => {
                 let p = self.eval_amount(power, ctx);
                 let t = self.eval_amount(toughness, ctx);
                 for id in self.objects_of(target, ctx) {
@@ -88,16 +96,25 @@ impl Game {
                         continue;
                     }
                     let obj = &mut self.objects[id];
-                    obj.modifiers.push(Modifier { kind: ModifierKind::Pt { power: p, toughness: t }, expires: Expiry::EndOfTurn });
+                    obj.modifiers.push(Modifier {
+                        kind: ModifierKind::Pt { power: p, toughness: t },
+                        expires: Expiry::EndOfTurn,
+                    });
                     for k in keywords {
-                        obj.modifiers.push(Modifier { kind: ModifierKind::Keyword(*k), expires: Expiry::EndOfTurn });
+                        obj.modifiers.push(Modifier {
+                            kind: ModifierKind::Keyword(*k),
+                            expires: Expiry::EndOfTurn,
+                        });
                     }
                 }
             }
             Effect::GrantKeyword { target, keyword, until: _ } => {
                 for id in self.objects_of(target, ctx) {
                     if self.objects[id].zone == Zone::Battlefield {
-                        self.objects[id].modifiers.push(Modifier { kind: ModifierKind::Keyword(*keyword), expires: Expiry::EndOfTurn });
+                        self.objects[id].modifiers.push(Modifier {
+                            kind: ModifierKind::Keyword(*keyword),
+                            expires: Expiry::EndOfTurn,
+                        });
                     }
                 }
             }
@@ -117,7 +134,11 @@ impl Game {
                         CounterKind::Plus1Plus1 => self.objects[id].counters.plus1 = self.objects[id].counters.plus1.saturating_add(n),
                         CounterKind::Minus1Minus1 => self.objects[id].counters.minus1 = self.objects[id].counters.minus1.saturating_add(n),
                     }
-                    self.emit(Event::CountersAdded { object: id, counter: format!("{kind:?}"), count: n as i32 });
+                    self.emit(Event::CountersAdded {
+                        object: id,
+                        counter: format!("{kind:?}"),
+                        count: n as i32,
+                    });
                 }
             }
             Effect::AddMana { color, amount } => {
@@ -127,7 +148,11 @@ impl Game {
                     None => Mana::Colorless,
                 };
                 self.players[ctx.you.index()].mana_pool.add(mana, n);
-                self.emit(Event::ManaAdded { seat: ctx.you, mana, amount: n });
+                self.emit(Event::ManaAdded {
+                    seat: ctx.you,
+                    mana,
+                    amount: n,
+                });
             }
             Effect::Tap { target } => {
                 for id in self.objects_of(target, ctx) {
@@ -175,7 +200,11 @@ impl Game {
                             self.sacrifice(seat, id);
                         }
                     } else {
-                        return Err(Suspend::Sacrifice { seat, filter: filter.clone(), count: n });
+                        return Err(Suspend::Sacrifice {
+                            seat,
+                            filter: filter.clone(),
+                            count: n,
+                        });
                     }
                 }
             }
@@ -191,7 +220,11 @@ impl Game {
                         let seats = self.players_of(player, ctx);
                         seats.iter().any(|&s| {
                             let sub = Ctx { you: s, ..ctx.clone() };
-                            let n = self.players[s.index()].battlefield.iter().filter(|id| self.object_matches(**id, filter, &sub)).count();
+                            let n = self.players[s.index()]
+                                .battlefield
+                                .iter()
+                                .filter(|id| self.object_matches(**id, filter, &sub))
+                                .count();
                             n as i32 >= *at_least
                         })
                     }
@@ -220,11 +253,22 @@ impl Game {
                 }
                 let from = self.players[s.index()].life;
                 self.players[s.index()].life = from - amount;
-                self.emit(Event::Damage { source, to, amount, combat });
-                self.emit(Event::LifeChanged { seat: s, from, to: from - amount });
+                self.emit(Event::Damage {
+                    source,
+                    to,
+                    amount,
+                    combat,
+                });
+                self.emit(Event::LifeChanged {
+                    seat: s,
+                    from,
+                    to: from - amount,
+                });
             }
             DamageTarget::Object(o) => {
-                let Some(obj) = self.objects.get(o) else { return };
+                let Some(obj) = self.objects.get(o) else {
+                    return;
+                };
                 if obj.zone != Zone::Battlefield || !self.is_creature(o) {
                     return;
                 }
@@ -234,7 +278,12 @@ impl Game {
                 if deathtouch {
                     obj.deathtouch_damaged = true;
                 }
-                self.emit(Event::Damage { source, to, amount, combat });
+                self.emit(Event::Damage {
+                    source,
+                    to,
+                    amount,
+                    combat,
+                });
             }
         }
         if self.has_keyword(source, Keyword::Lifelink) {
@@ -254,7 +303,9 @@ impl Game {
 
     /// Destroy a permanent: to the graveyard unless indestructible.
     pub(crate) fn destroy(&mut self, id: ObjectId) {
-        let Some(obj) = self.objects.get(id) else { return };
+        let Some(obj) = self.objects.get(id) else {
+            return;
+        };
         if obj.zone != Zone::Battlefield || self.has_keyword(id, Keyword::Indestructible) {
             return;
         }
@@ -267,7 +318,10 @@ impl Game {
                 self.move_object(id, Zone::Graveyard);
             }
         }
-        self.emit(Event::Discarded { seat, objects: objects.to_vec() });
+        self.emit(Event::Discarded {
+            seat,
+            objects: objects.to_vec(),
+        });
     }
 
     pub(crate) fn create_token(&mut self, seat: Seat, spec: &cardir::TokenSpec) -> ObjectId {
@@ -282,7 +336,11 @@ impl Game {
         });
         self.players[seat.index()].battlefield.push(id);
         self.emit(Event::TokenCreated { seat, object: id });
-        self.emit(Event::ZoneChange { object: id, from: Zone::OutOfGame, to: Zone::Battlefield });
+        self.emit(Event::ZoneChange {
+            object: id,
+            from: Zone::OutOfGame,
+            to: Zone::Battlefield,
+        });
         id
     }
 

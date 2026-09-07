@@ -1,0 +1,7 @@
+Card(
+    name: "Vicious Hunger",
+    cost: "{B}{B}",
+    types: [Sorcery],
+    text: "Vicious Hunger deals 2 damage to target creature and you gain 2 life.",
+    spell: Spell(targets: [Creature], effects: [DealDamage(amount: Const(2), to: Target(0)), GainLife(player: You, amount: Const(2))]),
+)

@@ -1,0 +1,7 @@
+Card(
+    name: "Hordeling Outburst",
+    cost: "{1}{R}{R}",
+    types: [Sorcery],
+    text: "Create three 1/1 red Goblin creature tokens.",
+    spell: Spell(effects: [CreateToken(spec: TokenSpec(name: "Goblin", colors: [Red], types: [Creature], subtypes: ["Goblin"], pt: (1, 1)), count: Const(3))]),
+)

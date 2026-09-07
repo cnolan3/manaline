@@ -1,0 +1,9 @@
+Card(
+    name: "Tajuru Pathwarden",
+    cost: "{4}{G}",
+    types: [Creature],
+    subtypes: ["Elf", "Warrior", "Ally"],
+    pt: (5, 4),
+    text: "Vigilance (Attacking doesn't cause this creature to tap.)\nTrample (This creature can deal excess combat damage to the player or planeswalker it's attacking.)",
+    keywords: [Vigilance, Trample],
+)

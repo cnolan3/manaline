@@ -1,0 +1,9 @@
+Card(
+    name: "Bramble Creeper",
+    cost: "{4}{G}",
+    types: [Creature],
+    subtypes: ["Elemental"],
+    pt: (0, 3),
+    text: "Whenever this creature attacks, it gets +5/+0 until end of turn.",
+    triggers: [Attacks(effects: [ModifyPt(target: This, power: Const(5), toughness: Const(0), until: EndOfTurn)])],
+)

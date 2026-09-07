@@ -1,0 +1,7 @@
+Card(
+    name: "Larger Than Life",
+    cost: "{1}{G}",
+    types: [Sorcery],
+    text: "Target creature gets +4/+4 and gains trample until end of turn.",
+    spell: Spell(targets: [Creature], effects: [ModifyPt(target: Target(0), power: Const(4), toughness: Const(4), keywords: [Trample], until: EndOfTurn)]),
+)

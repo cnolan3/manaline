@@ -2,10 +2,10 @@
 //! division actions (§3's carve-out).
 
 use crate::action::{Action, AttackTarget, DamageTarget};
-use crate::filter::Ctx;
-use crate::types::Keyword;
 use crate::error::RulesError;
+use crate::filter::Ctx;
 use crate::game::{Game, PendingChoice};
+use crate::types::Keyword;
 use crate::types::{ObjectId, Seat};
 use std::collections::BTreeSet;
 
@@ -49,7 +49,12 @@ impl Game {
                     }
                 }
                 PendingChoice::ChooseTargets { specs, trigger, .. } => {
-                    let ctx = Ctx { you: seat, this: Some(trigger.source), targets: Vec::new(), triggering: trigger.triggering };
+                    let ctx = Ctx {
+                        you: seat,
+                        this: Some(trigger.source),
+                        targets: Vec::new(),
+                        triggering: trigger.triggering,
+                    };
                     for targets in self.target_combos(specs, &ctx).unwrap_or_default() {
                         acts.push(Action::ChooseTargets { targets });
                     }
@@ -65,7 +70,9 @@ impl Game {
                     candidates.sort();
                     let n = (*count as usize).min(candidates.len());
                     for objects in combinations(&candidates, n) {
-                        acts.push(Action::ChooseTargets { targets: objects.into_iter().map(crate::action::Target::Object).collect() });
+                        acts.push(Action::ChooseTargets {
+                            targets: objects.into_iter().map(crate::action::Target::Object).collect(),
+                        });
                     }
                 }
             },
@@ -91,16 +98,22 @@ impl Game {
                     if !(sorcery_timing || def.ir.has_instant_speed()) {
                         continue;
                     }
-                    let payments = self.enumerate_payments(seat, &def.cost);
+                    let payments = self.enumerate_payments(seat, &self.cast_cost(seat, id));
                     if payments.is_empty() {
                         continue;
                     }
                     let specs = self.cast_target_specs(id);
                     let ctx = Ctx::simple(seat, Some(id));
-                    let Some(combos) = self.target_combos(&specs, &ctx) else { continue };
+                    let Some(combos) = self.target_combos(&specs, &ctx) else {
+                        continue;
+                    };
                     for targets in combos {
                         for payment in &payments {
-                            acts.push(Action::CastSpell { object: id, targets: targets.clone(), payment: payment.clone() });
+                            acts.push(Action::CastSpell {
+                                object: id,
+                                targets: targets.clone(),
+                                payment: payment.clone(),
+                            });
                         }
                     }
                 }
@@ -162,7 +175,15 @@ impl Game {
                 for cost in &ability.cost {
                     match cost {
                         cardir::Cost::Mana(m) => {
-                            let ps = self.enumerate_payments(seat, m);
+                            let self_used = ability
+                                .cost
+                                .iter()
+                                .any(|c| matches!(c, cardir::Cost::Tap | cardir::Cost::SacrificeThis));
+                            let ps: Vec<crate::action::ManaPayment> = self
+                                .enumerate_payments(seat, m)
+                                .into_iter()
+                                .filter(|p| !(self_used && p.tap.contains(&id)))
+                                .collect();
                             if ps.is_empty() {
                                 ok = false;
                             } else {
@@ -240,10 +261,17 @@ impl Game {
                     continue;
                 }
                 let ctx = Ctx::simple(seat, Some(id));
-                let Some(combos) = self.target_combos(&ability.targets, &ctx) else { continue };
+                let Some(combos) = self.target_combos(&ability.targets, &ctx) else {
+                    continue;
+                };
                 for targets in combos {
                     for payment in &payments {
-                        acts.push(Action::ActivateAbility { object: id, ability: index as u8, targets: targets.clone(), payment: payment.clone() });
+                        acts.push(Action::ActivateAbility {
+                            object: id,
+                            ability: index as u8,
+                            targets: targets.clone(),
+                            payment: payment.clone(),
+                        });
                         if acts.len() > ENUMERATION_CAP * 4 {
                             return acts;
                         }
@@ -309,7 +337,9 @@ impl Game {
             }
             _ => {
                 for &t in &targets {
-                    out.push(Action::DeclareAttackers { attackers: cands.iter().map(|&c| (c, t)).collect() });
+                    out.push(Action::DeclareAttackers {
+                        attackers: cands.iter().map(|&c| (c, t)).collect(),
+                    });
                     for &c in &cands {
                         out.push(Action::DeclareAttackers { attackers: vec![(c, t)] });
                     }
@@ -408,7 +438,9 @@ impl Game {
                             }
                         }
                         AttackTarget::Planeswalker(_) => {
-                            return Err(RulesError::Unsupported { what: "attacking planeswalkers".into() })
+                            return Err(RulesError::Unsupported {
+                                what: "attacking planeswalkers".into(),
+                            })
                         }
                     }
                 }
@@ -429,7 +461,11 @@ impl Game {
                         return Err(RulesError::illegal(format!("{a} is not attacking {seat}")));
                     }
                     if !self.can_block(*b, *a) {
-                        return Err(RulesError::illegal(format!("{} {b} can't block {}: it has flying", self.name_or_unknown(*b), self.name_or_unknown(*a))));
+                        return Err(RulesError::illegal(format!(
+                            "{} {b} can't block {}: it has flying",
+                            self.name_or_unknown(*b),
+                            self.name_or_unknown(*a)
+                        )));
                     }
                 }
                 if !self.blocks_satisfy_menace(blocks, &attackers) {
@@ -439,7 +475,11 @@ impl Game {
             }
             (
                 Action::AssignCombatDamage { attacker, assignments },
-                Some(PendingChoice::AssignDamage { seat: s, attacker: pending_attacker, .. }),
+                Some(PendingChoice::AssignDamage {
+                    seat: s,
+                    attacker: pending_attacker,
+                    ..
+                }),
             ) if *s == seat => {
                 if attacker != pending_attacker {
                     return Err(RulesError::illegal(format!(

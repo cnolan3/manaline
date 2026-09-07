@@ -1,0 +1,9 @@
+Card(
+    name: "Steel Wall",
+    cost: "{1}",
+    types: [Artifact, Creature],
+    subtypes: ["Wall"],
+    pt: (0, 4),
+    text: "Defender (This creature can't attack.)",
+    keywords: [Defender],
+)

@@ -1,0 +1,9 @@
+Card(
+    name: "Aether Adept",
+    cost: "{1}{U}{U}",
+    types: [Creature],
+    subtypes: ["Human", "Wizard"],
+    pt: (2, 2),
+    text: "When this creature enters, return target creature to its owner's hand.",
+    triggers: [Etb(targets: [Creature], effects: [ReturnToHand(target: Target(0))])],
+)

@@ -1,0 +1,9 @@
+Card(
+    name: "Seraph of Dawn",
+    cost: "{2}{W}{W}",
+    types: [Creature],
+    subtypes: ["Angel"],
+    pt: (2, 4),
+    text: "Flying, lifelink",
+    keywords: [Flying, Lifelink],
+)

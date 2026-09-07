@@ -1,0 +1,9 @@
+Card(
+    name: "Elvish Herder",
+    cost: "{G}",
+    types: [Creature],
+    subtypes: ["Elf"],
+    pt: (1, 1),
+    text: "{G}: Target creature gains trample until end of turn.",
+    activated: [Ability(cost: [Mana("{G}")], targets: [Creature], effects: [GrantKeyword(target: Target(0), keyword: Trample, until: EndOfTurn)])],
+)

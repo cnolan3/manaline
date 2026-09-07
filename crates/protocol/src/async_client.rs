@@ -81,7 +81,14 @@ pub fn spawn(reader: BoxedRead, writer: BoxedWrite) -> (AsyncClient, mpsc::Recei
         pending_r.lock().unwrap().clear();
     });
 
-    (AsyncClient { out: out_tx, pending, next_req: Arc::new(AtomicU64::new(1)) }, push_rx)
+    (
+        AsyncClient {
+            out: out_tx,
+            pending,
+            next_req: Arc::new(AtomicU64::new(1)),
+        },
+        push_rx,
+    )
 }
 
 impl AsyncClient {
@@ -107,15 +114,32 @@ impl AsyncClient {
             name: name.map(String::from),
         };
         match self.request(msg).await? {
-            ServerMessage::Welcome { role, game_id, format, lobby, state, .. } => {
-                Ok(Welcome { role, game_id, format, lobby, state })
-            }
+            ServerMessage::Welcome {
+                role,
+                game_id,
+                format,
+                lobby,
+                state,
+                ..
+            } => Ok(Welcome {
+                role,
+                game_id,
+                format,
+                lobby,
+                state,
+            }),
             other => Err(ClientError::Unexpected(Box::new(other))),
         }
     }
 
     pub async fn set_deck(&self, decklist: &str) -> Result<Result<(), Vec<engine::Violation>>, ClientError> {
-        match self.request(ClientMessage::SetDeck { decklist: decklist.into(), commander: None }).await? {
+        match self
+            .request(ClientMessage::SetDeck {
+                decklist: decklist.into(),
+                commander: None,
+            })
+            .await?
+        {
             ServerMessage::DeckOk => Ok(Ok(())),
             ServerMessage::DeckRejected { violations } => Ok(Err(violations)),
             other => Err(ClientError::Unexpected(Box::new(other))),
@@ -150,19 +174,28 @@ impl AsyncClient {
 
     pub async fn get_legal_actions(&self) -> Result<(Vec<LegalAction>, u64, Option<engine::ActReason>), ClientError> {
         match self.request(ClientMessage::GetLegalActions).await? {
-            ServerMessage::LegalActions { actions, state_version, reason } => Ok((actions, state_version, reason)),
+            ServerMessage::LegalActions {
+                actions,
+                state_version,
+                reason,
+            } => Ok((actions, state_version, reason)),
             other => Err(ClientError::Unexpected(Box::new(other))),
         }
     }
 
-    pub async fn act(
-        &self,
-        action: Action,
-        state_version: u64,
-    ) -> Result<(Vec<EventView>, GameView, Vec<LegalAction>), ClientError> {
-        let msg = ClientMessage::Act { action_id: None, action: Some(action), state_version };
+    pub async fn act(&self, action: Action, state_version: u64) -> Result<(Vec<EventView>, GameView, Vec<LegalAction>), ClientError> {
+        let msg = ClientMessage::Act {
+            action_id: None,
+            action: Some(action),
+            state_version,
+        };
         match self.request(msg).await? {
-            ServerMessage::Ack { events, state, legal_actions, .. } => Ok((events, state, legal_actions)),
+            ServerMessage::Ack {
+                events,
+                state,
+                legal_actions,
+                ..
+            } => Ok((events, state, legal_actions)),
             other => Err(ClientError::Unexpected(Box::new(other))),
         }
     }

@@ -1,0 +1,9 @@
+Card(
+    name: "Nantuko Husk",
+    cost: "{2}{B}",
+    types: [Creature],
+    subtypes: ["Zombie", "Insect"],
+    pt: (2, 2),
+    text: "Sacrifice a creature: This creature gets +2/+2 until end of turn.",
+    activated: [Ability(cost: [Sacrifice(Creature)], effects: [ModifyPt(target: This, power: Const(2), toughness: Const(2), until: EndOfTurn)])],
+)

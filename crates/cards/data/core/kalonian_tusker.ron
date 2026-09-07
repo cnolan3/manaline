@@ -1,0 +1,8 @@
+Card(
+    name: "Kalonian Tusker",
+    cost: "{G}{G}",
+    types: [Creature],
+    subtypes: ["Beast"],
+    pt: (3, 3),
+    text: "",
+)

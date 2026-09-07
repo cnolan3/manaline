@@ -1,0 +1,7 @@
+Card(
+    name: "Bramblecrush",
+    cost: "{2}{G}{G}",
+    types: [Sorcery],
+    text: "Destroy target noncreature permanent.",
+    spell: Spell(targets: [And([Not(Creature), Permanent])], effects: [Destroy(target: Target(0))]),
+)

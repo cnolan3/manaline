@@ -3,7 +3,7 @@ Card(
     cost: "{2}{W}{W}",
     types: [Enchantment],
     subtypes: ["Aura"],
-    text: "Enchant creature\nEnchanted creature gets +2/+2 and has flying and vigilance.",
+    text: "Enchant creature\nEnchanted creature gets +2/+2 and has flying and vigilance. (Attacking doesn't cause it to tap.)",
     enchant: Creature,
     statics: [PtBoost(filter: Attached, power: Const(2), toughness: Const(2), keywords: [Flying, Vigilance])],
 )

@@ -37,64 +37,36 @@ pub const DECKS: &[(&str, &str)] = &[
     ("black", include_str!("../../../decks/black.txt")),
     ("red", include_str!("../../../decks/red.txt")),
     ("green", include_str!("../../../decks/green.txt")),
+    ("wu-fliers", include_str!("../../../decks/wu-fliers.txt")),
+    ("ub-control", include_str!("../../../decks/ub-control.txt")),
+    ("br-goblins", include_str!("../../../decks/br-goblins.txt")),
+    ("rg-stompy", include_str!("../../../decks/rg-stompy.txt")),
+    ("gw-elves", include_str!("../../../decks/gw-elves.txt")),
+    ("wb-lifegain", include_str!("../../../decks/wb-lifegain.txt")),
 ];
 
 pub fn deck_text(name: &str) -> Option<&'static str> {
     DECKS.iter().find(|(n, _)| *n == name).map(|(_, t)| *t)
 }
 
-/// Parse the standard text deck format (§4.5): `N Name [(SET) number]` per
-/// line, optional `Deck` / `Sideboard` / `Commander` headers, `//` comments,
-/// `SB:` prefixes. Sideboard and commander sections are ignored for now.
-/// Names match case-insensitively; unknown names are an error.
+/// Parse a deck file (§4.5, see `deckstats::parse`) and resolve its main
+/// deck against `db`. Unknown names are an error naming each one, with a
+/// suggestion when a card is close.
 pub fn parse_decklist(text: &str, db: &CardDb) -> Result<Vec<CardId>, String> {
-    let mut deck = Vec::new();
-    let mut in_main = true;
-    for (lineno, raw) in text.lines().enumerate() {
-        let line = raw.split("//").next().unwrap_or("").trim();
-        if line.is_empty() {
-            continue;
-        }
-        match line.to_ascii_lowercase().as_str() {
-            "deck" | "main" | "maindeck" => {
-                in_main = true;
-                continue;
-            }
-            "sideboard" | "commander" | "companion" => {
-                in_main = false;
-                continue;
-            }
-            _ => {}
-        }
-        if line.starts_with("SB:") {
-            continue;
-        }
-        if !in_main {
-            continue;
-        }
-        let (count, name) = match line.split_once(' ') {
-            Some((n, rest)) if n.trim_end_matches('x').parse::<usize>().is_ok() => {
-                (n.trim_end_matches('x').parse::<usize>().unwrap(), rest.trim())
-            }
-            _ => (1, line),
-        };
-        let name = strip_printing(name);
-        let id = db
-            .lookup(name)
-            .ok_or_else(|| format!("line {}: unknown card {name:?}", lineno + 1))?;
-        deck.extend(std::iter::repeat_n(id, count));
+    let list = deckstats::parse(text).map_err(|e| e.to_string())?;
+    let res = list.resolve(db);
+    if !res.unresolved.is_empty() {
+        let names: Vec<String> = res
+            .unresolved
+            .iter()
+            .map(|u| match &u.suggestion {
+                Some(s) => format!("line {}: unknown card {:?} (did you mean {s}?)", u.entry.line, u.entry.name),
+                None => format!("line {}: unknown card {:?}", u.entry.line, u.entry.name),
+            })
+            .collect();
+        return Err(names.join("; "));
     }
-    Ok(deck)
-}
-
-/// Drop a trailing `(SET) 123` printing reference.
-fn strip_printing(name: &str) -> &str {
-    if let Some(open) = name.rfind(" (") {
-        if name[open..].contains(')') {
-            return name[..open].trim();
-        }
-    }
-    name.trim()
+    Ok(res.deck)
 }
 
 #[cfg(test)]
@@ -109,7 +81,12 @@ mod tests {
                 failures.push(format!("{}\n  oracle:   {want}\n  rendered: {got}", card.name));
             }
         }
-        assert!(failures.is_empty(), "{} card(s) do not round-trip:\n{}", failures.len(), failures.join("\n"));
+        assert!(
+            failures.is_empty(),
+            "{} card(s) do not round-trip:\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
     }
 
     #[test]

@@ -1,0 +1,7 @@
+Card(
+    name: "Ranger's Guile",
+    cost: "{G}",
+    types: [Instant],
+    text: "Target creature you control gets +1/+1 and gains hexproof until end of turn. (It can't be the target of spells or abilities your opponents control.)",
+    spell: Spell(targets: [And([Creature, ControlledBy(You)])], effects: [ModifyPt(target: Target(0), power: Const(1), toughness: Const(1), keywords: [Hexproof], until: EndOfTurn)]),
+)

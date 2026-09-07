@@ -1,0 +1,7 @@
+Card(
+    name: "Boomerang",
+    cost: "{U}{U}",
+    types: [Instant],
+    text: "Return target permanent to its owner's hand.",
+    spell: Spell(targets: [Permanent], effects: [ReturnToHand(target: Target(0))]),
+)

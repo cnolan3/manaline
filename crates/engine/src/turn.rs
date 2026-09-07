@@ -74,9 +74,7 @@ impl Game {
     }
 
     fn advance_turn(&mut self) {
-        let next = self
-            .next_in_turn_order_after(self.active_player)
-            .unwrap_or(self.active_player);
+        let next = self.next_in_turn_order_after(self.active_player).unwrap_or(self.active_player);
         self.begin_turn(next);
     }
 
@@ -84,7 +82,10 @@ impl Game {
         self.turn += 1;
         self.active_player = seat;
         self.turn_aborted = false;
-        self.emit(Event::TurnStarted { turn: self.turn, active: seat });
+        self.emit(Event::TurnStarted {
+            turn: self.turn,
+            active: seat,
+        });
         self.enter_phase(Phase::Untap);
     }
 
@@ -121,7 +122,10 @@ impl Game {
                     self.give_priority_to_active();
                 } else {
                     let head = defenders.remove(0);
-                    self.pending = Some(PendingChoice::DeclareBlockers { seat: head, remaining: defenders });
+                    self.pending = Some(PendingChoice::DeclareBlockers {
+                        seat: head,
+                        remaining: defenders,
+                    });
                 }
             }
             Phase::CombatDamage => {
@@ -159,7 +163,10 @@ impl Game {
         let max = self.format.max_hand_size as usize;
         let hand = self.players[active.index()].hand.len();
         if hand > max && !self.is_eliminated(active) {
-            self.pending = Some(PendingChoice::Discard { seat: active, count: (hand - max) as u8 });
+            self.pending = Some(PendingChoice::Discard {
+                seat: active,
+                count: (hand - max) as u8,
+            });
             return;
         }
         self.finish_cleanup();

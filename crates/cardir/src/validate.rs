@@ -116,7 +116,9 @@ impl Ctx<'_> {
                 self.player_ref(player);
                 self.amount(amount);
             }
-            Effect::ModifyPt { target, power, toughness, .. } => {
+            Effect::ModifyPt {
+                target, power, toughness, ..
+            } => {
                 self.reference(target);
                 self.amount(power);
                 self.amount(toughness);
@@ -172,7 +174,12 @@ impl Ctx<'_> {
 }
 
 pub fn validate(card: &Card) -> Result<(), ValidationError> {
-    let mut ctx = Ctx { card, targets: 0, in_trigger: false, errors: Vec::new() };
+    let mut ctx = Ctx {
+        card,
+        targets: 0,
+        in_trigger: false,
+        errors: Vec::new(),
+    };
 
     if card.name.trim().is_empty() {
         ctx.err("missing name");
@@ -230,7 +237,9 @@ pub fn validate(card: &Card) -> Result<(), ValidationError> {
     for s in &card.statics {
         ctx.targets = 0;
         match s {
-            Static::PtBoost { filter, power, toughness, .. } => {
+            Static::PtBoost {
+                filter, power, toughness, ..
+            } => {
                 ctx.filter(filter);
                 ctx.amount(power);
                 ctx.amount(toughness);
@@ -281,7 +290,10 @@ pub fn validate(card: &Card) -> Result<(), ValidationError> {
     if ctx.errors.is_empty() {
         Ok(())
     } else {
-        Err(ValidationError { card: card.name.clone(), problem: ctx.errors.join("; ") })
+        Err(ValidationError {
+            card: card.name.clone(),
+            problem: ctx.errors.join("; "),
+        })
     }
 }
 

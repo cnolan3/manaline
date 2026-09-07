@@ -1,0 +1,9 @@
+Card(
+    name: "Myr Sire",
+    cost: "{2}",
+    types: [Artifact, Creature],
+    subtypes: ["Phyrexian", "Myr"],
+    pt: (1, 1),
+    text: "When this creature dies, create a 1/1 colorless Phyrexian Myr artifact creature token.",
+    triggers: [Dies(effects: [CreateToken(spec: TokenSpec(name: "Phyrexian Myr", types: [Artifact, Creature], subtypes: ["Phyrexian", "Myr"], pt: (1, 1)), count: Const(1))])],
+)

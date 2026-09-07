@@ -1,0 +1,7 @@
+Card(
+    name: "Pyroclasm",
+    cost: "{1}{R}",
+    types: [Sorcery],
+    text: "Pyroclasm deals 2 damage to each creature.",
+    spell: Spell(effects: [DealDamage(amount: Const(2), to: Each(Creature))]),
+)

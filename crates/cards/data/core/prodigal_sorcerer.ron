@@ -1,0 +1,9 @@
+Card(
+    name: "Prodigal Sorcerer",
+    cost: "{2}{U}",
+    types: [Creature],
+    subtypes: ["Human", "Wizard", "Sorcerer"],
+    pt: (1, 1),
+    text: "{T}: This creature deals 1 damage to any target.",
+    activated: [Ability(cost: [Tap], targets: [Any], effects: [DealDamage(amount: Const(1), to: Target(0))])],
+)

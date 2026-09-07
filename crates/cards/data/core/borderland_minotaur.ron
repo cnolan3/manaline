@@ -1,6 +1,6 @@
 Card(
     name: "Borderland Minotaur",
-    cost: "{3}{R}",
+    cost: "{2}{R}{R}",
     types: [Creature],
     subtypes: ["Minotaur", "Warrior"],
     pt: (4, 3),

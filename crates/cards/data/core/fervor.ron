@@ -1,0 +1,7 @@
+Card(
+    name: "Fervor",
+    cost: "{2}{R}",
+    types: [Enchantment],
+    text: "Creatures you control have haste. (They can attack and {T} as soon as they come under your control.)",
+    statics: [GrantKeyword(filter: And([Creature, ControlledBy(You)]), keyword: Haste)],
+)

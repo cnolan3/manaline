@@ -5,8 +5,7 @@
 use crate::endpoint::Endpoint;
 use crate::framing::{Connection, FrameError};
 use crate::messages::{
-    ClientEnvelope, ClientMessage, LegalAction, LobbyView, ProtocolError, Role, ServerEnvelope, ServerMessage, Token,
-    PROTOCOL_VERSION,
+    ClientEnvelope, ClientMessage, LegalAction, LobbyView, ProtocolError, Role, ServerEnvelope, ServerMessage, Token, PROTOCOL_VERSION,
 };
 use engine::{Action, EventView, Format, GameView};
 use std::collections::VecDeque;
@@ -61,7 +60,11 @@ impl Client {
     }
 
     pub fn from_parts(reader: BoxedRead, writer: BoxedWrite) -> Client {
-        Client { conn: Connection::new(reader, writer), next_req: 1, pushed: VecDeque::new() }
+        Client {
+            conn: Connection::new(reader, writer),
+            next_req: 1,
+            pushed: VecDeque::new(),
+        }
     }
 
     /// Send one request and wait for its reply, queueing any pushed messages
@@ -111,10 +114,19 @@ impl Client {
         seats: u8,
         seed: Option<u64>,
     ) -> Result<(crate::messages::GameId, Vec<Token>, Token), ClientError> {
-        match self.request(ClientMessage::CreateGame { format: format.into(), seats, seed }).await? {
-            ServerMessage::GameCreated { game_id, seat_tokens, spectator_token } => {
-                Ok((game_id, seat_tokens, spectator_token))
-            }
+        match self
+            .request(ClientMessage::CreateGame {
+                format: format.into(),
+                seats,
+                seed,
+            })
+            .await?
+        {
+            ServerMessage::GameCreated {
+                game_id,
+                seat_tokens,
+                spectator_token,
+            } => Ok((game_id, seat_tokens, spectator_token)),
             other => Err(ClientError::Unexpected(Box::new(other))),
         }
     }
@@ -126,16 +138,33 @@ impl Client {
             name: name.map(String::from),
         };
         match self.request(msg).await? {
-            ServerMessage::Welcome { role, game_id, format, lobby, state, .. } => {
-                Ok(Welcome { role, game_id, format, lobby, state })
-            }
+            ServerMessage::Welcome {
+                role,
+                game_id,
+                format,
+                lobby,
+                state,
+                ..
+            } => Ok(Welcome {
+                role,
+                game_id,
+                format,
+                lobby,
+                state,
+            }),
             other => Err(ClientError::Unexpected(Box::new(other))),
         }
     }
 
     /// `Ok(())` if the deck was accepted, `Err(violations)` if rejected.
     pub async fn set_deck(&mut self, decklist: &str) -> Result<Result<(), Vec<engine::Violation>>, ClientError> {
-        match self.request(ClientMessage::SetDeck { decklist: decklist.into(), commander: None }).await? {
+        match self
+            .request(ClientMessage::SetDeck {
+                decklist: decklist.into(),
+                commander: None,
+            })
+            .await?
+        {
             ServerMessage::DeckOk => Ok(Ok(())),
             ServerMessage::DeckRejected { violations } => Ok(Err(violations)),
             other => Err(ClientError::Unexpected(Box::new(other))),
@@ -170,20 +199,27 @@ impl Client {
 
     pub async fn get_legal_actions(&mut self) -> Result<(Vec<LegalAction>, u64), ClientError> {
         match self.request(ClientMessage::GetLegalActions).await? {
-            ServerMessage::LegalActions { actions, state_version, .. } => Ok((actions, state_version)),
+            ServerMessage::LegalActions {
+                actions, state_version, ..
+            } => Ok((actions, state_version)),
             other => Err(ClientError::Unexpected(Box::new(other))),
         }
     }
 
     /// Submit a full action. Returns the events, the new state, and the next legal actions.
-    pub async fn act(
-        &mut self,
-        action: Action,
-        state_version: u64,
-    ) -> Result<(Vec<EventView>, GameView, Vec<LegalAction>), ClientError> {
-        let msg = ClientMessage::Act { action_id: None, action: Some(action), state_version };
+    pub async fn act(&mut self, action: Action, state_version: u64) -> Result<(Vec<EventView>, GameView, Vec<LegalAction>), ClientError> {
+        let msg = ClientMessage::Act {
+            action_id: None,
+            action: Some(action),
+            state_version,
+        };
         match self.request(msg).await? {
-            ServerMessage::Ack { events, state, legal_actions, .. } => Ok((events, state, legal_actions)),
+            ServerMessage::Ack {
+                events,
+                state,
+                legal_actions,
+                ..
+            } => Ok((events, state, legal_actions)),
             other => Err(ClientError::Unexpected(Box::new(other))),
         }
     }
@@ -193,9 +229,18 @@ impl Client {
         action_id: u32,
         state_version: u64,
     ) -> Result<(Vec<EventView>, GameView, Vec<LegalAction>), ClientError> {
-        let msg = ClientMessage::Act { action_id: Some(action_id), action: None, state_version };
+        let msg = ClientMessage::Act {
+            action_id: Some(action_id),
+            action: None,
+            state_version,
+        };
         match self.request(msg).await? {
-            ServerMessage::Ack { events, state, legal_actions, .. } => Ok((events, state, legal_actions)),
+            ServerMessage::Ack {
+                events,
+                state,
+                legal_actions,
+                ..
+            } => Ok((events, state, legal_actions)),
             other => Err(ClientError::Unexpected(Box::new(other))),
         }
     }
@@ -224,11 +269,28 @@ mod tests {
             let env = server.recv().await.unwrap();
             assert_eq!(env.msg, ClientMessage::Ping);
             // A push arrives before the reply.
-            server.send(&ServerEnvelope::from(ServerMessage::Lobby { lobby: LobbyView::default() })).await.unwrap();
-            server.send(&ServerEnvelope { req: env.req, msg: ServerMessage::Pong }).await.unwrap();
+            server
+                .send(&ServerEnvelope::from(ServerMessage::Lobby {
+                    lobby: LobbyView::default(),
+                }))
+                .await
+                .unwrap();
+            server
+                .send(&ServerEnvelope {
+                    req: env.req,
+                    msg: ServerMessage::Pong,
+                })
+                .await
+                .unwrap();
             let env = server.recv().await.unwrap();
             let err = ProtocolError::new(crate::messages::ErrorCode::BadRequest, "no");
-            server.send(&ServerEnvelope { req: env.req, msg: ServerMessage::Error(err) }).await.unwrap();
+            server
+                .send(&ServerEnvelope {
+                    req: env.req,
+                    msg: ServerMessage::Error(err),
+                })
+                .await
+                .unwrap();
             let (_, mut w) = server.split();
             w.shutdown().await.unwrap();
         });

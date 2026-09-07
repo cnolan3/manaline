@@ -1,0 +1,9 @@
+Card(
+    name: "Lightning Talons",
+    cost: "{2}{R}",
+    types: [Enchantment],
+    subtypes: ["Aura"],
+    text: "Enchant creature\nEnchanted creature gets +3/+0 and has first strike. (It deals combat damage before creatures without first strike.)",
+    enchant: Creature,
+    statics: [PtBoost(filter: Attached, power: Const(3), toughness: Const(0), keywords: [FirstStrike])],
+)

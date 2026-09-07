@@ -2,6 +2,7 @@
 
 mod bot;
 mod commands;
+mod deck;
 mod play;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -41,6 +42,21 @@ enum Command {
     List {
         #[arg(value_enum)]
         what: ListWhat,
+    },
+    /// Check, create, or analyse a deck file (offline).
+    Deck {
+        #[command(subcommand)]
+        cmd: deck::DeckCommand,
+    },
+    /// Card data: refresh the Scryfall cache or look a card up.
+    Cards {
+        #[command(subcommand)]
+        cmd: deck::CardsCommand,
+    },
+    /// Card IR tooling (dev): round-trip checks.
+    Ingest {
+        #[command(subcommand)]
+        cmd: deck::IngestCommand,
     },
 }
 
@@ -102,6 +118,9 @@ fn main() -> Result<()> {
         Command::Bot(args) => runtime()?.block_on(commands::bot(args)),
         Command::Mcp(args) => runtime()?.block_on(commands::mcp(args)),
         Command::Replay(args) => commands::replay(args),
+        Command::Deck { cmd } => deck::deck(cmd),
+        Command::Cards { cmd } => deck::cards_cmd(cmd),
+        Command::Ingest { cmd } => deck::ingest(cmd),
     }
 }
 
@@ -144,7 +163,7 @@ fn list(what: ListWhat) -> Result<()> {
     Ok(())
 }
 
-fn load_format(name: Option<&str>, seats: usize) -> Result<Format> {
+pub fn load_format(name: Option<&str>, seats: usize) -> Result<Format> {
     match name {
         None => {
             let f = if seats == 2 { "cube" } else { "free-for-all" };
@@ -193,7 +212,12 @@ fn sim(args: SimArgs) -> Result<()> {
                 deck: decks[i % decks.len()].clone(),
             })
             .collect();
-        let config = GameConfig { format: format.clone(), players, cards: db.clone(), starting_player: None };
+        let config = GameConfig {
+            format: format.clone(),
+            players,
+            cards: db.clone(),
+            starting_player: None,
+        };
         let mut game = Game::new(config, seed)?;
         let mut bot = RandomBot::new(args.bot_seed + g as u64);
         let mut applied = 0usize;
@@ -231,7 +255,12 @@ fn sim(args: SimArgs) -> Result<()> {
                 format!("unfinished after {applied} actions")
             }
         };
-        println!("game {} seed={seed} seats={} turns={} actions={applied}: {result}", g + 1, args.seats, game.turn);
+        println!(
+            "game {} seed={seed} seats={} turns={} actions={applied}: {result}",
+            g + 1,
+            args.seats,
+            game.turn
+        );
         if args.board {
             println!("{}", render_view(&game.view_spectator()));
         }

@@ -1,0 +1,10 @@
+Card(
+    name: "Pelakka Wurm",
+    cost: "{4}{G}{G}{G}",
+    types: [Creature],
+    subtypes: ["Wurm"],
+    pt: (7, 7),
+    text: "Trample (This creature can deal excess combat damage to the player or planeswalker it's attacking.)\nWhen this creature enters, you gain 7 life.\nWhen this creature dies, draw a card.",
+    keywords: [Trample],
+    triggers: [Etb(effects: [GainLife(player: You, amount: Const(7))]), Dies(effects: [Draw(player: You, count: Const(1))])],
+)

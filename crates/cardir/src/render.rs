@@ -31,19 +31,39 @@ pub fn render(card: &Card) -> String {
         lines.push(words.join(", "));
     }
     if let Some(f) = &card.enchant {
-        let r = R { card, targets: &[], in_trigger: false, this_mentioned: false };
+        let r = R {
+            card,
+            targets: &[],
+            in_trigger: false,
+            this_mentioned: false,
+        };
         lines.push(format!("Enchant {}", r.noun(f, Number::Singular)));
     }
     for s in &card.statics {
-        let mut r = R { card, targets: &[], in_trigger: false, this_mentioned: false };
+        let mut r = R {
+            card,
+            targets: &[],
+            in_trigger: false,
+            this_mentioned: false,
+        };
         lines.push(r.static_(s));
     }
     for t in &card.triggers {
-        let mut r = R { card, targets: t.targets(), in_trigger: true, this_mentioned: true };
+        let mut r = R {
+            card,
+            targets: t.targets(),
+            in_trigger: true,
+            this_mentioned: true,
+        };
         lines.push(r.trigger(t));
     }
     for a in &card.activated {
-        let mut r = R { card, targets: &a.targets, in_trigger: false, this_mentioned: false };
+        let mut r = R {
+            card,
+            targets: &a.targets,
+            in_trigger: false,
+            this_mentioned: false,
+        };
         let line = r.ability(a);
         // A basic land's mana ability is intrinsic and printed as reminder text.
         if card.is_basic() && a.is_mana_ability() {
@@ -53,7 +73,12 @@ pub fn render(card: &Card) -> String {
         }
     }
     if let Some(spell) = &card.spell {
-        let mut r = R { card, targets: &spell.targets, in_trigger: false, this_mentioned: false };
+        let mut r = R {
+            card,
+            targets: &spell.targets,
+            in_trigger: false,
+            this_mentioned: false,
+        };
         lines.push(r.sentences(&spell.effects));
     }
     if let Some(cost) = &card.equip {
@@ -64,13 +89,23 @@ pub fn render(card: &Card) -> String {
 
 /// One activated ability as a line of Oracle text.
 pub fn render_ability(card: &Card, a: &Ability) -> String {
-    let mut r = R { card, targets: &a.targets, in_trigger: false, this_mentioned: false };
+    let mut r = R {
+        card,
+        targets: &a.targets,
+        in_trigger: false,
+        this_mentioned: false,
+    };
     r.ability(a)
 }
 
 /// One triggered ability as a line of Oracle text.
 pub fn render_trigger(card: &Card, t: &Trigger) -> String {
-    let mut r = R { card, targets: t.targets(), in_trigger: true, this_mentioned: true };
+    let mut r = R {
+        card,
+        targets: t.targets(),
+        in_trigger: true,
+        this_mentioned: true,
+    };
     r.trigger(t)
 }
 
@@ -78,7 +113,12 @@ pub fn render_trigger(card: &Card, t: &Trigger) -> String {
 pub fn render_spell(card: &Card) -> String {
     match &card.spell {
         Some(spell) => {
-            let mut r = R { card, targets: &spell.targets, in_trigger: false, this_mentioned: false };
+            let mut r = R {
+                card,
+                targets: &spell.targets,
+                in_trigger: false,
+                this_mentioned: false,
+            };
             r.sentences(&spell.effects)
         }
         None => String::new(),
@@ -217,7 +257,14 @@ impl R<'_> {
             Filter::Spell => heads.push("spell".into()),
             Filter::Token => heads.push("token".into()),
             Filter::Other => adjectives.insert(0, "other".into()),
-            Filter::Attached => heads.push(if self.card.is_equipment() { "equipped creature" } else { "enchanted creature" }.into()),
+            Filter::Attached => heads.push(
+                if self.card.is_equipment() {
+                    "equipped creature"
+                } else {
+                    "enchanted creature"
+                }
+                .into(),
+            ),
             Filter::Subtype(s) => adjectives.push(s.clone()),
             Filter::Color(c) => adjectives.push(c.word().into()),
             Filter::ControlledBy(p) => postfixes.push(match p {
@@ -296,7 +343,12 @@ impl R<'_> {
             Ref::Triggering => "that creature".into(),
             Ref::Each(f) => format!("each {}", self.noun(f, Number::Singular)),
             Ref::Player(p) => self.player_object(p),
-            Ref::Attached => (if self.card.is_equipment() { "equipped creature" } else { "enchanted creature" }).into(),
+            Ref::Attached => (if self.card.is_equipment() {
+                "equipped creature"
+            } else {
+                "enchanted creature"
+            })
+            .into(),
         }
     }
 
@@ -332,6 +384,15 @@ impl R<'_> {
     // ----- sentences -----
 
     fn sentences(&mut self, effects: &[Effect]) -> String {
+        // "~ deals N damage to X and you gain N life" is printed as one sentence.
+        if let [Effect::DealDamage { .. }, Effect::GainLife {
+            player: PlayerRef::You, ..
+        }] = effects
+        {
+            let a = self.clause(&effects[0]);
+            let b = self.clause(&effects[1]);
+            return format!("{}.", capitalize(&format!("{a} and {b}")));
+        }
         let parts: Vec<String> = effects.iter().map(|e| self.sentence(e)).collect();
         parts.join(" ")
     }
@@ -339,15 +400,27 @@ impl R<'_> {
     /// One effect as a full sentence with a capital and a period.
     fn sentence(&mut self, e: &Effect) -> String {
         match e {
-            Effect::Sequence(es) => self.sentences(es),
+            Effect::Sequence(es) => {
+                let c = self.clause(e);
+                let _ = es;
+                format!("{}.", capitalize(&c))
+            }
             Effect::Conditional { if_, then, else_ } => {
                 let cond = match if_ {
                     Condition::Controls { player, filter, at_least } => {
                         let (subj, _) = self.player_subject(player);
                         if *at_least <= 1 {
-                            format!("{subj} control {} {}", article(&self.noun(filter, Number::Singular)), self.noun(filter, Number::Singular))
+                            format!(
+                                "{subj} control {} {}",
+                                article(&self.noun(filter, Number::Singular)),
+                                self.noun(filter, Number::Singular)
+                            )
                         } else {
-                            format!("{subj} control {} or more {}", number_word(*at_least), self.noun(filter, Number::Plural))
+                            format!(
+                                "{subj} control {} or more {}",
+                                number_word(*at_least),
+                                self.noun(filter, Number::Plural)
+                            )
                         }
                     }
                 };
@@ -371,10 +444,14 @@ impl R<'_> {
                 let src = self.this();
                 let to_s = self.object(to);
                 match amount {
-                    Amount::PowerOf(Ref::This) => format!("{src} deals damage equal to its power to {to_s}"),
+                    Amount::PowerOf(Ref::This) => {
+                        format!("{src} deals damage equal to its power to {to_s}")
+                    }
                     a => format!("{src} deals {} damage to {to_s}", amount_phrase(a)),
                 }
             }
+            Effect::Destroy { target: Ref::Each(f) } => format!("destroy all {}", self.noun(f, Number::Plural)),
+            Effect::Exile { target: Ref::Each(f) } => format!("exile all {}", self.noun(f, Number::Plural)),
             Effect::Destroy { target } => format!("destroy {}", self.object(target)),
             Effect::Exile { target } => format!("exile {}", self.object(target)),
             Effect::Draw { player, count } => {
@@ -406,7 +483,13 @@ impl R<'_> {
                 let verb = if second { "lose" } else { "loses" };
                 format!("{subj} {verb} {} life", amount_phrase(amount))
             }
-            Effect::ModifyPt { target, power, toughness, keywords, until } => {
+            Effect::ModifyPt {
+                target,
+                power,
+                toughness,
+                keywords,
+                until,
+            } => {
                 let (subj, number) = self.subject(target);
                 let gets = if number == Number::Plural { "get" } else { "gets" };
                 let gains = if number == Number::Plural { "gain" } else { "gains" };
@@ -475,13 +558,17 @@ impl R<'_> {
                 };
                 match amount {
                     Amount::Const(n) => format!("add {}", sym.repeat((*n).max(1) as usize)),
-                    Amount::Count(f) => format!("add {sym} for each {}", self.noun(f, Number::Singular)),
+                    Amount::Count(f) => {
+                        format!("add {sym} for each {}", self.noun(f, Number::Singular))
+                    }
                     a => format!("add {} {sym}", amount_phrase(a)),
                 }
             }
             Effect::Tap { target } => format!("tap {}", self.object(target)),
             Effect::Untap { target } => format!("untap {}", self.object(target)),
-            Effect::ReturnToHand { target } => format!("return {} to its owner's hand", self.object(target)),
+            Effect::ReturnToHand { target } => {
+                format!("return {} to its owner's hand", self.object(target))
+            }
             Effect::CounterSpell { target } => format!("counter {}", self.object(target)),
             Effect::Sacrifice { player, filter, count } => {
                 let (subj, second) = self.player_subject(player);
@@ -490,13 +577,15 @@ impl R<'_> {
                         let n = self.noun(filter, Number::Singular);
                         format!("{} {n}", article(&n))
                     }
-                    Amount::Const(k) => format!("{} {}", number_word(*k), self.noun(filter, Number::Plural)),
+                    Amount::Const(k) => {
+                        format!("{} {}", number_word(*k), self.noun(filter, Number::Plural))
+                    }
                     a => format!("{} {}", amount_phrase(a), self.noun(filter, Number::Plural)),
                 };
                 if second {
                     format!("sacrifice {what}")
                 } else {
-                    format!("{subj} sacrifices {what}")
+                    format!("{subj} sacrifices {what} of their choice")
                 }
             }
             Effect::Sequence(es) => {
@@ -518,7 +607,12 @@ impl R<'_> {
 
     fn static_(&mut self, s: &Static) -> String {
         match s {
-            Static::PtBoost { filter, power, toughness, keywords } => {
+            Static::PtBoost {
+                filter,
+                power,
+                toughness,
+                keywords,
+            } => {
                 let (subj, number) = self.static_subject(filter);
                 let get = if number == Number::Plural { "get" } else { "gets" };
                 let have = if number == Number::Plural { "have" } else { "has" };
@@ -536,10 +630,13 @@ impl R<'_> {
             }
             Static::CostReduction { filter, amount } => {
                 let subj = self.noun(filter, Number::Plural);
-                capitalize(&format!("{subj} you cast cost {} less to cast.", match amount {
-                    Amount::Const(n) => format!("{{{n}}}"),
-                    a => amount_phrase(a),
-                }))
+                capitalize(&format!(
+                    "{subj} you cast cost {} less to cast.",
+                    match amount {
+                        Amount::Const(n) => format!("{{{n}}}"),
+                        a => amount_phrase(a),
+                    }
+                ))
             }
         }
     }
@@ -609,6 +706,10 @@ impl R<'_> {
                 Cost::Discard(n) => format!("Discard {}", counted(&Amount::Const(*n), "card")),
             })
             .collect();
+        // "Sacrifice ~: It deals ..." — the cost already named the card.
+        if a.cost.contains(&Cost::SacrificeThis) {
+            self.this_mentioned = true;
+        }
         let mut body = String::new();
         for (i, e) in a.effects.iter().enumerate() {
             let c = self.clause(e);
@@ -647,6 +748,11 @@ fn plural(head: &str) -> String {
 /// spaces, whitespace collapsed.
 pub fn normalise(text: &str, name: &str) -> String {
     let mut s = text.replace(name, "~");
+    // Current Oracle text refers to a permanent by its type ("this creature")
+    // rather than by name; both mean the card itself.
+    for word in ["creature", "artifact", "enchantment", "land", "permanent", "Aura", "Equipment"] {
+        s = s.replace(&format!("this {word}"), "~").replace(&format!("This {word}"), "~");
+    }
     // Strip reminder text in parentheses.
     let mut out = String::with_capacity(s.len());
     let mut depth = 0;

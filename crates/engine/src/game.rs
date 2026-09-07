@@ -4,10 +4,10 @@
 
 use crate::action::{Action, AttackTarget, DamageTarget, Target};
 use crate::card::{CardDb, CardDef, CardId};
-use crate::objects::Objects;
 use crate::error::RulesError;
 use crate::event::Event;
 use crate::format::Format;
+use crate::objects::Objects;
 use crate::types::{Keyword, ManaPool, ObjectId, Phase, Seat, Zone};
 use crate::view::{GameView, HandView, LibraryView, ObjectView, PlayerView, StackObjectView};
 use rand::seq::SliceRandom;
@@ -68,21 +68,51 @@ pub enum ActReason {
 /// A decision the game is waiting on that is not "someone has priority".
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PendingChoice {
-    Mulligan { seat: Seat },
-    BottomCards { seat: Seat, count: u8 },
-    DeclareAttackers { seat: Seat },
+    Mulligan {
+        seat: Seat,
+    },
+    BottomCards {
+        seat: Seat,
+        count: u8,
+    },
+    DeclareAttackers {
+        seat: Seat,
+    },
     /// `seat` declares now; `remaining` declare afterwards, in APNAP order.
-    DeclareBlockers { seat: Seat, remaining: Vec<Seat> },
+    DeclareBlockers {
+        seat: Seat,
+        remaining: Vec<Seat>,
+    },
     /// `attacker` needs a damage division now; `queue` holds the rest.
-    AssignDamage { seat: Seat, attacker: ObjectId, queue: Vec<ObjectId> },
+    AssignDamage {
+        seat: Seat,
+        attacker: ObjectId,
+        queue: Vec<ObjectId>,
+    },
     /// Cleanup-step hand size.
-    Discard { seat: Seat, count: u8 },
+    Discard {
+        seat: Seat,
+        count: u8,
+    },
     /// A trigger needs targets before it goes on the stack.
-    ChooseTargets { seat: Seat, specs: Vec<cardir::Filter>, trigger: crate::triggers::FiredTrigger },
+    ChooseTargets {
+        seat: Seat,
+        specs: Vec<cardir::Filter>,
+        trigger: crate::triggers::FiredTrigger,
+    },
     /// An effect asks `seat` to sacrifice `count` permanents matching `filter`.
-    Sacrifice { seat: Seat, filter: cardir::Filter, count: i32, resume: crate::stack::Resume },
+    Sacrifice {
+        seat: Seat,
+        filter: cardir::Filter,
+        count: i32,
+        resume: crate::stack::Resume,
+    },
     /// An effect asks `seat` to discard `count` cards of their choice.
-    EffectDiscard { seat: Seat, count: i32, resume: crate::stack::Resume },
+    EffectDiscard {
+        seat: Seat,
+        count: i32,
+        resume: crate::stack::Resume,
+    },
 }
 
 impl PendingChoice {
@@ -123,7 +153,11 @@ pub enum StackKind {
     /// The equip ability of an Equipment.
     Equip { source: ObjectId },
     /// A triggered ability of `source`.
-    Trigger { source: ObjectId, index: u8, triggering: Option<Target> },
+    Trigger {
+        source: ObjectId,
+        index: u8,
+        triggering: Option<Target>,
+    },
     /// The prowess trigger.
     Prowess { source: ObjectId },
 }
@@ -319,7 +353,12 @@ impl std::fmt::Debug for Game {
 
 impl Game {
     pub fn new(config: GameConfig, seed: u64) -> Result<Game, RulesError> {
-        let GameConfig { format, players, cards, starting_player } = config;
+        let GameConfig {
+            format,
+            players,
+            cards,
+            starting_player,
+        } = config;
         let n = players.len();
         if !format.allows_player_count(n) {
             return Err(RulesError::setup(format!(
@@ -398,7 +437,10 @@ impl Game {
             trigger_cursor: 0,
             combat_round: CombatRound::None,
         };
-        game.emit(Event::GameStarted { starting_player: starting, seats: n as u8 });
+        game.emit(Event::GameStarted {
+            starting_player: starting,
+            seats: n as u8,
+        });
         for seat in seating {
             game.shuffle_library(seat);
             game.draw(seat, starting_hand as usize);
@@ -510,25 +552,30 @@ impl Game {
         match action {
             Action::PassPriority => self.pass_priority(seat),
             Action::PlayLand { object } => self.play_land(seat, *object),
-            Action::CastSpell { object, targets, payment } => {
-                self.cast_spell(seat, *object, targets, payment)?
-            }
-            Action::ActivateAbility { object, ability, targets, payment } => {
-                self.activate_ability(seat, *object, *ability, targets, payment)?
-            }
+            Action::CastSpell { object, targets, payment } => self.cast_spell(seat, *object, targets, payment)?,
+            Action::ActivateAbility {
+                object,
+                ability,
+                targets,
+                payment,
+            } => self.activate_ability(seat, *object, *ability, targets, payment)?,
             Action::ChooseTargets { targets } => match &self.pending {
                 Some(PendingChoice::ChooseTargets { .. }) => self.choose_trigger_targets(targets),
                 Some(PendingChoice::Sacrifice { .. }) => {
-                    let objects: Vec<ObjectId> = targets.iter().filter_map(|t| match t { Target::Object(o) => Some(*o), _ => None }).collect();
+                    let objects: Vec<ObjectId> = targets
+                        .iter()
+                        .filter_map(|t| match t {
+                            Target::Object(o) => Some(*o),
+                            _ => None,
+                        })
+                        .collect();
                     self.answer_choice(seat, &objects)
                 }
                 _ => return Err(RulesError::illegal("nothing to choose")),
             },
             Action::DeclareAttackers { attackers } => self.declare_attackers(seat, attackers),
             Action::DeclareBlockers { blocks } => self.declare_blockers(seat, blocks),
-            Action::AssignCombatDamage { attacker, assignments } => {
-                self.assign_combat_damage(seat, *attacker, assignments)
-            }
+            Action::AssignCombatDamage { attacker, assignments } => self.assign_combat_damage(seat, *attacker, assignments),
             Action::Discard { objects } => match &self.pending {
                 Some(PendingChoice::EffectDiscard { .. }) => self.answer_choice(seat, objects),
                 _ => self.discard_to_hand_size(seat, objects),
@@ -537,7 +584,9 @@ impl Game {
             Action::BottomCards { objects } => self.bottom_cards(seat, objects),
             Action::Concede => self.eliminate(seat, Elimination::Conceded),
             other => {
-                return Err(RulesError::Unsupported { what: format!("{other:?}") });
+                return Err(RulesError::Unsupported {
+                    what: format!("{other:?}"),
+                });
             }
         }
         Ok(())
@@ -561,7 +610,9 @@ impl Game {
                 self.legal_actions(s)
                     .iter()
                     .filter_map(|a| match a {
-                        Action::PlayLand { object } | Action::CastSpell { object, .. } | Action::ActivateAbility { object, .. } => Some(*object),
+                        Action::PlayLand { object } | Action::CastSpell { object, .. } | Action::ActivateAbility { object, .. } => {
+                            Some(*object)
+                        }
                         _ => None,
                     })
                     .collect()
@@ -585,7 +636,9 @@ impl Game {
                     } else {
                         HandView::Hidden { count: p.hand.len() as u8 }
                     },
-                    library: LibraryView { count: p.library.len() as u16 },
+                    library: LibraryView {
+                        count: p.library.len() as u16,
+                    },
                     graveyard: p.graveyard.clone(),
                     exile: p.exile.clone(),
                     battlefield: p.battlefield.clone(),
@@ -637,7 +690,11 @@ impl Game {
                     attacking: obj.attacking,
                     blocking: obj.blocking.clone(),
                     castable: castable.contains(&id),
-                    keywords: if obj.zone == Zone::Battlefield { self.keywords_of(id) } else { def.keywords.clone() },
+                    keywords: if obj.zone == Zone::Battlefield {
+                        self.keywords_of(id)
+                    } else {
+                        def.keywords.clone()
+                    },
                     attached_to: obj.attached_to,
                     token: def.token,
                     counters: obj.counters.plus1 as i32 - obj.counters.minus1 as i32,
@@ -726,7 +783,10 @@ impl Game {
         let (mut p, mut t) = self.card_by_id(obj.card).pt?;
         if obj.zone == Zone::Battlefield {
             for (source, static_) in self.active_statics() {
-                if let cardir::Static::PtBoost { filter, power, toughness, .. } = static_ {
+                if let cardir::Static::PtBoost {
+                    filter, power, toughness, ..
+                } = static_
+                {
                     let ctx = crate::filter::Ctx::simple(self.objects[source].controller, Some(source));
                     if self.object_matches(id, filter, &ctx) {
                         p += self.eval_amount(power, &ctx);
@@ -749,7 +809,9 @@ impl Game {
     /// Does the object have the keyword right now: printed, granted by a
     /// static on the battlefield, or granted until end of turn?
     pub fn has_keyword(&self, id: ObjectId, kw: Keyword) -> bool {
-        let Some(obj) = self.objects.get(id) else { return false };
+        let Some(obj) = self.objects.get(id) else {
+            return false;
+        };
         if self.card_def(id).has_keyword(kw) {
             return true;
         }
@@ -860,9 +922,7 @@ impl Game {
         let (owner, controller) = (obj.owner, obj.controller);
         let p = match zone {
             Zone::Battlefield => &mut self.players[controller.index()],
-            Zone::Library | Zone::Hand | Zone::Graveyard | Zone::Exile | Zone::Command => {
-                &mut self.players[owner.index()]
-            }
+            Zone::Library | Zone::Hand | Zone::Graveyard | Zone::Exile | Zone::Command => &mut self.players[owner.index()],
             Zone::Stack | Zone::OutOfGame => return None,
         };
         Some(match zone {
@@ -966,7 +1026,10 @@ impl Game {
         for &id in objects {
             self.move_object(id, Zone::Graveyard);
         }
-        self.emit(Event::Discarded { seat, objects: objects.to_vec() });
+        self.emit(Event::Discarded {
+            seat,
+            objects: objects.to_vec(),
+        });
         self.pending = None;
         self.finish_cleanup();
     }

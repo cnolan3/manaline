@@ -8,14 +8,34 @@ use crate::game::Game;
 use crate::types::{Color, Mana, ManaCost, ObjectId, Seat};
 
 impl Game {
-    /// Untapped permanents `seat` controls with a mana ability: the colour
+    /// What casting `object` costs `seat` right now: the printed cost less any
+    /// `CostReduction` statics they control that apply to it (generic only).
+    pub fn cast_cost(&self, seat: Seat, object: ObjectId) -> ManaCost {
+        let mut cost = self.card_def(object).cost.clone();
+        let ctx = crate::filter::Ctx::simple(seat, Some(object));
+        let mut reduction = 0i32;
+        for (source, s) in self.active_statics() {
+            if self.objects[source].controller != seat {
+                continue;
+            }
+            if let cardir::Static::CostReduction { filter, amount } = s {
+                if self.spell_matches(object, filter, &ctx) {
+                    reduction += self.eval_amount(amount, &ctx);
+                }
+            }
+        }
+        cost.generic = (cost.generic as i32 - reduction).max(0) as u8;
+        cost
+    }
+
+    /// Untapped permanents `seat` controls with a mana ability: the mana
     /// each makes and how much (board-dependent amounts evaluated now).
-    /// Only single-colour producers are supported in v1.
-    pub fn mana_sources(&self, seat: Seat) -> Vec<(ObjectId, Color)> {
+    /// Only single-kind producers are supported in v1.
+    pub fn mana_sources(&self, seat: Seat) -> Vec<(ObjectId, Mana)> {
         self.mana_sources_with_amounts(seat).into_iter().map(|(id, c, _)| (id, c)).collect()
     }
 
-    pub fn mana_sources_with_amounts(&self, seat: Seat) -> Vec<(ObjectId, Color, i32)> {
+    pub fn mana_sources_with_amounts(&self, seat: Seat) -> Vec<(ObjectId, Mana, i32)> {
         let mut out = Vec::new();
         for &id in &self.players[seat.index()].battlefield {
             let obj = &self.objects[id];
@@ -27,14 +47,24 @@ impl Game {
                 continue;
             }
             let abilities = def.mana_abilities();
-            let Some((color, amount, _)) = abilities.first() else { continue };
-            let Some(color) = color else { continue };
+            let Some((color, amount, _)) = abilities.first() else {
+                continue;
+            };
+            let mana = match color {
+                Some(c) => Mana::Colored(*c),
+                None => Mana::Colorless,
+            };
             let amount = match amount {
                 Some(n) => *n,
                 None => {
                     // Evaluate the IR amount (e.g. "for each Elf you control") right now.
                     let ability = &def.ir.activated[abilities[0].2];
-                    let ctx = crate::filter::Ctx { you: seat, this: Some(id), targets: Vec::new(), triggering: None };
+                    let ctx = crate::filter::Ctx {
+                        you: seat,
+                        this: Some(id),
+                        targets: Vec::new(),
+                        triggering: None,
+                    };
                     ability
                         .effects
                         .iter()
@@ -46,7 +76,7 @@ impl Game {
                 }
             };
             if amount > 0 {
-                out.push((id, *color, amount));
+                out.push((id, mana, amount));
             }
         }
         out.sort();
@@ -65,10 +95,11 @@ impl Game {
         let sources_full = self.mana_sources_with_amounts(seat);
         let pool = &self.players[seat.index()].mana_pool;
 
-        // Colour capacity counts every unit a source can make.
-        let mut counts = [0u8; 5];
-        for (_, c, n) in &sources_full {
-            counts[*c as usize] = counts[*c as usize].saturating_add((*n).max(1) as u8);
+        // Capacity per kind of mana counts every unit a source can make;
+        // slot 5 is colourless, which only pays generic.
+        let mut counts = [0u8; 6];
+        for (_, m, n) in &sources_full {
+            counts[mana_slot(*m)] = counts[mana_slot(*m)].saturating_add((*n).max(1) as u8);
         }
         let mut pool_counts = [0u8; 6];
         for m in Mana::ALL {
@@ -80,38 +111,45 @@ impl Game {
         }
 
         let mut solutions = Vec::new();
-        let mut tapped = [0u8; 5];
+        let mut tapped = [0u8; 6];
         let mut pooled = [0u8; 6];
-        search(0, &counts, &pool_counts, &pips, cost.generic as i32, &mut tapped, &mut pooled, &mut solutions);
+        search(
+            0,
+            &counts,
+            &pool_counts,
+            &pips,
+            cost.generic as i32,
+            &mut tapped,
+            &mut pooled,
+            &mut solutions,
+        );
 
         let mut out: Vec<ManaPayment> = Vec::new();
         for (tapped, pooled) in solutions {
             for strategy in [Pick::LandsFirst, Pick::ProducersFirst] {
                 let mut payment = ManaPayment::default();
                 let mut feasible = true;
-                for c in Color::ALL {
-                    for _ in 0..pooled[c as usize] {
-                        payment.from_pool.push(Mana::Colored(c));
+                for m in Mana::ALL {
+                    let slot = mana_slot(m);
+                    for _ in 0..pooled[slot] {
+                        payment.from_pool.push(m);
                     }
-                    let need = tapped[c as usize] as i32;
+                    let need = tapped[slot] as i32;
                     if need == 0 {
                         continue;
                     }
-                    let of_colour: Vec<(ObjectId, i32, bool)> = sources_full
+                    let of_kind: Vec<(ObjectId, i32, bool)> = sources_full
                         .iter()
-                        .filter(|(_, sc, _)| *sc == c)
+                        .filter(|(_, sm, _)| *sm == m)
                         .map(|(id, _, n)| (*id, *n, self.card_def(*id).is_creature()))
                         .collect();
-                    match self.pick_sources(&of_colour, need, strategy) {
+                    match self.pick_sources(&of_kind, need, strategy) {
                         Some(ids) => payment.tap.extend(ids),
                         None => feasible = false,
                     }
                 }
                 if !feasible {
                     continue;
-                }
-                for _ in 0..pooled[5] {
-                    payment.from_pool.push(Mana::Colorless);
                 }
                 payment.tap.sort();
                 payment.tap.dedup();
@@ -160,7 +198,7 @@ impl Game {
             }
             seen.push(id);
             match sources.iter().find(|(s, _, _)| *s == id) {
-                Some((_, c, n)) => paying.extend(std::iter::repeat_n(Mana::Colored(*c), (*n).max(1) as usize)),
+                Some((_, m, n)) => paying.extend(std::iter::repeat_n(*m, (*n).max(1) as usize)),
                 None => return Err(RulesError::illegal(format!("{id} is not an untapped mana source {seat} controls"))),
             }
         }
@@ -190,8 +228,8 @@ impl Game {
         let sources = self.mana_sources_with_amounts(seat);
         let mut paying: Vec<Mana> = Vec::new();
         for &id in &payment.tap {
-            if let Some((_, c, n)) = sources.iter().find(|(s, _, _)| *s == id) {
-                paying.extend(std::iter::repeat_n(Mana::Colored(*c), (*n).max(1) as usize));
+            if let Some((_, m, n)) = sources.iter().find(|(s, _, _)| *s == id) {
+                paying.extend(std::iter::repeat_n(*m, (*n).max(1) as usize));
             }
         }
         paying.extend(payment.from_pool.iter().copied());
@@ -236,23 +274,27 @@ fn mana_slot(m: Mana) -> usize {
 #[allow(clippy::too_many_arguments)]
 fn search(
     c: usize,
-    counts: &[u8; 5],
+    counts: &[u8; 6],
     pool: &[u8; 6],
     pips: &[u8; 5],
     generic_left: i32,
-    tapped: &mut [u8; 5],
+    tapped: &mut [u8; 6],
     pooled: &mut [u8; 6],
-    out: &mut Vec<([u8; 5], [u8; 6])>,
+    out: &mut Vec<([u8; 6], [u8; 6])>,
 ) {
     if generic_left < 0 {
         return;
     }
     if c == 5 {
-        // Whatever generic remains must come from colourless pool mana.
+        // Whatever generic remains comes from colourless sources, then colourless pool mana.
         let need = generic_left as u8;
-        if pool[5] >= need {
-            pooled[5] = need;
+        let t = need.min(counts[5]);
+        let p = need - t;
+        if pool[5] >= p {
+            tapped[5] = t;
+            pooled[5] = p;
             out.push((*tapped, *pooled));
+            tapped[5] = 0;
             pooled[5] = 0;
         }
         return;

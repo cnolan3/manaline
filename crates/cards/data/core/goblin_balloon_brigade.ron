@@ -1,0 +1,9 @@
+Card(
+    name: "Goblin Balloon Brigade",
+    cost: "{R}",
+    types: [Creature],
+    subtypes: ["Goblin", "Warrior"],
+    pt: (1, 1),
+    text: "{R}: This creature gains flying until end of turn.",
+    activated: [Ability(cost: [Mana("{R}")], effects: [GrantKeyword(target: This, keyword: Flying, until: EndOfTurn)])],
+)

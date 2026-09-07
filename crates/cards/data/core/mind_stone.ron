@@ -1,0 +1,7 @@
+Card(
+    name: "Mind Stone",
+    cost: "{2}",
+    types: [Artifact],
+    text: "{T}: Add {C}.\n{1}, {T}, Sacrifice this artifact: Draw a card.",
+    activated: [Ability(cost: [Tap], effects: [AddMana(color: None, amount: Const(1))]), Ability(cost: [Mana("{1}"), Tap, SacrificeThis], effects: [Draw(player: You, count: Const(1))])],
+)

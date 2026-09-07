@@ -1,0 +1,9 @@
+Card(
+    name: "Goblin Instigator",
+    cost: "{1}{R}",
+    types: [Creature],
+    subtypes: ["Goblin", "Rogue"],
+    pt: (1, 1),
+    text: "When this creature enters, create a 1/1 red Goblin creature token.",
+    triggers: [Etb(effects: [CreateToken(spec: TokenSpec(name: "Goblin", colors: [Red], types: [Creature], subtypes: ["Goblin"], pt: (1, 1)), count: Const(1))])],
+)

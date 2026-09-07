@@ -1,0 +1,7 @@
+Card(
+    name: "Fire Ambush",
+    cost: "{1}{R}",
+    types: [Sorcery],
+    text: "Fire Ambush deals 3 damage to any target.",
+    spell: Spell(targets: [Any], effects: [DealDamage(amount: Const(3), to: Target(0))]),
+)

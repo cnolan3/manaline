@@ -1,0 +1,16 @@
+[package]
+name = "manaline-ingest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Card ingestion tooling for manaline: round-trip checks now, LLM drafting later"
+
+[lib]
+name = "ingest"
+path = "src/lib.rs"
+
+[dependencies]
+manaline-cardir = { path = "../cardir" }
+manaline-cards = { path = "../cards" }
+manaline-carddb = { path = "../carddb" }

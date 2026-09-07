@@ -1,0 +1,9 @@
+Card(
+    name: "Fencing Ace",
+    cost: "{1}{W}",
+    types: [Creature],
+    subtypes: ["Human", "Soldier"],
+    pt: (1, 1),
+    text: "Double strike (This creature deals both first-strike and regular combat damage.)",
+    keywords: [DoubleStrike],
+)

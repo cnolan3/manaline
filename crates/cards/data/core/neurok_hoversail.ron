@@ -1,0 +1,9 @@
+Card(
+    name: "Neurok Hoversail",
+    cost: "{1}",
+    types: [Artifact],
+    subtypes: ["Equipment"],
+    text: "Equipped creature has flying.\nEquip {2} ({2}: Attach to target creature you control. Equip only as a sorcery.)",
+    equip: "{2}",
+    statics: [GrantKeyword(filter: Attached, keyword: Flying)],
+)

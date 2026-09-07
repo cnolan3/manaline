@@ -1,0 +1,7 @@
+Card(
+    name: "Kill Shot",
+    cost: "{2}{W}",
+    types: [Instant],
+    text: "Destroy target attacking creature.",
+    spell: Spell(targets: [And([Attacking, Creature])], effects: [Destroy(target: Target(0))]),
+)

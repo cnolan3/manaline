@@ -39,7 +39,11 @@ pub struct DaemonArgs {
 /// shut down. `play` reads that line to learn the socket and tokens.
 pub async fn daemon(args: DaemonArgs) -> Result<()> {
     let create = match (args.format, args.seats) {
-        (Some(format), Some(seats)) => Some(CreateGame { format, seats, seed: args.seed }),
+        (Some(format), Some(seats)) => Some(CreateGame {
+            format,
+            seats,
+            seed: args.seed,
+        }),
         (None, None) => None,
         _ => bail!("--format and --seats go together"),
     };
@@ -51,6 +55,7 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
         replay_dir: args.replay_dir,
         create,
         cards: Arc::new(cards::core()),
+        legality: crate::deck::legality_source(),
     };
     let daemon = Daemon::bind(config).await?;
     println!("{}", serde_json::to_string(daemon.info())?);

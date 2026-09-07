@@ -1,0 +1,9 @@
+Card(
+    name: "Aven Skirmisher",
+    cost: "{W}",
+    types: [Creature],
+    subtypes: ["Bird", "Warrior"],
+    pt: (1, 1),
+    text: "Flying",
+    keywords: [Flying],
+)

@@ -1,0 +1,9 @@
+Card(
+    name: "Ornithopter",
+    cost: "{0}",
+    types: [Artifact, Creature],
+    subtypes: ["Thopter"],
+    pt: (0, 2),
+    text: "Flying",
+    keywords: [Flying],
+)

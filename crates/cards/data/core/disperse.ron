@@ -1,0 +1,7 @@
+Card(
+    name: "Disperse",
+    cost: "{1}{U}",
+    types: [Instant],
+    text: "Return target nonland permanent to its owner's hand.",
+    spell: Spell(targets: [And([Not(Land), Permanent])], effects: [ReturnToHand(target: Target(0))]),
+)

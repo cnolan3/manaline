@@ -1,0 +1,9 @@
+Card(
+    name: "Serra Sphinx",
+    cost: "{3}{U}{U}",
+    types: [Creature],
+    subtypes: ["Sphinx"],
+    pt: (4, 4),
+    text: "Flying, vigilance",
+    keywords: [Flying, Vigilance],
+)

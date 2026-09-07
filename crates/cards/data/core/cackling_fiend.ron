@@ -1,0 +1,9 @@
+Card(
+    name: "Cackling Fiend",
+    cost: "{2}{B}{B}",
+    types: [Creature],
+    subtypes: ["Zombie"],
+    pt: (2, 1),
+    text: "When this creature enters, each opponent discards a card.",
+    triggers: [Etb(effects: [Discard(player: EachOpponent, count: Const(1))])],
+)

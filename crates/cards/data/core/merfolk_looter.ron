@@ -1,0 +1,9 @@
+Card(
+    name: "Merfolk Looter",
+    cost: "{1}{U}",
+    types: [Creature],
+    subtypes: ["Merfolk", "Rogue"],
+    pt: (1, 1),
+    text: "{T}: Draw a card, then discard a card.",
+    activated: [Ability(cost: [Tap], effects: [Sequence([Draw(player: You, count: Const(1)), Discard(player: You, count: Const(1))])])],
+)
