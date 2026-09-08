@@ -1,8 +1,0 @@
-// ub-grave-60 — a Starter Cube deck (40–60 cards, up to 4 of a card).
-// One card per line as `N Card Name`; `//` starts a comment.
-// Check it with `manaline deck check ub-grave-60.txt --format cube`.
-Deck
-// 17 Forest
-// 4 Grizzly Bears
-
-Sideboard

@@ -1,1 +1,25 @@
 /target
+
+# Deck files are the one thing that lands in the working tree just by using
+# the tool: `manaline deck new <name>` writes `<name>.txt` into the current
+# directory, and `deck edit` creates its file if it does not exist. So decks
+# are ignored by default and the starter decks are allowed back in by name.
+
+# Local decks written at the repo root.
+/*.txt
+
+# Everything in decks/ except the starter decks that ship with the binary.
+# This list must match `DECKS` in crates/cards/src/lib.rs, which embeds each
+# of these with include_str! — a deck removed here fails the build.
+/decks/*
+!/decks/white.txt
+!/decks/blue.txt
+!/decks/black.txt
+!/decks/red.txt
+!/decks/green.txt
+!/decks/wu-fliers.txt
+!/decks/ub-control.txt
+!/decks/br-goblins.txt
+!/decks/rg-stompy.txt
+!/decks/gw-elves.txt
+!/decks/wb-lifegain.txt
