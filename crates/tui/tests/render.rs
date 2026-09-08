@@ -486,3 +486,232 @@ fn summoning_sick_creatures_show_a_star_hollow_when_hasty() {
     assert!(s.contains("2/2★") && s.contains("1/1☆"), "{s}");
     assert!(engine::text::render_view(&game.view(Seat(0))).contains("sick but hasty"));
 }
+
+#[test]
+fn blockers_show_which_attacker_they_block() {
+    let mut game = board();
+    advance_until(&mut game, |g| matches!(g.pending, Some(PendingChoice::DeclareAttackers { .. }))).unwrap();
+    let bears = game.players[0]
+        .battlefield
+        .iter()
+        .copied()
+        .find(|id| game.object_name(*id) == "Grizzly Bears")
+        .unwrap();
+    let giant = game.players[1]
+        .battlefield
+        .iter()
+        .copied()
+        .find(|id| game.object_name(*id) == "Hill Giant")
+        .unwrap();
+    game.apply(
+        Seat(0),
+        &Action::DeclareAttackers {
+            attackers: vec![(bears, AttackTarget::Player(Seat(1)))],
+        },
+    )
+    .unwrap();
+    advance_until(&mut game, |g| matches!(g.pending, Some(PendingChoice::DeclareBlockers { .. }))).unwrap();
+    game.apply(
+        Seat(1),
+        &Action::DeclareBlockers {
+            blocks: vec![(giant, bears)],
+        },
+    )
+    .unwrap();
+    let mut app = app_for(&game, Seat(0));
+    app.mode = Mode::Normal;
+    let tag = format!("⊣ #{}", bears.0);
+    let s = render(&app, 100, 40);
+    assert!(s.contains(&tag), "box shows the blocked attacker: {s}");
+    assert!(
+        s.contains(&format!("Blocks: Hill Giant #{} blocks Grizzly Bears #{}", giant.0, bears.0)),
+        "{s}"
+    );
+    let s = render(&app, 100, 20);
+    assert!(s.contains(&format!("[Hill Giant 3/3 ⊣#{}]", bears.0)), "chip shows it too: {s}");
+}
+
+#[test]
+fn the_lobby_opens_the_deckbuilder_and_resubmits_on_save() {
+    let mut app = App::new(
+        Some(Seat(0)),
+        "TEST42".into(),
+        "Starter Cube".into(),
+        LobbyView {
+            seats: vec![],
+            started: false,
+        },
+    );
+    app.deck_source = Some(tui::app::DeckSource {
+        path: None,
+        text: cards::deck_text("green").unwrap().into(),
+        format: engine::Format::cube(),
+    });
+    assert!(app.footer().contains("[d] edit your deck"));
+    app.handle_key(key(KeyCode::Char('d')));
+    assert!(app.editor.is_some());
+    let s = render(&app, 120, 36);
+    assert!(s.contains("Deck · 40 cards"), "{s}");
+    // Add a card in the deck pane and save: the deck goes back to the daemon.
+    app.handle_key(key(KeyCode::Tab));
+    app.handle_key(key(KeyCode::Char('+')));
+    let cmds = app.handle_key(key(KeyCode::Char('s')));
+    match cmds.as_slice() {
+        [Command::SetDeck(text)] => assert!(text.starts_with("Deck\n") && text.contains("Forest")),
+        other => panic!("{other:?}"),
+    }
+    app.handle_key(key(KeyCode::Char('q')));
+    assert!(app.editor.is_none());
+}
+
+#[test]
+fn the_mono_theme_uses_no_colour_and_the_menu_cycles_themes() {
+    use ratatui::style::Color;
+    let mut game = board();
+    advance_until(&mut game, |g| matches!(g.pending, Some(PendingChoice::DeclareAttackers { .. }))).unwrap();
+    let bears = game.players[0]
+        .battlefield
+        .iter()
+        .copied()
+        .find(|id| game.object_name(*id) == "Grizzly Bears")
+        .unwrap();
+    game.apply(
+        Seat(0),
+        &Action::DeclareAttackers {
+            attackers: vec![(bears, AttackTarget::Player(Seat(1)))],
+        },
+    )
+    .unwrap();
+    let mut app = app_for(&game, Seat(0)).with_settings(tui::settings::Settings {
+        theme: "mono".into(),
+        ..Default::default()
+    });
+    app.mode = Mode::Normal;
+    app.show_log = true;
+    let backend = TestBackend::new(100, 40);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|f| tui::ui::draw(f, &app)).unwrap();
+    let buf = terminal.backend().buffer().clone();
+    let coloured = buf
+        .content()
+        .iter()
+        .filter(|c| c.fg != Color::Reset || c.bg != Color::Reset)
+        .count();
+    assert_eq!(coloured, 0, "mono renders with modifiers only");
+    let s = render(&app, 100, 40);
+    assert!(s.contains("Grizzly"), "the board still reads: {s}");
+
+    // The settings row cycles through every theme and back.
+    app.handle_key(key(KeyCode::Char('o')));
+    for _ in 0..3 {
+        app.handle_key(key(KeyCode::Down));
+    }
+    let s = render(&app, 100, 40);
+    assert!(s.contains("Colour theme                        [mono]"), "{s}");
+    app.handle_key(key(KeyCode::Right));
+    assert_eq!(app.settings.theme, "high-contrast");
+    app.handle_key(key(KeyCode::Right));
+    assert_eq!(app.settings.theme, "default");
+    app.handle_key(key(KeyCode::Left));
+    assert_eq!(app.settings.theme, "high-contrast");
+    assert!(tui::theme_flag(Some("purple")).is_err());
+    assert_eq!(tui::theme_flag(Some("mono")).unwrap().as_deref(), Some("mono"));
+}
+
+#[test]
+fn replay_stepping_moves_through_a_game() {
+    let db = Arc::new(cards::core());
+    let green = cards::parse_decklist(cards::deck_text("green").unwrap(), &db).unwrap();
+    let red = cards::parse_decklist(cards::deck_text("red").unwrap(), &db).unwrap();
+    let config = engine::GameConfig {
+        format: engine::Format::cube(),
+        players: vec![
+            engine::PlayerSetup {
+                name: "A".into(),
+                deck: green,
+            },
+            engine::PlayerSetup {
+                name: "B".into(),
+                deck: red,
+            },
+        ],
+        cards: db,
+        starting_player: Some(Seat(0)),
+    };
+    let mut game = engine::Game::new(config, 3).unwrap();
+    let mut bot = engine::bot::RandomBot::new(1);
+    let mut views = vec![game.view_spectator()];
+    let mut events = vec![game.log.iter().filter_map(|e| e.view(None)).collect::<Vec<_>>()];
+    for _ in 0..120 {
+        if game.is_over().is_some() {
+            break;
+        }
+        let seat = *game.must_act().keys().next().unwrap();
+        let action = bot.choose(&game, seat).unwrap();
+        let produced = game.apply(seat, &action).unwrap();
+        views.push(game.view_spectator());
+        events.push(produced.iter().filter_map(|e| e.view(None)).collect());
+    }
+    let n = views.len();
+    let last_turn = views[n - 1].turn;
+    let mut app = App::new(
+        None,
+        "R".into(),
+        String::new(),
+        LobbyView {
+            seats: vec![],
+            started: true,
+        },
+    );
+    app.load_replay(tui::app::ReplayState {
+        title: "test".into(),
+        views,
+        events,
+        index: 0,
+        playing: false,
+    });
+    assert_eq!(app.replay.as_ref().unwrap().index, 0);
+    let s = render(&app, 100, 32);
+    assert!(s.contains("REPLAY test") && s.contains(&format!("action 1/{n}")), "{s}");
+    app.handle_key(key(KeyCode::Right));
+    app.handle_key(key(KeyCode::Right));
+    assert_eq!(app.replay.as_ref().unwrap().index, 2);
+    app.handle_key(key(KeyCode::Left));
+    assert_eq!(app.replay.as_ref().unwrap().index, 1);
+    let t0 = app.view.as_ref().unwrap().turn;
+    app.handle_key(key(KeyCode::Char(']')));
+    let t1 = app.view.as_ref().unwrap().turn;
+    assert!(t1 > t0, "next turn boundary: {t0} -> {t1}");
+    app.handle_key(key(KeyCode::Char('[')));
+    assert_eq!(app.view.as_ref().unwrap().turn, t0, "back to the start of the previous turn");
+    let i = app.replay.as_ref().unwrap().index;
+    assert!(
+        i == 0 || app.replay.as_ref().unwrap().views[i - 1].turn != t0,
+        "at the first action of that turn"
+    );
+    app.handle_key(key(KeyCode::End));
+    assert_eq!(app.replay.as_ref().unwrap().index, n - 1);
+    assert_eq!(app.view.as_ref().unwrap().turn, last_turn);
+    assert!(
+        app.log.iter().any(|l| l.text.contains("draws")),
+        "the log is rebuilt up to the position"
+    );
+    app.handle_key(key(KeyCode::Home));
+    app.handle_key(key(KeyCode::Char(' ')));
+    assert!(app.replay.as_ref().unwrap().playing);
+    app.replay_tick();
+    assert_eq!(app.replay.as_ref().unwrap().index, 1);
+    assert!(app.footer().starts_with("REPLAY 2/"), "{}", app.footer());
+    // Space plays or pauses; it never passes priority in a replay.
+    assert!(app.handle_key(key(KeyCode::Char(' '))).is_empty());
+}
+
+#[test]
+fn narrow_terminals_wrap_the_footer_and_show_recent_log_lines() {
+    let mut app = app_for(&board(), Seat(0));
+    app.mode = Mode::Normal;
+    app.push_log(tui::app::LogKind::Game, "something happened".into());
+    let s = render(&app, 80, 24);
+    assert!(s.contains("[x] concede"), "the whole footer is visible: {s}");
+    assert!(s.contains("recent") && s.contains("something happened"), "{s}");
+}

@@ -48,6 +48,8 @@ async fn joins_and_plays_the_opening_through_the_protocol() {
         name: "Connor".into(),
         decklist: Some(cards::deck_text("green").unwrap().to_string()),
         hints: vec!["hello there".into()],
+        deck_path: None,
+        theme: None,
     };
     let tui::Session {
         client,

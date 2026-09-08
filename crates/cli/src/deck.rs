@@ -27,6 +27,19 @@ pub enum DeckCommand {
         /// Where to write; defaults to `<name>.txt` in the current directory.
         #[arg(long)]
         out: Option<PathBuf>,
+        /// Open the deckbuilder on the new file straight away.
+        #[arg(long)]
+        edit: bool,
+    },
+    /// Open the deckbuilder on a deck file (three panes: search, deck, card/stats).
+    Edit {
+        /// Deck file path; created if it does not exist.
+        deck: PathBuf,
+        #[arg(long, default_value = "cube")]
+        format: String,
+        /// Colour theme: default, mono, or high-contrast.
+        #[arg(long)]
+        theme: Option<String>,
     },
     /// Mana curve, colour sources, interaction count, and sample opening hands.
     Stats {
@@ -47,6 +60,15 @@ pub enum CardsCommand {
     Update,
     /// Show a card: its rules text, and its printing and legality if card data is cached.
     Show { name: Vec<String> },
+    /// Search cards with Scryfall-style syntax: `t:creature c:g mv<=2 o:"draw a card"`.
+    Search {
+        query: Vec<String>,
+        #[arg(long, default_value_t = 30)]
+        limit: usize,
+        /// Include cards the engine cannot play yet (needs the Scryfall cache).
+        #[arg(long)]
+        all: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -110,7 +132,7 @@ pub fn deck(cmd: DeckCommand) -> Result<()> {
                 std::process::exit(1)
             }
         }
-        DeckCommand::New { name, format, out } => {
+        DeckCommand::New { name, format, out, edit } => {
             let f = super::load_format(Some(&format), 2)?;
             let path = out.unwrap_or_else(|| PathBuf::from(format!("{name}.txt")));
             if path.exists() {
@@ -118,7 +140,18 @@ pub fn deck(cmd: DeckCommand) -> Result<()> {
             }
             std::fs::write(&path, skeleton(&name, &format, &f))?;
             println!("wrote {}", path.display());
+            if edit {
+                return edit_deck(path, f, None);
+            }
             Ok(())
+        }
+        DeckCommand::Edit { deck, format, theme } => {
+            let f = super::load_format(Some(&format), 2)?;
+            if !deck.exists() {
+                let name = deck.file_stem().and_then(|s| s.to_str()).unwrap_or("deck").to_string();
+                std::fs::write(&deck, skeleton(&name, &format, &f))?;
+            }
+            edit_deck(deck, f, tui::theme_flag(theme.as_deref())?)
         }
         DeckCommand::Stats { deck, format, hands, seed } => {
             let f = super::load_format(Some(&format), 2)?;
@@ -143,6 +176,31 @@ pub fn deck(cmd: DeckCommand) -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn edit_deck(path: PathBuf, format: Format, theme: Option<String>) -> Result<()> {
+    let mut settings = tui::settings::Settings::load();
+    if let Some(t) = theme {
+        settings.theme = t;
+    }
+    let theme = tui::theme::Theme::named(&settings.theme).unwrap_or_default();
+    let text = std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let db = Arc::new(cards::core());
+    let known = carddb::Cache::load().ok().flatten().map(Arc::new);
+    let index = Arc::new(match &known {
+        Some(c) => cardsearch::Index::from_cache(c, &db),
+        None => cardsearch::Index::from_db(&db),
+    });
+    let setup = tui::editor::EditorSetup {
+        path: Some(path),
+        text,
+        format,
+        db,
+        index,
+        known,
+        theme,
+    };
+    super::runtime()?.block_on(tui::run_editor(setup))
 }
 
 pub fn check_text(text: &str, format: &Format, db: &engine::CardDb, known: Option<&dyn KnownCards>) -> Result<CheckReport> {
@@ -177,8 +235,12 @@ fn skeleton(name: &str, format_name: &str, f: &Format) -> String {
         engine::format::DeckSize::Min(n) => format!("at least {n} cards"),
         engine::format::DeckSize::Range(lo, hi) => format!("{lo}–{hi} cards"),
     };
+    let copies = match f.deck.max_copies {
+        Some(n) if !f.deck.singleton => format!(", up to {n} of a card"),
+        _ => String::new(),
+    };
     format!(
-        "// {name} — a {} deck ({size}{}).\n\
+        "// {name} — a {} deck ({size}{}{copies}).\n\
          // One card per line as `N Card Name`; `//` starts a comment.\n\
          // Check it with `manaline deck check {name}.txt --format {format_name}`.\n\
          Deck\n\
@@ -200,6 +262,29 @@ pub fn cards_cmd(cmd: CardsCommand) -> Result<()> {
             println!("{} cards; {}", cache.len(), cache.age_text());
             Ok(())
         }
+        CardsCommand::Search { query, limit, all } => {
+            let db = cards::core();
+            let index = cardsearch::Index::load(&db);
+            let q = query.join(" ");
+            let q = if all || !index.from_cache {
+                q
+            } else {
+                format!("({q}) is:implemented")
+            };
+            let hits = index.query(&q, limit).map_err(|e| anyhow!("{e}"))?;
+            for e in &hits {
+                println!("{}", e.line());
+            }
+            if hits.is_empty() {
+                println!("no cards match");
+            } else if hits.len() == limit {
+                println!("(first {limit}; raise --limit for more)");
+            }
+            if !index.from_cache {
+                println!("searching the core set only: `manaline cards update` fetches every card");
+            }
+            Ok(())
+        }
         CardsCommand::Show { name } => {
             let name = name.join(" ");
             if name.trim().is_empty() {
@@ -208,17 +293,22 @@ pub fn cards_cmd(cmd: CardsCommand) -> Result<()> {
             let db = cards::core();
             let cache = carddb::Cache::load().ok().flatten();
             let mut shown = false;
-            if let Some(id) = db.lookup(&name) {
-                let c = db.get(id);
-                let pt = c.pt.map(|(p, t)| format!("  {p}/{t}")).unwrap_or_default();
-                let types: Vec<String> = c.types.iter().map(|t| capitalize(t.word())).collect();
-                let mut line = types.join(" ");
-                if !c.subtypes.is_empty() {
-                    line.push_str(" — ");
-                    line.push_str(&c.subtypes.join(" "));
+            let index = match &cache {
+                Some(c) => cardsearch::Index::from_cache(c, &db),
+                None => cardsearch::Index::from_db(&db),
+            };
+            if let Some(e) = index.get(&name) {
+                for line in tui::cardbox::render(&tui::cardbox::CardFace::from_entry(e), 44) {
+                    println!("{line}");
                 }
-                println!("{} {}{pt}\n{line}\n{}\n", c.name, c.cost, c.text);
-                println!("implemented: yes (core set)");
+                println!(
+                    "implemented: {}",
+                    if e.implemented {
+                        "yes (core set)"
+                    } else {
+                        "no (the engine cannot play this card yet)"
+                    }
+                );
                 shown = true;
             }
             match &cache {
@@ -286,13 +376,5 @@ pub fn ingest(cmd: IngestCommand) -> Result<()> {
                 std::process::exit(1)
             }
         }
-    }
-}
-
-fn capitalize(s: &str) -> String {
-    let mut c = s.chars();
-    match c.next() {
-        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
-        None => String::new(),
     }
 }

@@ -29,6 +29,9 @@ pub struct PlayArgs {
     /// Your display name at the table.
     #[arg(long)]
     pub name: Option<String>,
+    /// Colour theme for this run: default, mono, or high-contrast (saved choice otherwise).
+    #[arg(long)]
+    pub theme: Option<String>,
     /// Also listen on TCP so a remote terminal can join (`--vs human`).
     #[arg(long)]
     pub tcp: Option<String>,
@@ -107,6 +110,8 @@ pub async fn play(args: PlayArgs) -> Result<()> {
         name,
         decklist: Some(decklist),
         hints,
+        deck_path: deck_path_of(&args.deck),
+        theme: tui::theme_flag(args.theme.as_deref())?,
     };
     let result = tui::run(config).await;
 
@@ -245,6 +250,15 @@ fn default_opponent_deck(mine: &str) -> String {
     "red".into()
 }
 
+/// A deck given as a file path (not a built-in name) can be edited in place.
+pub fn deck_path_of(spec: &str) -> Option<std::path::PathBuf> {
+    if cards::deck_text(spec).is_some() {
+        return None;
+    }
+    let p = std::path::PathBuf::from(spec);
+    p.exists().then_some(p)
+}
+
 fn check_deck(decklist: &str, format: &Format, db: &engine::CardDb, label: &str) -> Result<()> {
     let report = crate::deck::check_text(decklist, format, db, None)?;
     if !report.is_legal() {
@@ -260,7 +274,20 @@ pub struct DaemonChild {
 }
 
 impl DaemonChild {
+    /// Ask the daemon to stop (it removes its socket on the way out), then
+    /// kill it if it lingers.
     pub async fn stop(&mut self) {
+        if let Some(pid) = self.child.id() {
+            unsafe {
+                libc::kill(pid as i32, libc::SIGTERM);
+            }
+            if tokio::time::timeout(std::time::Duration::from_secs(2), self.child.wait())
+                .await
+                .is_ok()
+            {
+                return;
+            }
+        }
         let _ = self.child.kill().await;
         let _ = self.child.wait().await;
     }
@@ -317,12 +344,17 @@ pub struct JoinArgs {
     pub deck: String,
     #[arg(long)]
     pub name: Option<String>,
+    /// Colour theme for this run: default, mono, or high-contrast (saved choice otherwise).
+    #[arg(long)]
+    pub theme: Option<String>,
 }
 
 pub async fn join(args: JoinArgs) -> Result<()> {
     let decklist = crate::deck_text(&args.deck)?;
     let name = args.name.unwrap_or_else(whoami);
-    let config = tui::config(&args.endpoint, &args.token, &name, Some(decklist))?;
+    let mut config = tui::config(&args.endpoint, &args.token, &name, Some(decklist))?;
+    config.deck_path = deck_path_of(&args.deck);
+    config.theme = tui::theme_flag(args.theme.as_deref())?;
     let outcome = tui::run(config).await?;
     if let Some(o) = outcome {
         println!(
@@ -352,6 +384,9 @@ pub struct TuiArgs {
     pub deck: Option<String>,
     #[arg(long)]
     pub name: Option<String>,
+    /// Colour theme for this run: default, mono, or high-contrast (saved choice otherwise).
+    #[arg(long)]
+    pub theme: Option<String>,
 }
 
 pub async fn tui(args: TuiArgs) -> Result<()> {
@@ -365,7 +400,9 @@ pub async fn tui(args: TuiArgs) -> Result<()> {
         None => None,
     };
     let name = args.name.unwrap_or_else(whoami);
-    let config = tui::config(&endpoint, &args.token, &name, decklist)?;
+    let mut config = tui::config(&endpoint, &args.token, &name, decklist)?;
+    config.deck_path = args.deck.as_deref().and_then(deck_path_of);
+    config.theme = tui::theme_flag(args.theme.as_deref())?;
     tui::run(config).await?;
     Ok(())
 }

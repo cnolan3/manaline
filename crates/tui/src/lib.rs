@@ -2,7 +2,11 @@
 //! the seat-filtered view and turns keys into protocol messages.
 
 pub mod app;
+pub mod cardbox;
+pub mod editor;
+pub mod editor_ui;
 pub mod settings;
+pub mod theme;
 pub mod ui;
 
 use crate::app::{App, Command, LogKind, Mode};
@@ -22,6 +26,10 @@ pub struct TuiConfig {
     pub decklist: Option<String>,
     /// Lines to show in the lobby and log (a join command, agent instructions).
     pub hints: Vec<String>,
+    /// Where the deck came from, so the lobby can open the deckbuilder on it.
+    pub deck_path: Option<std::path::PathBuf>,
+    /// A theme name overriding the saved setting for this run.
+    pub theme: Option<String>,
 }
 
 /// A joined session: the client handle, its push channel, and the app state.
@@ -67,9 +75,19 @@ pub async fn join(config: TuiConfig) -> Result<Session> {
         client.ready().await?;
     }
 
-    let mut app = App::new(me, welcome.game_id.0.clone(), welcome.format.name.clone(), welcome.lobby.clone())
-        .with_settings(crate::settings::Settings::load());
+    let mut settings = crate::settings::Settings::load();
+    if let Some(t) = &config.theme {
+        settings.theme = t.clone();
+    }
+    let mut app = App::new(me, welcome.game_id.0.clone(), welcome.format.name.clone(), welcome.lobby.clone()).with_settings(settings);
     app.hints = config.hints.clone();
+    if let (Some(_), Some(text)) = (me, &config.decklist) {
+        app.deck_source = Some(app::DeckSource {
+            path: config.deck_path.clone(),
+            text: text.clone(),
+            format: welcome.format.clone(),
+        });
+    }
     for h in &config.hints {
         for line in h.lines() {
             app.push_log(LogKind::System, line.to_string());
@@ -184,6 +202,22 @@ async fn refresh_legal(client: &AsyncClient, app: &mut App) {
 pub async fn execute(client: &AsyncClient, app: &mut App, command: Command) {
     match command {
         Command::Quit => app.quit = true,
+        Command::SetDeck(text) => match client.set_deck(&text).await {
+            Ok(Ok(())) => {
+                if let Some(src) = app.deck_source.as_mut() {
+                    src.text = text;
+                }
+                match client.ready().await {
+                    Ok(()) => app.set_status("Deck resubmitted; you are ready"),
+                    Err(e) => app.set_status(format!("deck accepted but ready failed: {e}")),
+                }
+            }
+            Ok(Err(violations)) => {
+                let list: Vec<String> = violations.iter().map(ToString::to_string).collect();
+                app.set_status(format!("deck rejected: {}", list.join("; ")));
+            }
+            Err(e) => app.set_status(format!("set_deck failed: {e}")),
+        },
         Command::Refresh => app.needs_refresh = true,
         Command::Chat(text) => {
             if let Err(e) = client.chat(&text, None).await {
@@ -220,5 +254,92 @@ pub fn config(endpoint: &str, token: &str, name: &str, decklist: Option<String>)
         name: name.to_string(),
         decklist,
         hints: Vec::new(),
+        deck_path: None,
+        theme: None,
     })
+}
+
+/// Validate a `--theme` flag.
+pub fn theme_flag(name: Option<&str>) -> Result<Option<String>> {
+    match name {
+        None => Ok(None),
+        Some(n) if theme::Theme::named(n).is_some() => Ok(Some(n.to_string())),
+        Some(n) => bail!("unknown theme {n:?}; themes are {}", theme::NAMES.join(", ")),
+    }
+}
+
+/// Step through a replay in the client (`manaline replay --step`).
+pub async fn run_replay(replay: app::ReplayState, theme: Option<String>) -> Result<()> {
+    let mut settings = settings::Settings::load();
+    if let Some(t) = theme {
+        settings.theme = t;
+    }
+    let lobby = protocol::LobbyView {
+        seats: Vec::new(),
+        started: true,
+    };
+    let mut app = App::new(None, replay.title.clone(), String::new(), lobby).with_settings(settings);
+    app.load_replay(replay);
+    let guard = TerminalGuard::enter()?;
+    let mut terminal = ratatui::init();
+    let result = replay_loop(&mut app, &mut terminal).await;
+    ratatui::restore();
+    drop(guard);
+    result
+}
+
+async fn replay_loop(app: &mut App, terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
+    let mut events = EventStream::new();
+    let mut tick = tokio::time::interval(Duration::from_millis(700));
+    loop {
+        terminal.draw(|f| ui::draw(f, app))?;
+        tokio::select! {
+            ev = events.next() => match ev {
+                Some(Ok(TermEvent::Key(key))) if key.kind != KeyEventKind::Release => {
+                    let _ = app.handle_key(key);
+                    if app.quit {
+                        return Ok(());
+                    }
+                }
+                Some(Ok(_)) => {}
+                Some(Err(e)) => return Err(e.into()),
+                None => return Ok(()),
+            },
+            _ = tick.tick() => app.replay_tick(),
+        }
+    }
+}
+
+/// Run the deckbuilder on its own (`manaline deck edit`).
+pub async fn run_editor(setup: editor::EditorSetup) -> Result<()> {
+    let mut ed = editor::Editor::new(setup).map_err(|e| anyhow!(e))?;
+    let guard = TerminalGuard::enter()?;
+    let mut terminal = ratatui::init();
+    let result = editor_loop(&mut ed, &mut terminal).await;
+    ratatui::restore();
+    drop(guard);
+    result
+}
+
+async fn editor_loop(ed: &mut editor::Editor, terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
+    let mut events = EventStream::new();
+    let mut tick = tokio::time::interval(Duration::from_secs(1));
+    loop {
+        terminal.draw(|f| editor_ui::draw(f, ed))?;
+        tokio::select! {
+            ev = events.next() => match ev {
+                Some(Ok(TermEvent::Key(key))) if key.kind != KeyEventKind::Release => {
+                    for c in ed.handle_key(key) {
+                        if c == editor::EditorCommand::Quit {
+                            return Ok(());
+                        }
+                    }
+                }
+                Some(Ok(_)) => {}
+                Some(Err(e)) => return Err(e.into()),
+                None => return Ok(()),
+            },
+            _ = tick.tick() => ed.check_disk(),
+        }
+    }
 }

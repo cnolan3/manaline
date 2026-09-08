@@ -58,6 +58,12 @@ enum Command {
         #[command(subcommand)]
         cmd: deck::IngestCommand,
     },
+    /// Which game daemons and MCP servers are running on this machine.
+    Status {
+        /// Remove socket files whose daemon is gone.
+        #[arg(long)]
+        clean: bool,
+    },
 }
 
 #[derive(clap::ValueEnum, Clone, Copy)]
@@ -121,10 +127,11 @@ fn main() -> Result<()> {
         Command::Deck { cmd } => deck::deck(cmd),
         Command::Cards { cmd } => deck::cards_cmd(cmd),
         Command::Ingest { cmd } => deck::ingest(cmd),
+        Command::Status { clean } => runtime()?.block_on(commands::status(clean)),
     }
 }
 
-fn runtime() -> Result<tokio::runtime::Runtime> {
+pub fn runtime() -> Result<tokio::runtime::Runtime> {
     Ok(tokio::runtime::Builder::new_multi_thread().enable_all().build()?)
 }
 

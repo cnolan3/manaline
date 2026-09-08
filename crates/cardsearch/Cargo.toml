@@ -1,20 +1,20 @@
 [package]
-name = "manaline-deckstats"
+name = "manaline-cardsearch"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Deck-file parsing and deck analysis for manaline"
+description = "Scryfall-style card search over the manaline card database"
 
 [lib]
-name = "deckstats"
+name = "cardsearch"
 path = "src/lib.rs"
 
 [dependencies]
 manaline-engine = { path = "../engine" }
-manaline-cardir = { path = "../cardir" }
 manaline-carddb = { path = "../carddb" }
 serde.workspace = true
 
 [dev-dependencies]
 manaline-cards = { path = "../cards" }
+serde_json.workspace = true

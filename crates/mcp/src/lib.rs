@@ -22,6 +22,12 @@ pub async fn connect(config: SessionConfig) -> Result<McpServer> {
     Ok(McpServer::new(session))
 }
 
+/// A server with no game behind it: card search, deck analysis, and the
+/// resources, for deckbuilding between games.
+pub fn standalone(format: engine::Format) -> McpServer {
+    McpServer::standalone(format)
+}
+
 /// Serve over stdin/stdout until the client goes away. Nothing else may
 /// write to stdout in this mode.
 pub async fn serve_stdio(server: McpServer) -> Result<()> {

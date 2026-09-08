@@ -1,9 +1,10 @@
 //! Rendering (§6). Everything reads in monochrome; colour reinforces.
 
 use crate::app::{App, LogKind, Mode};
+use crate::theme::Theme;
 use engine::{ActReason, AttackTarget, CardType, HandView, Keyword, ObjectId, ObjectView, Outcome, Seat};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style, Stylize};
+use ratatui::style::{Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
@@ -19,6 +20,10 @@ pub fn card_h(keywords: bool) -> u16 {
 }
 
 pub fn draw(f: &mut Frame, app: &App) {
+    if let Some(ed) = &app.editor {
+        crate::editor_ui::draw(f, ed);
+        return;
+    }
     let area = f.area();
     let outer = Block::default().borders(Borders::ALL).title(header(app));
     let inner = outer.inner(area);
@@ -60,6 +65,12 @@ pub fn draw(f: &mut Frame, app: &App) {
     } else {
         1
     };
+    // The footer wraps onto a second line on narrow terminals.
+    let footer_h = if app.footer().chars().count() > field.width as usize {
+        2
+    } else {
+        1
+    };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -67,7 +78,7 @@ pub fn draw(f: &mut Frame, app: &App) {
             Constraint::Length(CENTER_H),                  // centre strip
             Constraint::Length(2 * row_h + 1),             // me
             Constraint::Length(hand_height),
-            Constraint::Length(1), // footer
+            Constraint::Length(footer_h),
             Constraint::Min(0),
         ])
         .split(field);
@@ -77,7 +88,21 @@ pub fn draw(f: &mut Frame, app: &App) {
     draw_me(f, app, chunks[2], row_h);
     draw_hand(f, app, chunks[3]);
     draw_footer(f, app, chunks[4]);
+    // Spare rows below the footer (a short terminal drawing chips): recent log lines.
+    if side.is_none() && !app.show_log && chunks[5].height >= 3 {
+        draw_recent(f, app, chunks[5]);
+    }
     draw_overlays(f, app, area);
+}
+
+/// The last few log lines, for layouts without a log pane.
+fn draw_recent(f: &mut Frame, app: &App, area: Rect) {
+    let title = Line::from("recent  ([l] full log)").dim();
+    f.render_widget(Paragraph::new(title), Rect::new(area.x, area.y, area.width, 1));
+    let body = Rect::new(area.x, area.y + 1, area.width, area.height - 1);
+    let saved = app.log_scroll;
+    let _ = saved;
+    draw_log(f, app, body);
 }
 
 pub const CENTER_H: u16 = 3;
@@ -96,7 +121,7 @@ fn draw_center(f: &mut Frame, app: &App, area: Rect) {
     let w = area.width as usize;
     let pad = w.saturating_sub(title_len) / 2;
     let whose_style = if mine && view.outcome.is_none() {
-        Style::default().fg(Color::White).bg(Color::Green).bold()
+        Style::default().fg(app.theme().on_good).bg(app.theme().good).bold()
     } else {
         Style::default().dim()
     };
@@ -110,10 +135,23 @@ fn draw_center(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(rule), Rect::new(area.x, area.y, area.width, 1));
 
     let (text, style) = match view.outcome {
-        Some(Outcome::Winner(s)) if Some(s) == app.me => ("YOU WIN".to_string(), Style::default().fg(Color::Green).bold()),
+        _ if app.replay.is_some() => {
+            let r = app.replay.as_ref().unwrap();
+            let last: String = r.events[r.index]
+                .iter()
+                .filter(|e| !matches!(e, engine::EventBase::PriorityPassed { .. } | engine::EventBase::Tapped { .. }))
+                .map(|e| engine::text::describe_event_view(e, &|id| app.object_label(id), &|s| app.seat_name(s)))
+                .collect::<Vec<_>>()
+                .join(" · ");
+            (
+                if last.is_empty() { "(priority passed)".to_string() } else { last },
+                Style::default().fg(app.theme().stack).bold(),
+            )
+        }
+        Some(Outcome::Winner(s)) if Some(s) == app.me => ("YOU WIN".to_string(), Style::default().fg(app.theme().good).bold()),
         Some(Outcome::Winner(s)) => (
             format!("GAME OVER — {} wins", app.seat_name(s)),
-            Style::default().fg(Color::Red).bold(),
+            Style::default().fg(app.theme().danger).bold(),
         ),
         Some(Outcome::Draw) => ("GAME OVER — draw".into(), Style::default().bold()),
         None => match app.my_reason() {
@@ -122,15 +160,15 @@ fn draw_center(f: &mut Frame, app: &App, area: Rect) {
                     "Passing in {:.1}s  ·  [Space] now  [Esc] hold",
                     app.auto_pass_remaining().unwrap_or(0.0)
                 ),
-                Style::default().fg(Color::Yellow),
+                Style::default().fg(app.theme().warn),
             ),
             Some(ActReason::Priority) => (
                 "YOU HAVE PRIORITY  ·  [Space] pass".into(),
-                Style::default().fg(Color::Green).bold(),
+                Style::default().fg(app.theme().good).bold(),
             ),
             Some(r) => (
                 format!("YOU MUST {}  ·  [Enter] open", crate::app::reason_verb(r).to_uppercase()),
-                Style::default().fg(Color::Green).bold(),
+                Style::default().fg(app.theme().good).bold(),
             ),
             None => {
                 let who: Vec<String> = view
@@ -139,7 +177,7 @@ fn draw_center(f: &mut Frame, app: &App, area: Rect) {
                     .map(|(s, r)| format!("{} to {}", app.seat_name(*s), crate::app::reason_verb(*r)))
                     .collect();
                 let style = if app.waiting_long() {
-                    Style::default().fg(Color::Yellow)
+                    Style::default().fg(app.theme().warn)
                 } else {
                     Style::default().dim()
                 };
@@ -152,7 +190,17 @@ fn draw_center(f: &mut Frame, app: &App, area: Rect) {
         Rect::new(area.x, area.y + 1, area.width, 1),
     );
 
-    let third = if !view.stack.is_empty() {
+    // During combat, spell out who blocks whom.
+    let mut blocks: Vec<String> = Vec::new();
+    for o in view.objects.values() {
+        for a in &o.blocking {
+            blocks.push(format!("{} blocks {}", app.object_label(o.id), app.object_label(*a)));
+        }
+    }
+    blocks.sort();
+    let third = if !blocks.is_empty() {
+        Line::from(format!("Blocks: {}", blocks.join(" · "))).fg(app.theme().info)
+    } else if !view.stack.is_empty() {
         let top = view.stack.last().unwrap();
         let more = if view.stack.len() > 1 {
             format!(" (+{} below)", view.stack.len() - 1)
@@ -165,9 +213,9 @@ fn draw_center(f: &mut Frame, app: &App, area: Rect) {
             top.object,
             app.seat_name(top.controller)
         ))
-        .fg(Color::Magenta)
+        .fg(app.theme().stack)
     } else if let Some((msg, _)) = &app.status {
-        Line::from(msg.clone()).fg(Color::Yellow)
+        Line::from(msg.clone()).fg(app.theme().warn)
     } else {
         Line::from("")
     };
@@ -221,6 +269,16 @@ fn header(app: &App) -> String {
     let Some(view) = &app.view else {
         return format!(" manaline ── game {} ── lobby ", app.game_id);
     };
+    if let Some(r) = &app.replay {
+        return format!(
+            " manaline ── REPLAY {} ── action {}/{} ── Turn {} · {} ",
+            r.title,
+            r.index + 1,
+            r.views.len(),
+            view.turn,
+            view.phase.label()
+        );
+    }
     let status = match view.outcome {
         Some(Outcome::Winner(s)) => format!("GAME OVER — {} wins", app.seat_name(s)),
         Some(Outcome::Draw) => "GAME OVER — draw".into(),
@@ -367,8 +425,8 @@ fn draw_log(f: &mut Frame, app: &App, area: Rect) {
         .map(|l| {
             let prefix = format!("T{:<3}", l.turn);
             let style = match l.kind {
-                LogKind::Chat => Style::default().fg(Color::Cyan),
-                LogKind::System => Style::default().fg(Color::Yellow),
+                LogKind::Chat => Style::default().fg(app.theme().focus),
+                LogKind::System => Style::default().fg(app.theme().warn),
                 LogKind::Game => Style::default(),
             };
             Line::from(vec![
@@ -439,8 +497,9 @@ fn draw_row(f: &mut Frame, app: &App, area: Rect, ids: &[ObjectId], highlight: O
     let view = app.view.as_ref().unwrap();
     let objects: Vec<&ObjectView> = ids.iter().filter_map(|id| view.object(*id)).collect();
     let keywords = app.settings.card_keywords;
+    let theme = app.theme();
     if area.height < card_h(false) {
-        draw_chip_row(f, area, &objects, highlight, keywords);
+        draw_chip_row(f, area, &objects, highlight, keywords, theme);
         return;
     }
     // The row is as tall as the boxes it was given room for.
@@ -461,7 +520,7 @@ fn draw_row(f: &mut Frame, app: &App, area: Rect, ids: &[ObjectId], highlight: O
         }
         let marked = highlight.map(|(m, _)| m.contains(&o.id)).unwrap_or(false);
         let cursor = highlight.and_then(|(_, c)| *c) == Some(o.id);
-        draw_card(f, o, Rect::new(x, area.y, CARD_W, card_h), marked, cursor, keywords);
+        draw_card(f, o, Rect::new(x, area.y, CARD_W, card_h), marked, cursor, keywords, theme);
         x += CARD_W;
     }
 }
@@ -473,6 +532,7 @@ fn draw_chip_row(
     objects: &[&ObjectView],
     highlight: Option<&(Vec<ObjectId>, Option<ObjectId>)>,
     keywords: bool,
+    theme: Theme,
 ) {
     let mut spans: Vec<Span> = Vec::new();
     for o in objects {
@@ -498,6 +558,10 @@ fn draw_chip_row(
         if o.summoning_sick && o.pt.is_some() {
             text.push(sick_star(o));
         }
+        if !o.blocking.is_empty() {
+            let ids: Vec<String> = o.blocking.iter().map(|a| format!("#{}", a.0)).collect();
+            text.push_str(&format!(" ⊣{}", ids.join(",")));
+        }
         if o.tapped {
             text.push_str(" T");
         }
@@ -506,13 +570,13 @@ fn draw_chip_row(
             style = style.add_modifier(Modifier::DIM);
         }
         if o.attacking.is_some() {
-            style = style.fg(Color::Red);
+            style = style.fg(theme.danger);
         }
         if !o.blocking.is_empty() {
-            style = style.fg(Color::Blue);
+            style = style.fg(theme.info);
         }
         if highlight.map(|(m, _)| m.contains(&o.id)).unwrap_or(false) {
-            style = style.fg(Color::Yellow).add_modifier(Modifier::BOLD);
+            style = style.fg(theme.warn).add_modifier(Modifier::BOLD);
         }
         if highlight.and_then(|(_, c)| *c) == Some(o.id) {
             style = style.add_modifier(Modifier::REVERSED);
@@ -524,20 +588,21 @@ fn draw_chip_row(
 }
 
 /// A card box: two name lines, an optional keyword row, and a stats line.
-pub fn draw_card(f: &mut Frame, o: &ObjectView, area: Rect, marked: bool, cursor: bool, keywords: bool) {
+#[allow(clippy::too_many_arguments)]
+pub fn draw_card(f: &mut Frame, o: &ObjectView, area: Rect, marked: bool, cursor: bool, keywords: bool, theme: Theme) {
     let mut style = Style::default();
     if o.tapped {
         style = style.add_modifier(Modifier::DIM);
     }
     let mut border = Style::default();
     if o.attacking.is_some() {
-        border = border.fg(Color::Red);
+        border = border.fg(theme.danger);
     }
     if !o.blocking.is_empty() {
-        border = border.fg(Color::Blue);
+        border = border.fg(theme.info);
     }
     if marked {
-        border = border.fg(Color::Yellow).add_modifier(Modifier::BOLD);
+        border = border.fg(theme.warn).add_modifier(Modifier::BOLD);
     }
     if cursor {
         border = border.add_modifier(Modifier::REVERSED);
@@ -571,8 +636,21 @@ pub fn draw_card(f: &mut Frame, o: &ObjectView, area: Rect, marked: bool, cursor
             .collect::<String>()
     );
     let mut lines = vec![Line::from(name1), Line::from(name2)];
+    // Which attacker this creature blocks, in place of the keyword row (or the
+    // second name line when there is no keyword row and the name is short).
+    let blocks = (!o.blocking.is_empty()).then(|| {
+        let ids: Vec<String> = o.blocking.iter().map(|a| format!("#{}", a.0)).collect();
+        fit(&format!("⊣ {}", ids.join(",")), width)
+    });
     if keywords {
-        lines.push(Line::from(fit(&keyword_glyphs(&o.keywords), width)).dim());
+        match &blocks {
+            Some(b) => lines.push(Line::from(b.clone()).fg(theme.info).bold()),
+            None => lines.push(Line::from(fit(&keyword_glyphs(&o.keywords), width)).dim()),
+        }
+    } else if let Some(b) = &blocks {
+        if lines[1].width() == 0 {
+            lines[1] = Line::from(b.clone()).fg(theme.info).bold();
+        }
     }
     lines.push(Line::from(last));
     let block = Block::default().borders(Borders::ALL).border_style(border);
@@ -683,11 +761,11 @@ fn draw_hand(f: &mut Frame, app: &App, area: Rect) {
 fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
     let text = app.footer();
     let style = if app.waiting_long() && app.my_reason().is_none() && app.outcome().is_none() {
-        Style::default().fg(Color::Yellow)
+        Style::default().fg(app.theme().warn)
     } else {
         Style::default()
     };
-    f.render_widget(Paragraph::new(text).style(style), area);
+    f.render_widget(Paragraph::new(text).style(style).wrap(Wrap { trim: true }), area);
 }
 
 fn centered(area: Rect, width: u16, height: u16) -> Rect {
@@ -835,28 +913,29 @@ fn draw_overlays(f: &mut Frame, app: &App, area: Rect) {
                     line.push_str(" — ");
                     line.push_str(&o.subtypes.join(" "));
                 }
-                lines.push(Line::from(format!("{} {}", o.name, o.cost)).bold());
-                lines.push(Line::from(line));
-                if let Some((pw, t)) = o.pt {
-                    lines.push(Line::from(format!(
-                        "{pw}/{t}{}",
-                        if o.damage > 0 {
-                            format!(" ({} damage marked)", o.damage)
-                        } else {
-                            String::new()
-                        }
-                    )));
+                let face = crate::cardbox::CardFace {
+                    name: o.name.clone(),
+                    cost: if o.types.contains(&CardType::Land) {
+                        String::new()
+                    } else {
+                        o.cost.to_string()
+                    },
+                    type_line: line,
+                    text: o.text.clone(),
+                    pt: o.pt,
+                    footer: if o.damage > 0 {
+                        format!("{} damage marked", o.damage)
+                    } else {
+                        String::new()
+                    },
+                };
+                for l in crate::cardbox::render(&face, 44) {
+                    lines.push(Line::from(l));
                 }
                 if !o.keywords.is_empty() {
                     let words: Vec<&str> = o.keywords.iter().map(|k| k.word()).collect();
                     lines.push(Line::from(format!("Keywords now: {}", words.join(", "))));
                 }
-                lines.push(Line::from(""));
-                lines.push(Line::from(if o.text.is_empty() {
-                    "(no rules text)".to_string()
-                } else {
-                    o.text.clone()
-                }));
                 lines.push(Line::from(""));
                 for a in &o.abilities {
                     lines.push(Line::from(format!("• {a}")).dim());
@@ -937,6 +1016,7 @@ fn draw_overlays(f: &mut Frame, app: &App, area: Rect) {
                     "Keyword row on card boxes           {}",
                     if s.card_keywords { "[on]" } else { "[off]" }
                 ),
+                format!("Colour theme                        [{}]", s.theme),
                 format!(
                     "Verbose log                         {}",
                     if s.verbose_log { "[on]" } else { "[off]" }

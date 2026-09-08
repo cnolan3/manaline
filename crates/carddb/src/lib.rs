@@ -57,6 +57,9 @@ pub struct CardMeta {
     pub legalities: BTreeMap<String, String>,
     #[serde(default)]
     pub layout: String,
+    /// Digital-only (Arena Alchemy and the like).
+    #[serde(default)]
+    pub digital: bool,
 }
 
 impl CardMeta {

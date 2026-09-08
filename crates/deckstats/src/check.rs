@@ -18,6 +18,10 @@ pub enum CardStatus {
     NotSingleton {
         count: usize,
     },
+    TooManyCopies {
+        count: usize,
+        max: usize,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -79,6 +83,7 @@ pub fn check(list: &Decklist, format: &Format, db: &CardDb, known: Option<&dyn K
             Violation::Banned { name } => mark(&mut lines, name, CardStatus::Banned),
             Violation::NotInPool { name } => mark(&mut lines, name, CardStatus::NotInPool),
             Violation::NotSingleton { name, count } => mark(&mut lines, name, CardStatus::NotSingleton { count: *count }),
+            Violation::TooManyCopies { name, count, max } => mark(&mut lines, name, CardStatus::TooManyCopies { count: *count, max: *max }),
             _ => deck.push(v),
         }
     }
@@ -101,6 +106,15 @@ pub trait KnownCards {
     fn as_legality(&self) -> &dyn LegalitySource;
 }
 
+impl KnownCards for carddb::Cache {
+    fn is_card(&self, name: &str) -> bool {
+        self.contains(name)
+    }
+    fn as_legality(&self) -> &dyn LegalitySource {
+        self
+    }
+}
+
 impl std::fmt::Display for CardStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -111,6 +125,7 @@ impl std::fmt::Display for CardStatus {
             CardStatus::Banned => write!(f, "banned"),
             CardStatus::NotInPool => write!(f, "not legal in this format"),
             CardStatus::NotSingleton { count } => write!(f, "{count} copies in a singleton format"),
+            CardStatus::TooManyCopies { count, max } => write!(f, "{count} copies, at most {max} allowed"),
         }
     }
 }

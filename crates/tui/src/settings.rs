@@ -13,6 +13,8 @@ pub struct Settings {
     /// Give card boxes an extra row for keyword glyphs (flying, trample, ...).
     pub card_keywords: bool,
     pub verbose_log: bool,
+    /// Colour theme: `default`, `mono`, or `high-contrast`.
+    pub theme: String,
 }
 
 impl Default for Settings {
@@ -22,6 +24,7 @@ impl Default for Settings {
             auto_pass_ms: 1500,
             card_keywords: true,
             verbose_log: false,
+            theme: "default".into(),
         }
     }
 }

@@ -6,7 +6,7 @@ Format(
     starting_life: 20,
     starting_hand: 7,
     mulligan: London(free_first: false),
-    deck: Deck(size: Range(40, 60), singleton: false, includes_commander: false),
+    deck: Deck(size: Range(40, 60), singleton: false, includes_commander: false, max_copies: Some(4)),
     rules: [],
     legality: Legality(pool: Builtin("core"), banned: [], allowed: []),
 )

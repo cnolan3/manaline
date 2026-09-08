@@ -86,13 +86,31 @@ everything.
 
 1. Call `wait_for_turn`. It returns when you have a real decision to make,
    saying why, with the state and the numbered legal actions. Moments where
-   you could only pass are passed for you meanwhile. If it times out, call
-   it again.
+   you could only pass are passed for you meanwhile. If it times out, the
+   opponent is still thinking: call it again at once. The game only ends
+   when a reply says `game_over`; until then, keep looping without stopping
+   to ask anyone.
 2. Read the state. Decide.
-3. Call `take_action` with the id of the action you chose. The reply tells
-   you whether you still must act (for example you cast a creature and still
-   hold priority) and lists the next legal actions.
+3. Call `take_action` with the id of the action you chose and the
+   `state_version` of the list it came from. Ids are only meaningful for
+   that version: if the game has moved on, the call is refused and you
+   fetch a fresh list instead of accidentally doing something else. The
+   reply tells you whether you still must act (for example you cast a
+   creature and still hold priority) and lists the next legal actions.
 4. Repeat step 3 until it is no longer your turn to act, then go back to 1.
+
+## Building a deck
+
+Between games, `manaline mcp --http 127.0.0.1:7454` serves these tools with no
+game attached, for deckbuilding.
+
+`search_cards` finds cards with Scryfall-style queries (`t:creature c:g mv<=2`,
+`o:"draw a card"`, `kw:flying`), returning only cards this engine can play
+unless you ask otherwise. `deck_stats` analyses a decklist you write (one
+`N Card Name` per line): curve, colour sources against pips, and legality in
+the table's format. `save_deck` writes it to a file the human can play or open
+in the deckbuilder; `submit_deck` sends it into a game's lobby. A 40-card deck wants about 17
+lands; a 60-card deck about 24.
 
 Use `say` to talk to the other players; it is a friendly table. You may
 `concede` at any point if the game is clearly lost, but play it out while

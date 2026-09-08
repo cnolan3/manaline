@@ -27,6 +27,7 @@ pub fn scenario_format(seats: usize) -> Format {
             size: DeckSize::Min(0),
             singleton: false,
             includes_commander: false,
+            max_copies: None,
         },
         rules: Vec::new(),
         legality: Legality {

@@ -8,6 +8,7 @@ use engine::{ActReason, Action, AttackTarget, DamageTarget, EventBase, EventView
 use protocol::{LegalAction, LobbyView, ServerMessage};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Instant;
 
 /// How long another seat may hold the game before the footer suggests a nudge.
@@ -19,6 +20,27 @@ pub enum Command {
     Chat(String),
     Refresh,
     Quit,
+    /// Resubmit a deck edited in the lobby.
+    SetDeck(String),
+}
+
+/// A replay being stepped through: one spectator view per action.
+#[derive(Clone, Debug)]
+pub struct ReplayState {
+    pub title: String,
+    pub views: Vec<GameView>,
+    /// The events each action produced, as the spectator sees them.
+    pub events: Vec<Vec<EventView>>,
+    pub index: usize,
+    pub playing: bool,
+}
+
+/// The deck this seat was started with, so the lobby can open the deckbuilder on it.
+#[derive(Clone, Debug)]
+pub struct DeckSource {
+    pub path: Option<std::path::PathBuf>,
+    pub text: String,
+    pub format: engine::Format,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -102,7 +124,7 @@ pub enum Mode {
     Settings { selected: usize },
 }
 
-pub const SETTINGS_ITEMS: usize = 4;
+pub const SETTINGS_ITEMS: usize = 5;
 
 pub struct App {
     pub me: Option<Seat>,
@@ -132,6 +154,10 @@ pub struct App {
     pub show_log: bool,
     pub show_stack: bool,
     pub settings: Settings,
+    pub deck_source: Option<DeckSource>,
+    pub replay: Option<ReplayState>,
+    /// The deckbuilder, when open from the lobby.
+    pub editor: Option<Box<crate::editor::Editor>>,
     /// When an armed auto-pass fires, if the current priority moment is minor.
     pub auto_pass_at: Option<Instant>,
     /// The state version the auto-pass was last armed (or held) at, so it arms once per moment.
@@ -164,6 +190,9 @@ impl App {
             show_log: false,
             show_stack: false,
             settings: Settings::default(),
+            deck_source: None,
+            replay: None,
+            editor: None,
             auto_pass_at: None,
             auto_pass_version: None,
         }
@@ -654,6 +683,25 @@ impl App {
             self.quit = true;
             return vec![Command::Quit];
         }
+        if let Some(ed) = self.editor.as_mut() {
+            let mut out = Vec::new();
+            for c in ed.handle_key(key) {
+                match c {
+                    crate::editor::EditorCommand::Saved(text) => out.push(Command::SetDeck(text)),
+                    crate::editor::EditorCommand::Quit => self.editor = None,
+                }
+            }
+            return out;
+        }
+        if self.view.is_none() && matches!(key.code, KeyCode::Char('d')) && !self.lobby.started {
+            self.open_editor();
+            return Vec::new();
+        }
+        if self.replay.is_some() && matches!(self.mode, Mode::Normal) {
+            if let Some(cmds) = self.key_replay(key) {
+                return cmds;
+            }
+        }
         let mode = std::mem::replace(&mut self.mode, Mode::Normal);
         match mode {
             Mode::Normal => self.key_normal(key),
@@ -686,6 +734,13 @@ impl App {
                         self.settings.auto_pass_ms = ms.clamp(500, 10_000) as u64;
                     }
                     2 => self.settings.card_keywords = !self.settings.card_keywords,
+                    3 => {
+                        self.settings.theme = if dir < 0 {
+                            crate::theme::Theme::previous(&self.settings.theme).into()
+                        } else {
+                            crate::theme::Theme::next(&self.settings.theme).into()
+                        }
+                    }
                     _ => self.settings.verbose_log = !self.settings.verbose_log,
                 }
                 self.settings_changed();
@@ -1090,12 +1145,150 @@ impl App {
     }
 
     /// The footer text: every legal action has a key, so it is generated from state.
+    /// Load a replay and show its first position.
+    pub fn load_replay(&mut self, replay: ReplayState) {
+        self.replay = Some(replay);
+        self.replay_seek(0);
+    }
+
+    /// Jump to action `i` of the replay, rebuilding the log up to it.
+    pub fn replay_seek(&mut self, i: usize) {
+        let Some(r) = self.replay.as_mut() else { return };
+        if r.views.is_empty() {
+            return;
+        }
+        r.index = i.min(r.views.len() - 1);
+        let index = r.index;
+        let view = r.views[index].clone();
+        let events: Vec<EventView> = r.events[..=index].iter().flatten().cloned().collect();
+        let keep: Vec<LogLine> = self.log.iter().filter(|l| l.kind == LogKind::System).cloned().collect();
+        self.log = keep;
+        self.set_view(view);
+        for e in events {
+            self.log_event(&e);
+        }
+        self.log_scroll = 0;
+    }
+
+    pub fn replay_step(&mut self, delta: i64) {
+        let Some(r) = &self.replay else { return };
+        let i = (r.index as i64 + delta).clamp(0, r.views.len() as i64 - 1) as usize;
+        self.replay_seek(i);
+    }
+
+    /// The next action index where the turn number changes, in `dir`.
+    fn replay_turn_boundary(&self, dir: i64) -> Option<usize> {
+        let r = self.replay.as_ref()?;
+        let turn = r.views[r.index].turn;
+        let mut i = r.index as i64;
+        loop {
+            i += dir;
+            if i < 0 || i >= r.views.len() as i64 {
+                return Some(if dir < 0 { 0 } else { r.views.len() - 1 });
+            }
+            if r.views[i as usize].turn != turn {
+                // Going backwards, land on the start of the previous turn.
+                if dir < 0 {
+                    let t = r.views[i as usize].turn;
+                    while i > 0 && r.views[i as usize - 1].turn == t {
+                        i -= 1;
+                    }
+                }
+                return Some(i as usize);
+            }
+        }
+    }
+
+    /// Replay controls; `None` lets the key fall through to the normal handler.
+    fn key_replay(&mut self, key: KeyEvent) -> Option<Vec<Command>> {
+        match key.code {
+            KeyCode::Right | KeyCode::Char('n') => self.replay_step(1),
+            KeyCode::Left | KeyCode::Char('p') => self.replay_step(-1),
+            KeyCode::Char(' ') | KeyCode::Char('P') => {
+                if let Some(r) = self.replay.as_mut() {
+                    r.playing = !r.playing;
+                }
+            }
+            KeyCode::Char(']') => {
+                if let Some(i) = self.replay_turn_boundary(1) {
+                    self.replay_seek(i);
+                }
+            }
+            KeyCode::Char('[') => {
+                if let Some(i) = self.replay_turn_boundary(-1) {
+                    self.replay_seek(i);
+                }
+            }
+            KeyCode::Home => self.replay_seek(0),
+            KeyCode::End => self.replay_seek(usize::MAX),
+            _ => return None,
+        }
+        Some(Vec::new())
+    }
+
+    /// Advance one step while playing; called on a timer.
+    pub fn replay_tick(&mut self) {
+        let Some(r) = &self.replay else { return };
+        if r.playing {
+            if r.index + 1 >= r.views.len() {
+                if let Some(r) = self.replay.as_mut() {
+                    r.playing = false;
+                }
+            } else {
+                self.replay_step(1);
+            }
+        }
+    }
+
+    pub fn theme(&self) -> crate::theme::Theme {
+        crate::theme::Theme::named(&self.settings.theme).unwrap_or_default()
+    }
+
+    /// Open the deckbuilder on this seat's deck (lobby only).
+    pub fn open_editor(&mut self) {
+        let Some(src) = self.deck_source.clone() else {
+            self.set_status("no deck to edit on this seat");
+            return;
+        };
+        let db = Arc::new(cards::core());
+        let known = carddb::Cache::load().ok().flatten().map(Arc::new);
+        let index = Arc::new(match &known {
+            Some(c) => cardsearch::Index::from_cache(c, &db),
+            None => cardsearch::Index::from_db(&db),
+        });
+        let theme = self.theme();
+        match crate::editor::Editor::new(crate::editor::EditorSetup {
+            path: src.path,
+            text: src.text,
+            format: src.format,
+            db,
+            index,
+            known,
+            theme,
+        }) {
+            Ok(ed) => self.editor = Some(Box::new(ed)),
+            Err(e) => self.set_status(format!("could not open the deck: {e}")),
+        }
+    }
+
     pub fn footer(&self) -> String {
+        if let (Some(r), Mode::Normal) = (&self.replay, &self.mode) {
+            return format!(
+                "REPLAY {}/{}  [→/n] step  [←/p] back  [[/]] turn  [Space] {}  [Home/End]  [l] log  [s] stack  [i] inspect  [q] quit",
+                r.index + 1,
+                r.views.len(),
+                if r.playing { "pause" } else { "play" }
+            );
+        }
         if self.outcome().is_some() {
             return "[q] quit  [l] log  [i] inspect".into();
         }
         if self.view.is_none() {
-            return "Waiting for the game to start…  [q] quit".into();
+            return if self.deck_source.is_some() && !self.lobby.started {
+                "Waiting for the game to start…  [d] edit your deck  [q] quit".into()
+            } else {
+                "Waiting for the game to start…  [q] quit".into()
+            };
         }
         match &self.mode {
             Mode::Menu(_) => return "[↑↓] move  [Enter] choose  [1-9] jump  [Esc] cancel".into(),

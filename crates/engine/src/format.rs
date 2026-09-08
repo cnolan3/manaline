@@ -31,6 +31,9 @@ pub struct Deck {
     pub size: DeckSize,
     pub singleton: bool,
     pub includes_commander: bool,
+    /// Most copies of one card (basic lands excepted); `None` for no limit.
+    #[serde(default)]
+    pub max_copies: Option<u8>,
 }
 
 /// Each variant is a hook the engine grows a format-specific rule behind.
@@ -93,6 +96,7 @@ pub fn format_deck_any() -> Deck {
         size: DeckSize::Min(0),
         singleton: false,
         includes_commander: false,
+        max_copies: None,
     }
 }
 
@@ -123,6 +127,11 @@ pub enum Violation {
     NotSingleton {
         name: String,
         count: usize,
+    },
+    TooManyCopies {
+        name: String,
+        count: usize,
+        max: usize,
     },
     Banned {
         name: String,
@@ -158,6 +167,7 @@ impl std::fmt::Display for Violation {
             Violation::NotSingleton { name, count } => {
                 write!(f, "{name}: {count} copies in a singleton format")
             }
+            Violation::TooManyCopies { name, count, max } => write!(f, "{name}: {count} copies, at most {max} allowed"),
             Violation::Banned { name } => write!(f, "{name} is banned"),
             Violation::NotInPool { name } => write!(f, "{name} is not in this format's card pool"),
             Violation::UnsupportedPool { pool } => {
@@ -265,6 +275,14 @@ impl Format {
                     name: card.name.clone(),
                     count,
                 });
+            } else if let Some(max) = self.deck.max_copies {
+                if count > max as usize && !card.is_basic() {
+                    out.push(Violation::TooManyCopies {
+                        name: card.name.clone(),
+                        count,
+                        max: max as usize,
+                    });
+                }
             }
             let banned = self.legality.banned.iter().any(|b| b.eq_ignore_ascii_case(&card.name));
             if banned {

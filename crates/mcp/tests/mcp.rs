@@ -3,7 +3,7 @@
 
 use daemon::{CreateGame, Daemon, DaemonConfig, DaemonHandle};
 use engine::{Action, Outcome, Seat};
-use mcp::server::{GetCardParams, GetLogParams, SayParams, TakeActionParams, WaitParams};
+use mcp::server::{DeckStatsParams, GetCardParams, GetLogParams, SaveDeckParams, SayParams, SearchParams, TakeActionParams, WaitParams};
 use mcp::SessionConfig;
 use protocol::{Client, ClientError, Endpoint, ServerMessage, Token};
 use rand::seq::SliceRandom;
@@ -120,7 +120,7 @@ async fn an_agent_plays_a_whole_game_through_the_tools() {
     })
     .await
     .unwrap();
-    assert_eq!(server.session.me, Seat(1));
+    assert_eq!(server.session.as_ref().unwrap().me, Seat(1));
     let res = server.get_game_state().await.unwrap();
     assert!(is_error(&res));
     assert!(text_of(&res).contains("has not started"), "{}", text_of(&res));
@@ -212,6 +212,7 @@ async fn an_agent_plays_a_whole_game_through_the_tools() {
                 .take_action(Parameters(TakeActionParams {
                     action_id: Some(id),
                     action: None,
+                    state_version: None,
                 }))
                 .await
                 .unwrap();
@@ -275,6 +276,7 @@ async fn stale_ids_and_wrong_turns_come_back_as_tool_errors() {
         .take_action(Parameters(TakeActionParams {
             action_id: Some(0),
             action: None,
+            state_version: None,
         }))
         .await
         .unwrap();
@@ -284,6 +286,7 @@ async fn stale_ids_and_wrong_turns_come_back_as_tool_errors() {
         .take_action(Parameters(TakeActionParams {
             action_id: None,
             action: None,
+            state_version: None,
         }))
         .await
         .unwrap();
@@ -292,6 +295,7 @@ async fn stale_ids_and_wrong_turns_come_back_as_tool_errors() {
         .take_action(Parameters(TakeActionParams {
             action_id: None,
             action: Some(serde_json::json!({"kind": "pass_priority"})),
+            state_version: None,
         }))
         .await
         .unwrap();
@@ -418,6 +422,9 @@ async fn streamable_http_lists_tools_and_serves_resources() {
         "say",
         "concede",
         "submit_deck",
+        "search_cards",
+        "deck_stats",
+        "save_deck",
     ] {
         assert!(names.contains(&expected), "missing {expected} in {names:?}");
     }
@@ -503,4 +510,280 @@ async fn streamable_http_lists_tools_and_serves_resources() {
     http.shutdown().await;
     r.handle.shutdown();
     r.task.await.unwrap();
+}
+
+#[tokio::test]
+async fn action_ids_are_bound_to_their_state_version() {
+    let r = start(11).await;
+    let server = mcp::connect(SessionConfig {
+        endpoint: r.endpoint.clone(),
+        token: r.tokens[1].clone(),
+        name: "Agent".into(),
+        decklist: Some(cards::deck_text("blue").unwrap().into()),
+    })
+    .await
+    .unwrap();
+    let mut human = Client::connect(&r.endpoint).await.unwrap();
+    human.hello(&r.tokens[0], Some("Connor")).await.unwrap();
+    human.set_deck(cards::deck_text("green").unwrap()).await.unwrap().unwrap();
+    human.ready().await.unwrap();
+    let mut status = r.handle.status();
+    status.wait_for(|s| !s.must_act.is_empty()).await.unwrap();
+
+    // If the agent decides first, keep (with the right version) so the human is up.
+    if status.borrow().must_act.contains_key(&Seat(1)) {
+        let res = server.get_legal_actions().await.unwrap();
+        let v = res.structured_content.as_ref().unwrap()["state_version"].as_u64().unwrap();
+        let wrong = server
+            .take_action(Parameters(TakeActionParams {
+                action_id: Some(0),
+                action: None,
+                state_version: Some(v + 7),
+            }))
+            .await
+            .unwrap();
+        assert!(is_error(&wrong) && text_of(&wrong).contains("named version"), "{}", text_of(&wrong));
+        let ok = server
+            .take_action(Parameters(TakeActionParams {
+                action_id: Some(0),
+                action: None,
+                state_version: Some(v),
+            }))
+            .await
+            .unwrap();
+        assert!(!is_error(&ok), "{}", text_of(&ok));
+    }
+    status.wait_for(|s| s.must_act.contains_key(&Seat(0))).await.unwrap();
+
+    // The agent fetches a list while the human is deciding, the human acts, and
+    // the stale id is refused rather than remapped onto the new list.
+    let res = server.get_legal_actions().await.unwrap();
+    let stale_version = res.structured_content.as_ref().unwrap()["state_version"].as_u64().unwrap();
+    let (acts, version) = human.get_legal_actions().await.unwrap();
+    let keep = acts.iter().find(|a| a.description.starts_with("Keep")).unwrap();
+    human.act_by_id(keep.id, version).await.unwrap();
+    server.session.as_ref().unwrap().refresh().await;
+    let res = server
+        .take_action(Parameters(TakeActionParams {
+            action_id: Some(0),
+            action: None,
+            state_version: Some(stale_version),
+        }))
+        .await
+        .unwrap();
+    assert!(is_error(&res), "{}", text_of(&res));
+    assert!(text_of(&res).contains("moved on"), "{}", text_of(&res));
+
+    r.handle.shutdown();
+    r.task.await.unwrap();
+}
+
+#[tokio::test]
+async fn a_newer_call_supersedes_an_abandoned_wait() {
+    let r = start(12).await;
+    let server = mcp::connect(SessionConfig {
+        endpoint: r.endpoint.clone(),
+        token: r.tokens[1].clone(),
+        name: "Agent".into(),
+        decklist: Some(cards::deck_text("blue").unwrap().into()),
+    })
+    .await
+    .unwrap();
+    // The game has not started: a wait would block for its whole timeout.
+    let waiter = server.clone();
+    let task = tokio::spawn(async move {
+        waiter
+            .wait_for_turn(Parameters(WaitParams {
+                timeout_seconds: Some(30),
+                auto_pass: None,
+            }))
+            .await
+            .unwrap()
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let _ = server.get_legal_actions().await.unwrap();
+    let res = tokio::time::timeout(std::time::Duration::from_secs(5), task)
+        .await
+        .expect("the wait returns promptly")
+        .unwrap();
+    assert_eq!(res.structured_content.as_ref().unwrap()["superseded"], true, "{}", text_of(&res));
+
+    r.handle.shutdown();
+    r.task.await.unwrap();
+}
+
+#[tokio::test]
+async fn search_and_deck_stats_tools_work_before_the_game_starts() {
+    let r = start(13).await;
+    let server = mcp::connect(SessionConfig {
+        endpoint: r.endpoint.clone(),
+        token: r.tokens[1].clone(),
+        name: "Agent".into(),
+        decklist: None,
+    })
+    .await
+    .unwrap();
+    let res = server
+        .search_cards(Parameters(SearchParams {
+            query: "t:creature c:g mv<=1 kw:deathtouch or name:archdruid".into(),
+            limit: Some(10),
+            include_unimplemented: None,
+        }))
+        .await
+        .unwrap();
+    assert!(!is_error(&res));
+    let text = text_of(&res);
+    assert!(text.contains("Elvish Archdruid"), "{text}");
+    assert!(!text.contains("not implemented"), "playable only by default: {text}");
+    let res = server
+        .search_cards(Parameters(SearchParams {
+            query: "frob:1".into(),
+            limit: None,
+            include_unimplemented: None,
+        }))
+        .await
+        .unwrap();
+    assert!(is_error(&res));
+
+    let res = server
+        .deck_stats(Parameters(DeckStatsParams {
+            decklist: cards::deck_text("green").unwrap().into(),
+        }))
+        .await
+        .unwrap();
+    assert!(!is_error(&res));
+    let sc = res.structured_content.clone().unwrap();
+    assert_eq!(sc["cards"], 40);
+    assert_eq!(sc["lands"], 17);
+    assert_eq!(sc["legal"], true);
+    assert!(text_of(&res).contains("curve"));
+    let res = server
+        .deck_stats(Parameters(DeckStatsParams {
+            decklist: "4 Grizzly Bears\n4 Black Lotus\n".into(),
+        }))
+        .await
+        .unwrap();
+    let sc = res.structured_content.clone().unwrap();
+    assert_eq!(sc["legal"], false);
+    assert!(
+        sc["problems"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p.as_str().unwrap().contains("Black Lotus")),
+        "{sc}"
+    );
+
+    r.handle.shutdown();
+    r.task.await.unwrap();
+}
+
+#[tokio::test]
+async fn a_standalone_server_serves_card_data_without_a_game() {
+    let server = mcp::standalone(engine::Format::cube());
+    let res = server
+        .search_cards(Parameters(SearchParams {
+            query: "t:creature kw:flying c:w mv<=3".into(),
+            limit: Some(5),
+            include_unimplemented: None,
+        }))
+        .await
+        .unwrap();
+    assert!(!is_error(&res) && text_of(&res).contains("Suntail Hawk"), "{}", text_of(&res));
+    let res = server
+        .deck_stats(Parameters(DeckStatsParams {
+            decklist: "36 Serra Angel\n24 Plains\n".into(),
+        }))
+        .await
+        .unwrap();
+    let sc = res.structured_content.clone().unwrap();
+    assert_eq!(sc["legal"], false);
+    assert!(text_of(&res).contains("at most 4 allowed"), "{}", text_of(&res));
+    let res = server
+        .get_card(Parameters(GetCardParams {
+            name: Some("Grizzly Bears".into()),
+            object_id: None,
+            include_ir: None,
+        }))
+        .await
+        .unwrap();
+    assert!(text_of(&res).contains("2/2"));
+    // Game tools explain themselves instead of failing to connect.
+    let res = server.get_game_state().await.unwrap();
+    assert!(
+        is_error(&res) && text_of(&res).contains("No game is connected"),
+        "{}",
+        text_of(&res)
+    );
+    let res = server
+        .wait_for_turn(Parameters(WaitParams {
+            timeout_seconds: Some(1),
+            auto_pass: None,
+        }))
+        .await
+        .unwrap();
+    assert!(is_error(&res));
+    assert!(mcp::server::cube_text(&server.cards).contains("Serra Angel"));
+
+    // save_deck writes canonical text, refuses unknown cards, and reports legality.
+    let dir = std::env::temp_dir().join(format!("manaline-save-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let path = dir.join("agent.txt");
+    let res = server
+        .save_deck(Parameters(SaveDeckParams {
+            decklist: "4 Grizly Bears\n17 Forest\n".into(),
+            name: None,
+            path: Some(path.display().to_string()),
+            overwrite: None,
+        }))
+        .await
+        .unwrap();
+    assert!(
+        is_error(&res) && text_of(&res).contains("did you mean Grizzly Bears"),
+        "{}",
+        text_of(&res)
+    );
+    assert!(!path.exists());
+    let deck = format!(
+        "17 Forest\n4 Grizzly Bears\n{}",
+        "4 Llanowar Elves\n4 Centaur Courser\n4 Giant Growth\n4 Craw Wurm\n3 Elvish Visionary\n"
+    );
+    let res = server
+        .save_deck(Parameters(SaveDeckParams {
+            decklist: deck.clone(),
+            name: None,
+            path: Some(path.display().to_string()),
+            overwrite: None,
+        }))
+        .await
+        .unwrap();
+    assert!(!is_error(&res), "{}", text_of(&res));
+    let sc = res.structured_content.clone().unwrap();
+    assert_eq!(sc["cards"], 40);
+    assert_eq!(sc["legal"], true);
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        text.starts_with("Deck\n4 Llanowar Elves") && text.ends_with("17 Forest\n"),
+        "canonical order: {text}"
+    );
+    let res = server
+        .save_deck(Parameters(SaveDeckParams {
+            decklist: deck,
+            name: None,
+            path: Some(path.display().to_string()),
+            overwrite: None,
+        }))
+        .await
+        .unwrap();
+    assert!(is_error(&res) && text_of(&res).contains("already exists"));
+    let res = server
+        .save_deck(Parameters(SaveDeckParams {
+            decklist: "1 Forest".into(),
+            name: Some("../evil".into()),
+            path: None,
+            overwrite: None,
+        }))
+        .await
+        .unwrap();
+    assert!(is_error(&res));
 }

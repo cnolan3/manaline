@@ -76,7 +76,7 @@ fn check_classifies_each_line() {
     assert_eq!(report.lines[3].status, CardStatus::NotImplemented);
     let mut legacy = Format::cube();
     legacy.legality.pool = engine::CardPool::Scryfall { format: "legacy".into() };
-    let list = parse("40 Grizzly Bears\n").unwrap();
+    let list = parse("4 Grizzly Bears\n36 Forest\n").unwrap();
     let report = deckstats::check::check(&list, &legacy, &db, Some(&Known));
     assert_eq!(report.lines[0].status, CardStatus::NotInPool);
     let report = deckstats::check::check(&list, &legacy, &db, None);
@@ -112,4 +112,17 @@ fn stats_and_sample_hands() {
     assert!(hands.iter().all(|h| h.len() == 7));
     let text = deckstats::stats::render(&s, "Starter Cube");
     assert!(text.contains("curve") && text.contains("green"), "{text}");
+}
+
+#[test]
+fn the_cube_allows_four_copies_and_unlimited_basics() {
+    let db = cards::core();
+    let format = Format::cube();
+    let list = parse("36 Serra Angel\n24 Plains\n").unwrap();
+    let report = deckstats::check::check(&list, &format, &db, None);
+    assert!(!report.is_legal());
+    assert_eq!(report.lines[0].status, CardStatus::TooManyCopies { count: 36, max: 4 });
+    assert_eq!(report.lines[1].status, CardStatus::Ok, "basic lands are exempt");
+    let list = parse("4 Serra Angel\n36 Plains\n").unwrap();
+    assert!(deckstats::check::check(&list, &format, &db, None).is_legal());
 }

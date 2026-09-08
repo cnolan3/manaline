@@ -988,8 +988,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "libc",
  "manaline-carddb",
  "manaline-cards",
+ "manaline-cardsearch",
  "manaline-daemon",
  "manaline-deckstats",
  "manaline-engine",
@@ -1040,6 +1042,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "manaline-cardsearch"
+version = "0.1.0"
+dependencies = [
+ "manaline-carddb",
+ "manaline-cards",
+ "manaline-engine",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "manaline-daemon"
 version = "0.1.0"
 dependencies = [
@@ -1060,6 +1073,7 @@ dependencies = [
 name = "manaline-deckstats"
 version = "0.1.0"
 dependencies = [
+ "manaline-carddb",
  "manaline-cardir",
  "manaline-cards",
  "manaline-engine",
@@ -1097,7 +1111,9 @@ dependencies = [
  "axum",
  "libc",
  "manaline-cards",
+ "manaline-cardsearch",
  "manaline-daemon",
+ "manaline-deckstats",
  "manaline-engine",
  "manaline-protocol",
  "rand 0.8.8",
@@ -1132,8 +1148,11 @@ dependencies = [
  "crossterm",
  "dirs",
  "futures",
+ "manaline-carddb",
  "manaline-cards",
+ "manaline-cardsearch",
  "manaline-daemon",
+ "manaline-deckstats",
  "manaline-engine",
  "manaline-protocol",
  "ratatui",

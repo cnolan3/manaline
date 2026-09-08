@@ -19,6 +19,10 @@ anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 dirs = "6"
+manaline-deckstats = { path = "../deckstats" }
+manaline-cardsearch = { path = "../cardsearch" }
+manaline-carddb = { path = "../carddb" }
+manaline-cards = { path = "../cards" }
 tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
 
 [dev-dependencies]

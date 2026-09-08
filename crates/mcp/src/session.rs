@@ -39,12 +39,17 @@ pub struct Session {
     names: Mutex<HashMap<ObjectId, String>>,
     /// The last legal actions handed out, so `take_action` can accept an id.
     last_legal: Mutex<Option<(Vec<LegalAction>, u64)>>,
+    /// Bumped by every tool call; a `wait_for_turn` loop whose generation is
+    /// behind has been abandoned by the client and must stop acting.
+    wait_gen: std::sync::atomic::AtomicU64,
     pub cards: engine::CardDb,
 }
 
 pub enum Wait {
     Ready(GameView),
     TimedOut,
+    /// A newer tool call arrived; this wait must not act any further.
+    Superseded,
 }
 
 impl Session {
@@ -80,6 +85,7 @@ impl Session {
             log: Mutex::new(Vec::new()),
             names: Mutex::new(HashMap::new()),
             last_legal: Mutex::new(None),
+            wait_gen: std::sync::atomic::AtomicU64::new(0),
             cards: cards::core(),
         });
         if let Some(state) = welcome.state {
@@ -218,8 +224,19 @@ impl Session {
         }
     }
 
-    /// Block until this seat must act or the game ends, or the timeout passes.
-    pub async fn wait_for_turn(&self, timeout: Duration) -> Wait {
+    /// Start a new tool call: any wait loop still running from an earlier
+    /// call (one the client gave up on) is told to stop. Returns this call's generation.
+    pub fn begin_call(&self) -> u64 {
+        self.wait_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
+    }
+
+    pub fn superseded(&self, generation: u64) -> bool {
+        self.wait_gen.load(std::sync::atomic::Ordering::SeqCst) != generation
+    }
+
+    /// Block until this seat must act or the game ends, the timeout passes,
+    /// or a newer tool call supersedes this one.
+    pub async fn wait_for_turn(&self, timeout: Duration, generation: u64) -> Wait {
         let me = self.me;
         let ready = |v: &Option<GameView>| match v {
             Some(v) => v.must_act.contains_key(&me) || v.outcome.is_some(),
@@ -230,6 +247,9 @@ impl Session {
         // Pushes are the fast path; a periodic poll of the daemon covers a
         // push that was lost or that carried nothing visible to this seat.
         loop {
+            if self.superseded(generation) {
+                return Wait::Superseded;
+            }
             if ready(&rx.borrow_and_update()) {
                 return Wait::Ready(self.view().expect("ready implies a view"));
             }
@@ -237,7 +257,7 @@ impl Session {
             if now >= deadline {
                 return Wait::TimedOut;
             }
-            let slice = (deadline - now).min(POLL_EVERY);
+            let slice = (deadline - now).min(POLL_EVERY).min(Duration::from_millis(500));
             match tokio::time::timeout(slice, rx.changed()).await {
                 Ok(Err(_)) => return Wait::TimedOut, // session gone
                 Ok(Ok(())) => {}
@@ -253,12 +273,24 @@ impl Session {
         Ok((actions, version, reason))
     }
 
-    /// Resolve an action id from the last `legal_actions` call.
-    pub fn action_by_id(&self, id: u32) -> Result<(Action, u64)> {
+    /// Resolve an action id from the last `legal_actions` call. The id is
+    /// bound to the state version that list came from: if the game has moved
+    /// on since, or the caller names a different version, it is refused
+    /// rather than remapped onto whatever id 0 means now.
+    pub fn action_by_id(&self, id: u32, expected_version: Option<u64>) -> Result<(Action, u64)> {
         let guard = self.last_legal.lock().unwrap();
         let (actions, version) = guard
             .as_ref()
             .ok_or_else(|| anyhow!("call get_legal_actions first to get action ids"))?;
+        if let Some(want) = expected_version {
+            if want != *version {
+                bail!("your action ids are from state version {version}, but you named version {want}; call get_legal_actions again");
+            }
+        }
+        let current = self.current_version();
+        if current > *version {
+            bail!("the game has moved on (your action list is from version {version}, the game is at {current}); call get_legal_actions or wait_for_turn again before choosing");
+        }
         let a = actions
             .iter()
             .find(|a| a.id == id)
