@@ -95,10 +95,14 @@ records a short tour with asciinema.
 
 Deck files: one `N Card Name` per line, optional `Deck` / `Sideboard` headers,
 `//` comments, `(SET) 123` printing suffixes tolerated. A deck name works
-anywhere a file path does: names are read from `decks/` at run time, so a file
-you drop in there is usable as `--deck <name>` straight away and shows up in
-`list decks`, on the same footing as the decks the repo ships with. Point
-`$MANALINE_DECKS_DIR` elsewhere to keep your decks outside the repo.
+anywhere a file path does. Names are looked up at run time, first match wins,
+in your own decks (`~/.local/share/manaline/decks`, where saved decks go),
+then the decks a package installed (`/usr/share/manaline/decks`, or wherever
+`MANALINE_DATA_DIR` pointed when the package was built), then this repo's
+`decks/` when running from a checkout. A file in any of them is usable as
+`--deck <name>` straight away and shows up in `list decks`; your copy of a
+shipped deck shadows it. `$MANALINE_DECKS_DIR` replaces the whole search path
+with one directory.
 
 Advanced pieces `play` is made of: `daemon`, `join`, `tui`, `bot`, `mcp`. Run
 any with `--help`.

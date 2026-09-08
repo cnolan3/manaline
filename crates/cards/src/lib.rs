@@ -2,8 +2,8 @@
 //! deck-file parser.
 //!
 //! Cards are embedded at build time; decks are read from disk at run time, so
-//! a deck file dropped into the decks directory is available immediately and
-//! on the same footing as the ones the repository ships with (see `decks_dir`).
+//! a deck file dropped into a decks directory is available immediately and
+//! on the same footing as the ones the project ships with (see `deck_dirs`).
 //!
 //! In M0 the "core" set is a hand-written table of basic lands and vanilla
 //! creatures, enough for random bots and a human to play a whole game. From
@@ -35,17 +35,35 @@ pub fn core() -> CardDb {
     CardDb::from_ir("core", core_ir()).expect("core card set is consistent")
 }
 
-/// Where deck files live: `$MANALINE_DECKS_DIR`, else the repository's
-/// `decks/` directory, located relative to this crate at compile time.
-///
-/// Nothing distinguishes one deck from another. The decks the repository
-/// ships with are simply the files that are already in this directory on a
-/// fresh clone; a deck you write into it is a deck like any other, usable
-/// anywhere a deck name is accepted.
-pub fn decks_dir() -> PathBuf {
-    if let Some(d) = std::env::var_os("MANALINE_DECKS_DIR") {
-        return PathBuf::from(d);
-    }
+// ----- decks -----
+//
+// Nothing distinguishes one deck from another: a deck is a `.txt` file in
+// one of a few directories, found by name. The decks the project ships are
+// simply the ones a package installs (or a fresh clone has), and a deck you
+// write is a deck like any other, usable anywhere a deck name is accepted.
+// An installed binary must find its decks with no configuration and no
+// rebuild, so the directories are known here rather than passed in.
+
+/// Where a person's own decks live: `~/.local/share/manaline/decks` (or the
+/// platform equivalent). This is the writable directory, where saving a deck
+/// puts it.
+pub fn user_decks_dir() -> PathBuf {
+    dirs::data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("manaline")
+        .join("decks")
+}
+
+/// Where a package installs the shipped decks. Fixed when the *package* is
+/// built — `MANALINE_DATA_DIR=/usr/share/manaline cargo build` — and the FHS
+/// location otherwise, so an installed binary needs nothing set at run time.
+fn system_decks_dir() -> PathBuf {
+    Path::new(option_env!("MANALINE_DATA_DIR").unwrap_or("/usr/share/manaline")).join("decks")
+}
+
+/// The `decks/` directory of the checkout this binary was built from, for
+/// running from source. On an installed machine it simply does not exist.
+fn repo_decks_dir() -> PathBuf {
     // <repo>/crates/cards -> <repo>/decks, without a `../..` in the middle:
     // this path is shown to people whenever a deck is named.
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -55,10 +73,29 @@ pub fn decks_dir() -> PathBuf {
         .join("decks")
 }
 
-/// Every deck in the decks directory, by name (the file stem), sorted.
-/// Empty if the directory is missing or unreadable.
-pub fn deck_names() -> Vec<String> {
-    let Ok(entries) = std::fs::read_dir(decks_dir()) else {
+/// The directories a deck name is looked up in, first match wins:
+///
+/// 1. `$MANALINE_DECKS_DIR` on its own, when set: that directory and no other.
+/// 2. Your own decks (`user_decks_dir`), so your edited copy of a shipped
+///    deck shadows the installed one.
+/// 3. The decks a package installed (`MANALINE_DATA_DIR`, else `/usr/share/manaline`).
+/// 4. The source checkout this binary was built from, if it still exists.
+pub fn deck_dirs() -> Vec<PathBuf> {
+    if let Some(d) = std::env::var_os("MANALINE_DECKS_DIR") {
+        return vec![PathBuf::from(d)];
+    }
+    vec![user_decks_dir(), system_decks_dir(), repo_decks_dir()]
+}
+
+/// `deck_dirs` as one line, for messages.
+pub fn deck_dirs_text() -> String {
+    deck_dirs().iter().map(|d| d.display().to_string()).collect::<Vec<_>>().join(", ")
+}
+
+/// Deck names (the stems of `.txt` files) in one directory, sorted. Empty if
+/// the directory is missing or unreadable.
+pub fn decks_in(dir: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
     let mut names: Vec<String> = entries
@@ -71,18 +108,27 @@ pub fn deck_names() -> Vec<String> {
     names
 }
 
-/// The file a deck name refers to, if that deck exists.
+/// Every deck reachable by name, each name once, sorted.
+pub fn deck_names() -> Vec<String> {
+    let mut names: Vec<String> = deck_dirs().iter().flat_map(|d| decks_in(d)).collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// The file a deck name refers to: the first directory in `deck_dirs` that
+/// has it.
 pub fn deck_path(name: &str) -> Option<PathBuf> {
     // A deck name is a plain file stem. Anything with a path in it is not a
     // name, so callers fall through to treating it as a path of their own.
     if name.is_empty() || name.contains('/') || name.contains('\\') || name.starts_with('.') {
         return None;
     }
-    let path = decks_dir().join(format!("{name}.txt"));
-    path.is_file().then_some(path)
+    let file = format!("{name}.txt");
+    deck_dirs().into_iter().map(|d| d.join(&file)).find(|p| p.is_file())
 }
 
-/// The text of a deck by name, or `None` if the decks directory has no such deck.
+/// The text of a deck by name, or `None` if no directory has such a deck.
 pub fn deck_text(name: &str) -> Option<String> {
     std::fs::read_to_string(deck_path(name)?).ok()
 }
@@ -131,22 +177,40 @@ mod tests {
     fn core_loads_and_decks_parse() {
         let db = core();
         assert!(db.len() > 70, "{}", db.len());
-        let names = deck_names();
-        // Guards against a decks directory that resolved to nothing, which
-        // would otherwise make the loop below pass vacuously.
+        // The repository's own decks, deliberately not `deck_names()`: that
+        // merges in whatever is in the developer's home directory, and a deck
+        // they are writing there is not this repository's business.
+        let dir = repo_decks_dir();
+        let names = decks_in(&dir);
+        // Guards against a directory that resolved to nothing, which would
+        // otherwise make the loop below pass vacuously.
         assert!(
             names.contains(&"green".to_string()),
             "no starter decks in {}: found {names:?}",
-            decks_dir().display()
+            dir.display()
         );
         // Every deck in the directory must parse and name only real cards.
         // Whether one is *legal* in a given format is `deck check`'s business,
         // and CI runs it over the decks a fresh clone ships with; a deck you
         // are still writing should not fail the test suite for being unfinished.
         for name in &names {
-            let text = deck_text(name).unwrap_or_else(|| panic!("{name} is listed but could not be read"));
+            let text = std::fs::read_to_string(dir.join(format!("{name}.txt"))).unwrap();
             parse_decklist(&text, &db).unwrap_or_else(|e| panic!("{name}: {e}"));
         }
+    }
+
+    #[test]
+    fn deck_lookup_is_layered() {
+        // Something in the search path resolves the starter decks.
+        assert!(deck_path("green").is_some());
+        if std::env::var_os("MANALINE_DECKS_DIR").is_some() {
+            return; // the override replaces the search path wholesale; nothing below applies
+        }
+        // The search path has the shape the docs promise: yours, the
+        // package's, the checkout's, in that order.
+        let dirs = deck_dirs();
+        assert_eq!(dirs, [user_decks_dir(), system_decks_dir(), repo_decks_dir()]);
+        assert!(system_decks_dir().ends_with("decks"), "{:?}", system_decks_dir());
     }
 
     #[test]

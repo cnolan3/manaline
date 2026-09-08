@@ -1035,6 +1035,7 @@ dependencies = [
 name = "manaline-cards"
 version = "0.1.0"
 dependencies = [
+ "dirs",
  "include_dir",
  "manaline-cardir",
  "manaline-deckstats",

@@ -83,10 +83,6 @@ pub fn replay_path(game_id: &str) -> PathBuf {
     data_dir().join("games").join(format!("{game_id}.jsonl"))
 }
 
-pub fn decks_dir() -> PathBuf {
-    data_dir().join("decks")
-}
-
 #[cfg(unix)]
 fn uid() -> u32 {
     // SAFETY: getuid has no preconditions and cannot fail.

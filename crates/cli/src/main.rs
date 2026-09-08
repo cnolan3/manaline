@@ -157,7 +157,7 @@ fn list(what: ListWhat) -> Result<()> {
         ListWhat::Decks => {
             let names = cards::deck_names();
             if names.is_empty() {
-                println!("no decks in {}", cards::decks_dir().display());
+                println!("no decks in any of: {}", cards::deck_dirs_text());
             }
             for name in names {
                 println!("{name}");
@@ -205,7 +205,7 @@ fn sim(args: SimArgs) -> Result<()> {
     let deck_specs: Vec<String> = if args.decks.is_empty() {
         let names = cards::deck_names();
         if names.is_empty() {
-            bail!("no decks in {}; pass --deck", cards::decks_dir().display());
+            bail!("no decks in any of: {}; pass --deck", cards::deck_dirs_text());
         }
         names
     } else {

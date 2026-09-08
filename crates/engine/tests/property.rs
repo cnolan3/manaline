@@ -24,7 +24,7 @@ fn config(db: &Arc<engine::CardDb>, seats: usize) -> GameConfig {
     let players = (0..seats)
         .map(|i| {
             let name = TEST_DECKS[i % TEST_DECKS.len()];
-            let text = cards::deck_text(name).unwrap_or_else(|| panic!("no {name} deck in {}", cards::decks_dir().display()));
+            let text = cards::deck_text(name).unwrap_or_else(|| panic!("no {name} deck in any of: {}", cards::deck_dirs_text()));
             PlayerSetup {
                 name: format!("Bot{i}"),
                 deck: cards::parse_decklist(&text, db).unwrap(),

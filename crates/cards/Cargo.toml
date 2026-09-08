@@ -14,3 +14,4 @@ include_dir = "0.7.4"
 manaline-cardir = { version = "0.1.0", path = "../cardir" }
 manaline-engine = { path = "../engine" }
 manaline-deckstats = { path = "../deckstats" }
+dirs = "6"

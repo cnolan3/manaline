@@ -546,7 +546,7 @@ impl McpServer {
                 if stem.is_empty() || stem.contains('/') || stem.contains('\\') || stem.starts_with('.') {
                     return Ok(tool_error("give a plain deck name (no slashes) or an explicit path"));
                 }
-                protocol::endpoint::data_dir().join("decks").join(format!("{stem}.txt"))
+                cards::user_decks_dir().join(format!("{stem}.txt"))
             }
             (None, None) => return Ok(tool_error("pass a name or a path")),
         };
