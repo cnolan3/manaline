@@ -116,16 +116,30 @@ pub fn deck_names() -> Vec<String> {
     names
 }
 
+/// The file name a deck name maps to, or `None` if it is not a plain name.
+/// A trailing `.txt` is tolerated, so `green` and `green.txt` are the same
+/// deck. Anything with a path in it is not a name, so callers fall through
+/// to treating it as a path of their own.
+fn deck_file_name(name: &str) -> Option<String> {
+    let stem = name.trim().trim_end_matches(".txt");
+    if stem.is_empty() || stem.contains('/') || stem.contains('\\') || stem.starts_with('.') {
+        return None;
+    }
+    Some(format!("{stem}.txt"))
+}
+
 /// The file a deck name refers to: the first directory in `deck_dirs` that
 /// has it.
 pub fn deck_path(name: &str) -> Option<PathBuf> {
-    // A deck name is a plain file stem. Anything with a path in it is not a
-    // name, so callers fall through to treating it as a path of their own.
-    if name.is_empty() || name.contains('/') || name.contains('\\') || name.starts_with('.') {
-        return None;
-    }
-    let file = format!("{name}.txt");
+    let file = deck_file_name(name)?;
     deck_dirs().into_iter().map(|d| d.join(&file)).find(|p| p.is_file())
+}
+
+/// Where a deck of this name is *written*: your own copy in `user_decks_dir`,
+/// whether or not it exists yet. Saving a shipped deck here makes it yours;
+/// the installed one is left alone and yours shadows it from then on.
+pub fn user_deck_path(name: &str) -> Option<PathBuf> {
+    Some(user_decks_dir().join(deck_file_name(name)?))
 }
 
 /// The text of a deck by name, or `None` if no directory has such a deck.
@@ -216,10 +230,14 @@ mod tests {
     #[test]
     fn deck_names_are_not_paths() {
         assert!(deck_text("green").is_some());
-        assert!(deck_path("green").is_some());
-        for bad in ["", ".", "..", "../Cargo", "a/b", "a\\b", ".hidden"] {
+        assert_eq!(deck_path("green.txt"), deck_path("green"), "a trailing .txt names the same deck");
+        for bad in ["", ".", "..", "../Cargo", "a/b", "a\\b", ".hidden", ".txt"] {
             assert!(deck_path(bad).is_none(), "{bad:?} should not resolve to a deck");
+            assert!(user_deck_path(bad).is_none(), "{bad:?} should not be a place to write");
         }
+        // Writing by name always lands in your own directory, existing or not.
+        assert_eq!(user_deck_path("brand-new"), Some(user_decks_dir().join("brand-new.txt")));
+        assert_eq!(user_deck_path("green.txt"), Some(user_decks_dir().join("green.txt")));
     }
 
     #[test]

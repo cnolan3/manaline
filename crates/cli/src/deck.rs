@@ -19,22 +19,25 @@ pub enum DeckCommand {
         #[arg(long, default_value = "cube")]
         format: String,
     },
-    /// Write a commented deck skeleton to `<name>.txt` (or `--out`).
+    /// Start a new deck as a commented skeleton in your decks directory (or at `--out`).
     New {
+        /// A deck name; it becomes `<name>.txt` in your decks directory.
         name: String,
         #[arg(long, default_value = "cube")]
         format: String,
-        /// Where to write; defaults to `<name>.txt` in the current directory.
+        /// Write to this file instead of your decks directory.
         #[arg(long)]
         out: Option<PathBuf>,
-        /// Open the deckbuilder on the new file straight away.
+        /// Open the deckbuilder on the new deck straight away.
         #[arg(long)]
         edit: bool,
     },
-    /// Open the deckbuilder on a deck file (three panes: search, deck, card/stats).
+    /// Open the deckbuilder (three panes: search, deck, card/stats) on a deck.
     Edit {
-        /// Deck file path; created if it does not exist.
-        deck: PathBuf,
+        /// A deck name or a file path. By name you always edit your own copy in
+        /// your decks directory: a shipped deck is copied there when you save,
+        /// and a name nobody has yet starts from a skeleton.
+        deck: String,
         #[arg(long, default_value = "cube")]
         format: String,
         /// Colour theme: default, mono, or high-contrast.
@@ -103,14 +106,47 @@ fn load_cache() -> Option<Known> {
     carddb::Cache::load().ok().flatten().map(Known)
 }
 
-/// A deck as `(text, label)`: a name in the decks directory, else a file path.
+/// A deck as `(text, label)`, the label being the file it came from.
 fn read_deck(spec: &str) -> Result<(String, String)> {
-    if let Some(path) = cards::deck_path(spec) {
-        let text = std::fs::read_to_string(&path).with_context(|| format!("reading deck {}", path.display()))?;
-        return Ok((text, path.display().to_string()));
+    let (text, path) = super::locate_deck(spec)?;
+    Ok((text, path.display().to_string()))
+}
+
+/// What `deck edit` opens for `spec`: the file it saves to, the text it
+/// starts from, and a note for the person if the two are not the same file.
+///
+/// An existing file path is edited in place. A name always saves to your own
+/// copy (`cards::user_deck_path`), starting from the deck of that name
+/// wherever it currently is, or from a skeleton if there is none. Nothing is
+/// written until you save, so opening a shipped deck and quitting leaves no
+/// copy behind.
+fn edit_target(spec: &str, format_name: &str, f: &Format) -> Result<(PathBuf, String, Option<String>)> {
+    let as_path = PathBuf::from(spec);
+    if as_path.is_file() {
+        let text = std::fs::read_to_string(&as_path).with_context(|| format!("reading {}", as_path.display()))?;
+        return Ok((as_path, text, None));
     }
-    let text = std::fs::read_to_string(spec).with_context(|| format!("reading deck {spec}"))?;
-    Ok((text, spec.to_string()))
+    let stem = spec.trim().trim_end_matches(".txt");
+    let Some(mine) = cards::user_deck_path(spec) else {
+        // A path that does not exist yet: it is created on save.
+        let text = skeleton(as_path.file_stem().and_then(|s| s.to_str()).unwrap_or("deck"), format_name, f);
+        return Ok((as_path, text, None));
+    };
+    match cards::deck_path(spec) {
+        Some(p) if p == mine => {
+            let text = std::fs::read_to_string(&p).with_context(|| format!("reading {}", p.display()))?;
+            Ok((mine, text, None))
+        }
+        Some(p) => {
+            let text = std::fs::read_to_string(&p).with_context(|| format!("reading {}", p.display()))?;
+            let note = format!("editing your own copy of {}: it is saved to {}", p.display(), mine.display());
+            Ok((mine, text, Some(note)))
+        }
+        None => {
+            let note = format!("new deck {stem:?}: it is saved to {}", mine.display());
+            Ok((mine, skeleton(stem, format_name, f), Some(note)))
+        }
+    }
 }
 
 pub fn deck(cmd: DeckCommand) -> Result<()> {
@@ -136,24 +172,42 @@ pub fn deck(cmd: DeckCommand) -> Result<()> {
         }
         DeckCommand::New { name, format, out, edit } => {
             let f = super::load_format(Some(&format), 2)?;
-            let path = out.unwrap_or_else(|| PathBuf::from(format!("{name}.txt")));
+            let path = match out {
+                Some(p) => p,
+                None => {
+                    let Some(p) = cards::user_deck_path(&name) else {
+                        bail!("{name:?} is not a deck name; give a plain name, or --out for a file path");
+                    };
+                    if let Some(existing) = cards::deck_path(&name) {
+                        bail!(
+                            "a deck named {name:?} already exists at {}; `manaline deck edit {name}` opens it",
+                            existing.display()
+                        );
+                    }
+                    p
+                }
+            };
             if path.exists() {
                 bail!("{} already exists", path.display());
             }
-            std::fs::write(&path, skeleton(&name, &format, &f))?;
+            if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+                std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+            }
+            let text = skeleton(name.trim().trim_end_matches(".txt"), &format, &f);
+            std::fs::write(&path, &text).with_context(|| format!("writing {}", path.display()))?;
             println!("wrote {}", path.display());
             if edit {
-                return edit_deck(path, f, None);
+                return edit_deck(path, text, f, None);
             }
             Ok(())
         }
         DeckCommand::Edit { deck, format, theme } => {
             let f = super::load_format(Some(&format), 2)?;
-            if !deck.exists() {
-                let name = deck.file_stem().and_then(|s| s.to_str()).unwrap_or("deck").to_string();
-                std::fs::write(&deck, skeleton(&name, &format, &f))?;
+            let (path, text, note) = edit_target(&deck, &format, &f)?;
+            if let Some(note) = note {
+                println!("{note}");
             }
-            edit_deck(deck, f, tui::theme_flag(theme.as_deref())?)
+            edit_deck(path, text, f, tui::theme_flag(theme.as_deref())?)
         }
         DeckCommand::Stats { deck, format, hands, seed } => {
             let f = super::load_format(Some(&format), 2)?;
@@ -180,13 +234,13 @@ pub fn deck(cmd: DeckCommand) -> Result<()> {
     }
 }
 
-fn edit_deck(path: PathBuf, format: Format, theme: Option<String>) -> Result<()> {
+/// Open the deckbuilder on `text`, saving to `path` (which need not exist yet).
+fn edit_deck(path: PathBuf, text: String, format: Format, theme: Option<String>) -> Result<()> {
     let mut settings = tui::settings::Settings::load();
     if let Some(t) = theme {
         settings.theme = t;
     }
     let theme = tui::theme::Theme::named(&settings.theme).unwrap_or_default();
-    let text = std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
     let db = Arc::new(cards::core());
     let known = carddb::Cache::load().ok().flatten().map(Arc::new);
     let index = Arc::new(match &known {
@@ -244,7 +298,7 @@ fn skeleton(name: &str, format_name: &str, f: &Format) -> String {
     format!(
         "// {name} — a {} deck ({size}{}{copies}).\n\
          // One card per line as `N Card Name`; `//` starts a comment.\n\
-         // Check it with `manaline deck check {name}.txt --format {format_name}`.\n\
+         // Check it with `manaline deck check {name} --format {format_name}`.\n\
          Deck\n\
          // 17 Forest\n\
          // 4 Grizzly Bears\n\
@@ -378,5 +432,52 @@ pub fn ingest(cmd: IngestCommand) -> Result<()> {
                 std::process::exit(1)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod edit_target_tests {
+    use super::*;
+
+    fn cube() -> Format {
+        Format::cube()
+    }
+
+    #[test]
+    fn a_name_always_saves_to_your_own_copy() {
+        // A shipped deck: starts from its text, saves to your copy. Whether a
+        // note is shown depends only on whether those are already the same file.
+        let (path, text, note) = edit_target("green", "cube", &cube()).unwrap();
+        assert_eq!(path, cards::user_deck_path("green").unwrap());
+        assert_eq!(text, cards::deck_text("green").unwrap());
+        assert_eq!(note.is_some(), cards::deck_path("green") != Some(path.clone()));
+        // `.txt` names the same deck and the same destination.
+        let (p2, t2, _) = edit_target("green.txt", "cube", &cube()).unwrap();
+        assert_eq!((p2, t2), (path, text));
+    }
+
+    #[test]
+    fn a_new_name_starts_from_a_skeleton() {
+        let name = "zz-no-such-deck-for-this-test";
+        assert!(cards::deck_path(name).is_none(), "test needs a name nobody has");
+        let (path, text, note) = edit_target(name, "cube", &cube()).unwrap();
+        assert_eq!(path, cards::user_deck_path(name).unwrap());
+        assert!(text.contains("Deck\n"), "{text}");
+        assert!(text.contains(name), "the skeleton names the deck: {text}");
+        assert!(note.unwrap().contains(&path.display().to_string()));
+        assert!(!path.exists(), "nothing is written until you save");
+    }
+
+    #[test]
+    fn an_existing_file_is_edited_in_place() {
+        let dir = std::env::temp_dir().join(format!("manaline-edit-target-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("mine.txt");
+        std::fs::write(&file, "Deck\n4 Grizzly Bears\n").unwrap();
+        let (path, text, note) = edit_target(file.to_str().unwrap(), "cube", &cube()).unwrap();
+        assert_eq!(path, file);
+        assert_eq!(text, "Deck\n4 Grizzly Bears\n");
+        assert!(note.is_none(), "an explicit file needs no explanation");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

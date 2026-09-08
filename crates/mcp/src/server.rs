@@ -541,13 +541,10 @@ impl McpServer {
         }
         let path = match (p.path, p.name) {
             (Some(path), _) => std::path::PathBuf::from(path),
-            (None, Some(name)) => {
-                let stem = name.trim().trim_end_matches(".txt");
-                if stem.is_empty() || stem.contains('/') || stem.contains('\\') || stem.starts_with('.') {
-                    return Ok(tool_error("give a plain deck name (no slashes) or an explicit path"));
-                }
-                cards::user_decks_dir().join(format!("{stem}.txt"))
-            }
+            (None, Some(name)) => match cards::user_deck_path(&name) {
+                Some(p) => p,
+                None => return Ok(tool_error("give a plain deck name (no slashes) or an explicit path")),
+            },
             (None, None) => return Ok(tool_error("pass a name or a path")),
         };
         if path.exists() && !p.overwrite.unwrap_or(false) {

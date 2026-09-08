@@ -135,12 +135,28 @@ pub fn runtime() -> Result<tokio::runtime::Runtime> {
     Ok(tokio::runtime::Builder::new_multi_thread().enable_all().build()?)
 }
 
-/// A deck as text: a built-in name or a file path.
-pub fn deck_text(spec: &str) -> Result<String> {
-    match cards::deck_text(spec) {
-        Some(t) => Ok(t),
-        None => std::fs::read_to_string(spec).with_context(|| format!("reading deck {spec}")),
+/// A deck as given on the command line, as its text and the file it came
+/// from. An existing file path wins; otherwise the argument is a deck name
+/// looked up across the deck directories. The one rule every command uses.
+pub fn locate_deck(spec: &str) -> Result<(String, PathBuf)> {
+    let as_path = PathBuf::from(spec);
+    if as_path.is_file() {
+        let text = std::fs::read_to_string(&as_path).with_context(|| format!("reading deck {}", as_path.display()))?;
+        return Ok((text, as_path));
     }
+    if let Some(p) = cards::deck_path(spec) {
+        let text = std::fs::read_to_string(&p).with_context(|| format!("reading deck {}", p.display()))?;
+        return Ok((text, p));
+    }
+    bail!(
+        "no deck file at {spec} and no deck named {spec:?} in any of: {}",
+        cards::deck_dirs_text()
+    )
+}
+
+/// A deck as text: a file path or a deck name (see `locate_deck`).
+pub fn deck_text(spec: &str) -> Result<String> {
+    Ok(locate_deck(spec)?.0)
 }
 
 fn list(what: ListWhat) -> Result<()> {

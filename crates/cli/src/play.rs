@@ -249,13 +249,16 @@ fn default_opponent_deck(mine: &str) -> String {
         .unwrap_or_else(|| "red".into())
 }
 
-/// A deck given as a file path (not a built-in name) can be edited in place.
+/// Where the lobby's deckbuilder saves this seat's deck: a file path as
+/// given is edited in place; a deck named by name saves to your own copy in
+/// the user decks directory (created on save), so a shipped deck is never
+/// edited where it was installed.
 pub fn deck_path_of(spec: &str) -> Option<std::path::PathBuf> {
-    if cards::deck_text(spec).is_some() {
-        return None;
-    }
     let p = std::path::PathBuf::from(spec);
-    p.exists().then_some(p)
+    if p.is_file() {
+        return Some(p);
+    }
+    cards::user_deck_path(spec)
 }
 
 fn check_deck(decklist: &str, format: &Format, db: &engine::CardDb, label: &str) -> Result<()> {

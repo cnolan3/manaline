@@ -73,12 +73,13 @@ cargo run -- list formats | decks | cards
 
 cargo run -- deck check my-deck.txt --format cube   # per-card reasons; exit 1 if not legal
 cargo run -- deck stats rg-stompy                   # curve, colour sources, sample hands
-cargo run -- deck new my-deck --format cube         # writes a commented skeleton
+cargo run -- deck new my-deck --format cube         # a new deck in your decks directory
 cargo run -- cards update                           # fetch Scryfall's Oracle Cards into the cache
 cargo run -- cards show "Elvish Archdruid"          # rules text, printing, legality
 cargo run -- ingest roundtrip                       # every card renders back to its Oracle text
 
-cargo run -- deck edit my-deck.txt                  # the deckbuilder (creates the file if needed)
+cargo run -- deck edit my-deck                      # the deckbuilder, by name or file path
+cargo run -- deck edit green                        # tweak a shipped deck: saves your own copy
 cargo run -- cards search 't:creature c:r mv<=2'    # Scryfall-style search; --all includes unimplemented cards
 cargo run -- replay <file.jsonl> --step             # step through a recorded game in the client
 cargo run -- play --deck green --vs random --theme mono
@@ -101,7 +102,11 @@ then the decks a package installed (`/usr/share/manaline/decks`, or wherever
 `MANALINE_DATA_DIR` pointed when the package was built), then this repo's
 `decks/` when running from a checkout. A file in any of them is usable as
 `--deck <name>` straight away and shows up in `list decks`; your copy of a
-shipped deck shadows it. `$MANALINE_DECKS_DIR` replaces the whole search path
+shipped deck shadows it. The deckbuilder writes to your own directory: `deck
+new` creates there, and editing a deck by name — from the command line or
+with `d` in the lobby — saves your own copy, so a shipped deck is never
+changed where it was installed. An existing file path always means that
+file, edited in place. `$MANALINE_DECKS_DIR` replaces the whole search path
 with one directory.
 
 Advanced pieces `play` is made of: `daemon`, `join`, `tui`, `bot`, `mcp`. Run

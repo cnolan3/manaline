@@ -344,6 +344,10 @@ impl Editor {
     pub fn save(&mut self) -> Result<String, String> {
         let text = self.text();
         if let Some(p) = &self.path {
+            // A deck saved by name may be the first thing in the user's decks directory.
+            if let Some(dir) = p.parent().filter(|d| !d.as_os_str().is_empty()) {
+                std::fs::create_dir_all(dir).map_err(|e| format!("could not create {}: {e}", dir.display()))?;
+            }
             std::fs::write(p, &text).map_err(|e| format!("could not write {}: {e}", p.display()))?;
             self.disk_mtime = mtime(p);
             self.disk_changed = false;
