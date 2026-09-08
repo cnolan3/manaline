@@ -162,7 +162,7 @@ fn check_invariants(game: &Game, seats: usize) {
         }
         // The view must serialize (it is what goes over the wire). Checked on
         // a sample of states; it is the slowest invariant.
-        if game.state_version() % 25 == 0 {
+        if game.state_version().is_multiple_of(25) {
             let json = serde_json::to_string(&view).unwrap();
             let back: engine::GameView = serde_json::from_str(&json).unwrap();
             assert_eq!(back, view);
