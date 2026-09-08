@@ -37,7 +37,7 @@ async fn joins_and_plays_the_opening_through_the_protocol() {
     let bot = tokio::spawn(async move {
         let mut c = protocol::Client::connect(&bot_endpoint).await.unwrap();
         c.hello(&bot_token, Some("Bot")).await.unwrap();
-        c.set_deck(cards::deck_text("red").unwrap()).await.unwrap().unwrap();
+        c.set_deck(&cards::deck_text("red").unwrap()).await.unwrap().unwrap();
         c.ready().await.unwrap();
         c
     });
@@ -46,7 +46,7 @@ async fn joins_and_plays_the_opening_through_the_protocol() {
         endpoint,
         token: info.seat_tokens[0].clone(),
         name: "Connor".into(),
-        decklist: Some(cards::deck_text("green").unwrap().to_string()),
+        decklist: Some(cards::deck_text("green").unwrap()),
         hints: vec!["hello there".into()],
         deck_path: None,
         theme: None,

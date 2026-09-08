@@ -10,6 +10,11 @@ use std::sync::Arc;
 
 const MAX_ACTIONS: usize = 20_000;
 
+/// Named explicitly rather than taken from the decks directory: a property
+/// test must play the same games on every machine, and the decks directory
+/// also holds whatever decks the developer is working on.
+const TEST_DECKS: [&str; 4] = ["green", "red", "blue", "white"];
+
 fn config(db: &Arc<engine::CardDb>, seats: usize) -> GameConfig {
     let format = if seats == 2 {
         Format::cube()
@@ -18,10 +23,11 @@ fn config(db: &Arc<engine::CardDb>, seats: usize) -> GameConfig {
     };
     let players = (0..seats)
         .map(|i| {
-            let (_, text) = cards::DECKS[i % cards::DECKS.len()];
+            let name = TEST_DECKS[i % TEST_DECKS.len()];
+            let text = cards::deck_text(name).unwrap_or_else(|| panic!("no {name} deck in {}", cards::decks_dir().display()));
             PlayerSetup {
                 name: format!("Bot{i}"),
-                deck: cards::parse_decklist(text, db).unwrap(),
+                deck: cards::parse_decklist(&text, db).unwrap(),
             }
         })
         .collect();

@@ -497,8 +497,8 @@ fn cleanup_discards_down_to_hand_size() {
 
 fn cube_game(starting: Seat) -> Game {
     let db = db();
-    let green = cards::parse_decklist(cards::deck_text("green").unwrap(), &db).unwrap();
-    let red = cards::parse_decklist(cards::deck_text("red").unwrap(), &db).unwrap();
+    let green = cards::parse_decklist(&cards::deck_text("green").unwrap(), &db).unwrap();
+    let red = cards::parse_decklist(&cards::deck_text("red").unwrap(), &db).unwrap();
     let config = GameConfig {
         format: Format::cube(),
         players: vec![
@@ -613,7 +613,7 @@ fn illegal_and_out_of_turn_actions_are_rejected() {
 #[test]
 fn illegal_decks_and_player_counts_are_refused() {
     let db = db();
-    let green = cards::parse_decklist(cards::deck_text("green").unwrap(), &db).unwrap();
+    let green = cards::parse_decklist(&cards::deck_text("green").unwrap(), &db).unwrap();
     let short = green[..30].to_vec();
     let players = |a: Vec<engine::CardId>, b: Vec<engine::CardId>| {
         vec![PlayerSetup { name: "a".into(), deck: a }, PlayerSetup { name: "b".into(), deck: b }]

@@ -103,9 +103,11 @@ fn load_cache() -> Option<Known> {
     carddb::Cache::load().ok().flatten().map(Known)
 }
 
+/// A deck as `(text, label)`: a name in the decks directory, else a file path.
 fn read_deck(spec: &str) -> Result<(String, String)> {
-    if let Some(t) = cards::deck_text(spec) {
-        return Ok((t.to_string(), format!("built-in deck {spec}")));
+    if let Some(path) = cards::deck_path(spec) {
+        let text = std::fs::read_to_string(&path).with_context(|| format!("reading deck {}", path.display()))?;
+        return Ok((text, path.display().to_string()));
     }
     let text = std::fs::read_to_string(spec).with_context(|| format!("reading deck {spec}"))?;
     Ok((text, spec.to_string()))

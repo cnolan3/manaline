@@ -8,9 +8,9 @@
 # Local decks written at the repo root.
 /*.txt
 
-# Everything in decks/ except the starter decks that ship with the binary.
-# This list must match `DECKS` in crates/cards/src/lib.rs, which embeds each
-# of these with include_str! — a deck removed here fails the build.
+# Everything in decks/ except the starter decks. The code treats every deck
+# in that directory alike and reads them at run time, so this list is the
+# only thing that makes a deck a "starter" one: it is what a fresh clone has.
 /decks/*
 !/decks/white.txt
 !/decks/blue.txt

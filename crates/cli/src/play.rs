@@ -242,12 +242,11 @@ fn whoami() -> String {
 }
 
 fn default_opponent_deck(mine: &str) -> String {
-    for (name, _) in cards::DECKS.iter().rev() {
-        if *name != mine {
-            return name.to_string();
-        }
-    }
-    "red".into()
+    cards::deck_names()
+        .into_iter()
+        .rev()
+        .find(|name| name != mine)
+        .unwrap_or_else(|| "red".into())
 }
 
 /// A deck given as a file path (not a built-in name) can be edited in place.

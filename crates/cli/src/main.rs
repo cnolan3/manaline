@@ -138,7 +138,7 @@ pub fn runtime() -> Result<tokio::runtime::Runtime> {
 /// A deck as text: a built-in name or a file path.
 pub fn deck_text(spec: &str) -> Result<String> {
     match cards::deck_text(spec) {
-        Some(t) => Ok(t.to_string()),
+        Some(t) => Ok(t),
         None => std::fs::read_to_string(spec).with_context(|| format!("reading deck {spec}")),
     }
 }
@@ -155,7 +155,11 @@ fn list(what: ListWhat) -> Result<()> {
             }
         }
         ListWhat::Decks => {
-            for (name, _) in cards::DECKS {
+            let names = cards::deck_names();
+            if names.is_empty() {
+                println!("no decks in {}", cards::decks_dir().display());
+            }
+            for name in names {
                 println!("{name}");
             }
         }
@@ -199,7 +203,11 @@ fn sim(args: SimArgs) -> Result<()> {
     let db = Arc::new(cards::core());
     let format = load_format(args.format.as_deref(), args.seats)?;
     let deck_specs: Vec<String> = if args.decks.is_empty() {
-        cards::DECKS.iter().map(|(n, _)| n.to_string()).collect()
+        let names = cards::deck_names();
+        if names.is_empty() {
+            bail!("no decks in {}; pass --deck", cards::decks_dir().display());
+        }
+        names
     } else {
         args.decks.clone()
     };

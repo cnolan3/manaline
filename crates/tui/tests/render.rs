@@ -279,7 +279,7 @@ fn block_and_damage_pickers() {
 #[test]
 fn mulligan_menu_and_log_lines() {
     let db = Arc::new(cards::core());
-    let green = cards::parse_decklist(cards::deck_text("green").unwrap(), &db).unwrap();
+    let green = cards::parse_decklist(&cards::deck_text("green").unwrap(), &db).unwrap();
     let config = engine::GameConfig {
         format: engine::Format::cube(),
         players: vec![
@@ -390,7 +390,7 @@ fn minor_priority_moments_auto_pass_and_main_phases_wait() {
 #[test]
 fn bottoming_after_two_mulligans_uses_a_hand_picker() {
     let db = Arc::new(cards::core());
-    let green = cards::parse_decklist(cards::deck_text("green").unwrap(), &db).unwrap();
+    let green = cards::parse_decklist(&cards::deck_text("green").unwrap(), &db).unwrap();
     let config = engine::GameConfig {
         format: engine::Format::cube(),
         players: vec![
@@ -544,7 +544,7 @@ fn the_lobby_opens_the_deckbuilder_and_resubmits_on_save() {
     );
     app.deck_source = Some(tui::app::DeckSource {
         path: None,
-        text: cards::deck_text("green").unwrap().into(),
+        text: cards::deck_text("green").unwrap(),
         format: engine::Format::cube(),
     });
     assert!(app.footer().contains("[d] edit your deck"));
@@ -621,8 +621,8 @@ fn the_mono_theme_uses_no_colour_and_the_menu_cycles_themes() {
 #[test]
 fn replay_stepping_moves_through_a_game() {
     let db = Arc::new(cards::core());
-    let green = cards::parse_decklist(cards::deck_text("green").unwrap(), &db).unwrap();
-    let red = cards::parse_decklist(cards::deck_text("red").unwrap(), &db).unwrap();
+    let green = cards::parse_decklist(&cards::deck_text("green").unwrap(), &db).unwrap();
+    let red = cards::parse_decklist(&cards::deck_text("red").unwrap(), &db).unwrap();
     let config = engine::GameConfig {
         format: engine::Format::cube(),
         players: vec![

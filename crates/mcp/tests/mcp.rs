@@ -116,7 +116,7 @@ async fn an_agent_plays_a_whole_game_through_the_tools() {
         endpoint: r.endpoint.clone(),
         token: r.tokens[1].clone(),
         name: "Claude".into(),
-        decklist: Some(cards::deck_text("red").unwrap().into()),
+        decklist: Some(cards::deck_text("red").unwrap()),
     })
     .await
     .unwrap();
@@ -137,7 +137,7 @@ async fn an_agent_plays_a_whole_game_through_the_tools() {
     let mut human = Client::connect(&r.endpoint).await.unwrap();
     human.hello(&r.tokens[0], Some("Connor")).await.unwrap();
     human.subscribe().await.unwrap();
-    human.set_deck(cards::deck_text("green").unwrap()).await.unwrap().unwrap();
+    human.set_deck(&cards::deck_text("green").unwrap()).await.unwrap().unwrap();
     human.ready().await.unwrap();
     let mut status = r.handle.status();
     status.wait_for(|s| !s.must_act.is_empty()).await.unwrap();
@@ -261,13 +261,13 @@ async fn stale_ids_and_wrong_turns_come_back_as_tool_errors() {
         endpoint: r.endpoint.clone(),
         token: r.tokens[1].clone(),
         name: "Agent".into(),
-        decklist: Some(cards::deck_text("blue").unwrap().into()),
+        decklist: Some(cards::deck_text("blue").unwrap()),
     })
     .await
     .unwrap();
     let mut human = Client::connect(&r.endpoint).await.unwrap();
     human.hello(&r.tokens[0], Some("Connor")).await.unwrap();
-    human.set_deck(cards::deck_text("green").unwrap()).await.unwrap().unwrap();
+    human.set_deck(&cards::deck_text("green").unwrap()).await.unwrap().unwrap();
     human.ready().await.unwrap();
     let mut status = r.handle.status();
     status.wait_for(|s| !s.must_act.is_empty()).await.unwrap();
@@ -519,13 +519,13 @@ async fn action_ids_are_bound_to_their_state_version() {
         endpoint: r.endpoint.clone(),
         token: r.tokens[1].clone(),
         name: "Agent".into(),
-        decklist: Some(cards::deck_text("blue").unwrap().into()),
+        decklist: Some(cards::deck_text("blue").unwrap()),
     })
     .await
     .unwrap();
     let mut human = Client::connect(&r.endpoint).await.unwrap();
     human.hello(&r.tokens[0], Some("Connor")).await.unwrap();
-    human.set_deck(cards::deck_text("green").unwrap()).await.unwrap().unwrap();
+    human.set_deck(&cards::deck_text("green").unwrap()).await.unwrap().unwrap();
     human.ready().await.unwrap();
     let mut status = r.handle.status();
     status.wait_for(|s| !s.must_act.is_empty()).await.unwrap();
@@ -585,7 +585,7 @@ async fn a_newer_call_supersedes_an_abandoned_wait() {
         endpoint: r.endpoint.clone(),
         token: r.tokens[1].clone(),
         name: "Agent".into(),
-        decklist: Some(cards::deck_text("blue").unwrap().into()),
+        decklist: Some(cards::deck_text("blue").unwrap()),
     })
     .await
     .unwrap();
@@ -647,7 +647,7 @@ async fn search_and_deck_stats_tools_work_before_the_game_starts() {
 
     let res = server
         .deck_stats(Parameters(DeckStatsParams {
-            decklist: cards::deck_text("green").unwrap().into(),
+            decklist: cards::deck_text("green").unwrap(),
         }))
         .await
         .unwrap();

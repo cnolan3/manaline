@@ -90,7 +90,7 @@ fn check_classifies_each_line() {
 #[test]
 fn stats_and_sample_hands() {
     let db = Arc::new(cards::core());
-    let list = parse(cards::deck_text("green").unwrap()).unwrap();
+    let list = parse(&cards::deck_text("green").unwrap()).unwrap();
     let deck = list.resolve(&db).deck;
     let s = Stats::compute(&deck, &db);
     assert_eq!(s.cards, 40);

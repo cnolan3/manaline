@@ -70,7 +70,7 @@ async fn seat_client(r: &Running, seat: usize, name: &str, deck: &str) -> Client
     let mut c = Client::connect(&r.endpoint).await.unwrap();
     let w = c.hello(&r.tokens[seat], Some(name)).await.unwrap();
     assert_eq!(w.role, protocol::Role::Seat(Seat(seat as u8)));
-    c.set_deck(cards::deck_text(deck).unwrap()).await.unwrap().unwrap();
+    c.set_deck(&cards::deck_text(deck).unwrap()).await.unwrap().unwrap();
     c.subscribe().await.unwrap();
     c
 }
@@ -213,7 +213,7 @@ async fn versions_tokens_and_turn_order_are_enforced() {
     assert!(matches!(rejected[0], engine::Violation::TooFewCards { .. }));
     let rejected = a.set_deck("40 Black Lotus\n").await.unwrap().unwrap_err();
     assert!(matches!(rejected[0], engine::Violation::Unparsable { .. }));
-    a.set_deck(cards::deck_text("green").unwrap()).await.unwrap().unwrap();
+    a.set_deck(&cards::deck_text("green").unwrap()).await.unwrap().unwrap();
 
     a.ready().await.unwrap();
     b.ready().await.unwrap();
@@ -324,7 +324,7 @@ async fn the_wire_never_carries_another_seats_hidden_information() {
     })
     .await;
     raw.request(ClientMessage::SetDeck {
-        decklist: cards::deck_text("red").unwrap().into(),
+        decklist: cards::deck_text("red").unwrap(),
         commander: None,
     })
     .await;

@@ -103,7 +103,7 @@ fn search_add_remove_undo_and_save_in_canonical_order() {
 
 #[test]
 fn quit_confirms_when_dirty_and_stats_pane_shows_hands() {
-    let mut ed = setup(None, cards::deck_text("green").unwrap());
+    let mut ed = setup(None, &cards::deck_text("green").unwrap());
     assert!(ed.report.is_legal());
     ed.handle_key(key(KeyCode::Tab));
     assert_eq!(

@@ -94,8 +94,11 @@ save, `u` to undo, `q` to quit, `?` for the rest. `scripts/screencast.sh`
 records a short tour with asciinema.
 
 Deck files: one `N Card Name` per line, optional `Deck` / `Sideboard` headers,
-`//` comments, `(SET) 123` printing suffixes tolerated. Built-in deck names
-work anywhere a file path does.
+`//` comments, `(SET) 123` printing suffixes tolerated. A deck name works
+anywhere a file path does: names are read from `decks/` at run time, so a file
+you drop in there is usable as `--deck <name>` straight away and shows up in
+`list decks`, on the same footing as the decks the repo ships with. Point
+`$MANALINE_DECKS_DIR` elsewhere to keep your decks outside the repo.
 
 Advanced pieces `play` is made of: `daemon`, `join`, `tui`, `bot`, `mcp`. Run
 any with `--help`.
