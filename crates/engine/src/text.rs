@@ -232,7 +232,7 @@ fn describe_event_with<D>(
             let list: Vec<String> = objects.iter().map(|o| obj(*o)).collect();
             format!("{} discards {}", who(*seat), list.join(", "))
         }
-        EventBase::Eliminated { seat, reason } => format!("{} loses ({reason:?})", who(*seat)),
+        EventBase::Eliminated { seat, reason } => format!("{} {} and leaves the game", who(*seat), reason.phrase()),
         EventBase::GameOver { outcome } => match outcome {
             crate::game::Outcome::Winner(s) => format!("=== {} wins ===", who(*s)),
             crate::game::Outcome::Draw => "=== The game is a draw ===".into(),
@@ -488,6 +488,10 @@ pub fn render_view(v: &GameView) -> String {
         if !p.battlefield.is_empty() {
             let list: Vec<String> = p.battlefield.iter().map(|&id| describe(id)).collect();
             writeln!(s, "  battlefield: {}", list.join("  ")).unwrap();
+        }
+        if !p.graveyard.is_empty() {
+            let list: Vec<String> = p.graveyard.iter().rev().map(|&id| describe(id)).collect();
+            writeln!(s, "  graveyard (newest first): {}", list.join("  ")).unwrap();
         }
         if let HandView::Yours(hand) = &p.hand {
             let list: Vec<String> = hand

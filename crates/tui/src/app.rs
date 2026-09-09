@@ -121,7 +121,14 @@ pub enum Mode {
     Inspect(ObjectId),
     Help,
     ConfirmConcede,
-    Settings { selected: usize },
+    Settings {
+        selected: usize,
+    },
+    /// Browsing a player's graveyard, newest card first.
+    Graveyard {
+        seat: Seat,
+        cursor: usize,
+    },
 }
 
 pub const SETTINGS_ITEMS: usize = 5;
@@ -712,6 +719,7 @@ impl App {
             Mode::Pick(p) => self.key_pick(p, key),
             Mode::Chat(text) => self.key_chat(text, key),
             Mode::Inspect(_) | Mode::Help => Vec::new(),
+            Mode::Graveyard { seat, cursor } => self.key_graveyard(seat, cursor, key),
             Mode::ConfirmConcede => match key.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') => vec![Command::Act(Action::Concede)],
                 _ => Vec::new(),
@@ -766,6 +774,7 @@ impl App {
             }
             KeyCode::Char('c') => self.mode = Mode::Chat(String::new()),
             KeyCode::Char('i') => self.open_inspect_menu(),
+            KeyCode::Char('g') => self.open_graveyard(None),
             KeyCode::Char('v') => {
                 self.verbose_log = !self.verbose_log;
                 self.set_status(if self.verbose_log { "Verbose log on" } else { "Verbose log off" });
@@ -1240,6 +1249,64 @@ impl App {
         }
     }
 
+    /// "P1 conceded" / "P1 was reduced to 0 life", for the losers of a finished game.
+    pub fn elimination_text(&self) -> String {
+        let Some(view) = &self.view else { return String::new() };
+        let parts: Vec<String> = view
+            .players
+            .iter()
+            .filter_map(|p| {
+                p.elimination.as_ref().map(|e| {
+                    format!(
+                        "{} {}",
+                        if Some(p.seat) == self.me {
+                            "you".to_string()
+                        } else {
+                            p.name.clone()
+                        },
+                        e.phrase()
+                    )
+                })
+            })
+            .collect();
+        parts.join(", ")
+    }
+
+    /// Open the graveyard browser on `seat` (yours first, then Tab through the table).
+    pub fn open_graveyard(&mut self, seat: Option<Seat>) {
+        let Some(view) = &self.view else { return };
+        let seat = seat.or(self.me).or_else(|| view.players.first().map(|p| p.seat));
+        if let Some(seat) = seat {
+            self.mode = Mode::Graveyard { seat, cursor: 0 };
+        }
+    }
+
+    fn key_graveyard(&mut self, seat: Seat, mut cursor: usize, key: KeyEvent) -> Vec<Command> {
+        let Some(view) = &self.view else { return Vec::new() };
+        let cards: Vec<ObjectId> = view.player(seat).graveyard.iter().rev().copied().collect();
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('g') | KeyCode::Char('q') => return Vec::new(),
+            KeyCode::Up | KeyCode::Char('k') => cursor = cursor.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => cursor = (cursor + 1).min(cards.len().saturating_sub(1)),
+            KeyCode::Tab => {
+                let seats: Vec<Seat> = view.players.iter().map(|p| p.seat).collect();
+                let i = seats.iter().position(|s| *s == seat).unwrap_or(0);
+                let next = seats[(i + 1) % seats.len()];
+                self.mode = Mode::Graveyard { seat: next, cursor: 0 };
+                return Vec::new();
+            }
+            KeyCode::Enter | KeyCode::Char('i') => {
+                if let Some(&id) = cards.get(cursor) {
+                    self.mode = Mode::Inspect(id);
+                    return Vec::new();
+                }
+            }
+            _ => {}
+        }
+        self.mode = Mode::Graveyard { seat, cursor };
+        Vec::new()
+    }
+
     pub fn theme(&self) -> crate::theme::Theme {
         crate::theme::Theme::named(&self.settings.theme).unwrap_or_default()
     }
@@ -1281,7 +1348,7 @@ impl App {
             );
         }
         if self.outcome().is_some() {
-            return "[q] quit  [l] log  [i] inspect".into();
+            return "[q] quit  [l] log  [i] inspect  [g] graveyards".into();
         }
         if self.view.is_none() {
             return if self.deck_source.is_some() && !self.lobby.started {
@@ -1298,6 +1365,7 @@ impl App {
             Mode::Pick(_) => return "[Space]/[1-9] toggle  [↑↓] move  [Enter] confirm  [Esc] cancel".into(),
             Mode::Chat(_) => return "type a message  [Enter] send  [Esc] cancel".into(),
             Mode::Inspect(_) | Mode::Help => return "[Esc] close".into(),
+            Mode::Graveyard { .. } => return "[↑↓] move  [Enter] card details  [Tab] next player's graveyard  [Esc] close".into(),
             Mode::ConfirmConcede => return "Concede the game? [y] yes  [any other key] no".into(),
             Mode::Settings { .. } => return "[↑↓] move  [←→/Enter] change  [Esc] close".into(),
             Mode::Normal => {}

@@ -1,0 +1,7 @@
+Card(
+    name: "Regrowth",
+    cost: "{1}{G}",
+    types: [Sorcery],
+    text: "Return target card from your graveyard to your hand.",
+    spell: Spell(targets: [InGraveyard(You)], effects: [ReturnFromGraveyard(target: Target(0), to: Hand)]),
+)

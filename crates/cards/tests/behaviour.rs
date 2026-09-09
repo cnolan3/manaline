@@ -169,6 +169,32 @@ fn in_graveyard(game: &Game, id: ObjectId) -> bool {
     game.objects[id].zone == Zone::Graveyard
 }
 
+fn gy(game: &Game, seat: Seat, name: &str) -> ObjectId {
+    game.players[seat.index()]
+        .graveyard
+        .iter()
+        .copied()
+        .find(|&id| game.object_name(id) == name)
+        .unwrap_or_else(|| panic!("{name} not in {seat}'s graveyard"))
+}
+
+/// "Return target <card> from your graveyard to your hand."
+fn regrow(name: &str, card: &str) {
+    let mut game = base().graveyard(ME, card).hand(ME, name).build();
+    let id = gy(&game, ME, card);
+    cast(&mut game, name, &[Target::Object(id)]);
+    assert_eq!(game.objects[id].zone, Zone::Hand, "{name} returns {card}");
+    assert!(game.players[0].hand.contains(&id));
+}
+
+/// "Target player mills N cards."
+fn mill(name: &str, who: Seat, n: usize) {
+    let mut game = base().hand(ME, name).library(who, &["Forest"; 9]).build();
+    cast(&mut game, name, &[Target::Player(who)]);
+    assert_eq!(game.players[who.index()].graveyard.len(), n, "{name}");
+    assert_eq!(game.players[who.index()].library.len(), 9 - n);
+}
+
 // ----- generic checks derived from the IR -----
 
 /// A permanent with no spell, trigger, or activated ability beyond mana:
@@ -1267,6 +1293,136 @@ fn registry() -> BTreeMap<&'static str, Check> {
         Some("Hill Giant"),
         |g, _| assert_eq!(stats(g, bf(g, OPP, "Hill Giant")), (5, 5))
     ));
+
+    // ----- graveyard -----
+    check!("Raise Dead", || regrow("Raise Dead", "Grizzly Bears"));
+    check!("Disentomb", || regrow("Disentomb", "Grizzly Bears"));
+    check!("Wildwood Rebirth", || regrow("Wildwood Rebirth", "Grizzly Bears"));
+    check!("Regrowth", || regrow("Regrowth", "Giant Growth"));
+    check!("Nature's Spiral", || {
+        regrow("Nature's Spiral", "Bonesplitter");
+        let game = base().graveyard(ME, "Shock").hand(ME, "Nature's Spiral").build();
+        assert!(
+            !game
+                .legal_actions(ME)
+                .iter()
+                .any(|a| matches!(a, Action::CastSpell { targets, .. } if !targets.is_empty())),
+            "an instant is not a permanent card"
+        );
+    });
+    check!("Zombify", || {
+        let mut game = base().graveyard(ME, "Hill Giant").hand(ME, "Zombify").build();
+        let giant = gy(&game, ME, "Hill Giant");
+        cast(&mut game, "Zombify", &[Target::Object(giant)]);
+        assert_eq!(game.objects[giant].zone, Zone::Battlefield);
+        assert_eq!(game.objects[giant].controller, ME);
+        assert!(game.objects[giant].summoning_sick);
+    });
+    check!("Tome Scour", || mill("Tome Scour", OPP, 5));
+    check!("Mind Sculpt", || mill("Mind Sculpt", OPP, 7));
+    check!("Thought Scour", || {
+        let mut game = base().hand(ME, "Thought Scour").library(ME, &["Forest"; 6]).build();
+        cast(&mut game, "Thought Scour", &[Target::Player(ME)]);
+        assert_eq!(game.players[0].graveyard.len(), 3, "two milled plus the spell");
+        assert_eq!(hand_size(&game, ME), 1);
+        assert_eq!(game.players[0].library.len(), 3);
+    });
+    check!("Mental Note", || {
+        let mut game = base().hand(ME, "Mental Note").library(ME, &["Forest"; 6]).build();
+        cast(&mut game, "Mental Note", &[]);
+        assert_eq!(game.players[0].graveyard.len(), 3);
+        assert_eq!(hand_size(&game, ME), 1);
+    });
+    check!("Stitcher's Supplier", || {
+        etb("Stitcher's Supplier", None, |g, _| assert_eq!(g.players[0].graveyard.len(), 3));
+        dies("Stitcher's Supplier", None, |g| {
+            assert_eq!(g.players[0].graveyard.len(), 4, "three milled plus itself")
+        });
+    });
+    check!("Crow of Dark Tidings", || {
+        etb("Crow of Dark Tidings", None, |g, _| assert_eq!(g.players[0].graveyard.len(), 2));
+        dies("Crow of Dark Tidings", None, |g| assert_eq!(g.players[0].graveyard.len(), 3));
+    });
+    check!("Doomed Dissenter", || dies("Doomed Dissenter", None, |g| assert_eq!(
+        stats(g, bf(g, ME, "Zombie")),
+        (2, 2)
+    )));
+    check!("Doomed Traveler", || dies("Doomed Traveler", None, |g| {
+        let spirit = bf(g, ME, "Spirit");
+        assert_eq!(stats(g, spirit), (1, 1));
+        assert!(kws(g, spirit).contains(&Keyword::Flying));
+    }));
+    check!("Lord of the Undead", || {
+        let mut game = base()
+            .battlefield(ME, "Lord of the Undead")
+            .battlefield(ME, "Walking Corpse")
+            .battlefield(OPP, "Walking Corpse")
+            .graveyard(ME, "Scathe Zombies")
+            .build();
+        assert_eq!(stats(&game, bf(&game, ME, "Walking Corpse")), (3, 3));
+        assert_eq!(
+            stats(&game, bf(&game, OPP, "Walking Corpse")),
+            (3, 3),
+            "every other Zombie, not just yours"
+        );
+        assert_eq!(stats(&game, bf(&game, ME, "Lord of the Undead")), (2, 2));
+        let zombies = gy(&game, ME, "Scathe Zombies");
+        activate(&mut game, "Lord of the Undead", 0, &[Target::Object(zombies)]);
+        assert_eq!(game.objects[zombies].zone, Zone::Hand);
+    });
+    check!("Diregraf Captain", || {
+        let mut game = base()
+            .battlefield(ME, "Diregraf Captain")
+            .battlefield(ME, "Walking Corpse")
+            .battlefield(OPP, "Swamp")
+            .battlefield(OPP, "Swamp")
+            .battlefield(OPP, "Swamp")
+            .hand(OPP, "Murder")
+            .starting_player(OPP)
+            .build();
+        let corpse = bf(&game, ME, "Walking Corpse");
+        assert_eq!(stats(&game, corpse), (3, 3));
+        cast_by(&mut game, OPP, "Murder", &[Target::Object(corpse)]);
+        choose(&mut game, ME, Target::Player(OPP));
+        assert_eq!(life(&game, OPP), 19);
+    });
+    check!("Vindictive Vampire", || {
+        let mut game = base()
+            .battlefield(ME, "Vindictive Vampire")
+            .battlefield(ME, "Grizzly Bears")
+            .battlefield(OPP, "Swamp")
+            .battlefield(OPP, "Swamp")
+            .battlefield(OPP, "Swamp")
+            .hand(OPP, "Murder")
+            .starting_player(OPP)
+            .build();
+        let bear = bf(&game, ME, "Grizzly Bears");
+        cast_by(&mut game, OPP, "Murder", &[Target::Object(bear)]);
+        assert_eq!(life(&game, OPP), 19);
+        assert_eq!(life(&game, ME), 21);
+    });
+    check!("Blood Bairn", || sac_pump("Blood Bairn"));
+    check!("Sanitarium Skeleton", || {
+        let mut game = base().graveyard(ME, "Sanitarium Skeleton").build();
+        let skeleton = gy(&game, ME, "Sanitarium Skeleton");
+        let a = game
+            .legal_actions(ME)
+            .into_iter()
+            .find(|a| matches!(a, Action::ActivateAbility { object, .. } if *object == skeleton))
+            .expect("activated from the graveyard");
+        game.apply(ME, &a).unwrap();
+        settle(&mut game);
+        assert_eq!(game.objects[skeleton].zone, Zone::Hand);
+        cast(&mut game, "Sanitarium Skeleton", &[]);
+        assert_eq!(game.objects[skeleton].zone, Zone::Battlefield);
+        assert!(
+            !game
+                .legal_actions(ME)
+                .iter()
+                .any(|a| matches!(a, Action::ActivateAbility { object, .. } if *object == skeleton)),
+            "not from the battlefield"
+        );
+    });
 
     // ----- artifacts -----
     check!("Mind Stone", || {

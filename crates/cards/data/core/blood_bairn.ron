@@ -1,0 +1,9 @@
+Card(
+    name: "Blood Bairn",
+    cost: "{2}{B}",
+    types: [Creature],
+    subtypes: ["Vampire"],
+    pt: (2, 2),
+    text: "Sacrifice another creature: This creature gets +2/+2 until end of turn.",
+    activated: [Ability(cost: [Sacrifice(And([Other, Creature]))], effects: [ModifyPt(target: This, power: Const(2), toughness: Const(2), until: EndOfTurn)])],
+)

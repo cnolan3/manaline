@@ -64,7 +64,7 @@ impl Ctx<'_> {
 
     fn filter(&mut self, f: &Filter) {
         match f {
-            Filter::ControlledBy(p) => self.player_ref(p),
+            Filter::ControlledBy(p) | Filter::InGraveyard(p) => self.player_ref(p),
             Filter::And(fs) | Filter::Or(fs) => {
                 if fs.is_empty() {
                     self.err("empty And/Or filter");
@@ -140,6 +140,11 @@ impl Ctx<'_> {
                 self.filter(filter);
                 self.amount(count);
             }
+            Effect::Mill { player, count } => {
+                self.player_ref(player);
+                self.amount(count);
+            }
+            Effect::ReturnFromGraveyard { target, .. } => self.reference(target),
             Effect::Sequence(es) => {
                 if es.len() < 2 {
                     self.err("Sequence needs at least two effects");
@@ -259,6 +264,9 @@ pub fn validate(card: &Card) -> Result<(), ValidationError> {
         }
         if let Trigger::Upkeep { whose, .. } | Trigger::EndStep { whose, .. } = t {
             ctx.player_ref(whose);
+        }
+        if let Trigger::CreatureDies { filter, .. } = t {
+            ctx.filter(filter);
         }
         if t.effects().is_empty() {
             ctx.err("a trigger needs at least one effect");

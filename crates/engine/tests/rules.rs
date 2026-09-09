@@ -694,3 +694,55 @@ fn deck_of(game: &Game, seat: Seat) -> Vec<engine::CardId> {
     objs.sort_by_key(|(id, _)| *id);
     objs.into_iter().map(|(_, o)| o.card).collect()
 }
+
+#[test]
+fn block_suggestions_beyond_the_cap_include_spreads_and_custom_assignments_are_accepted() {
+    use engine::testing::{advance_until, TestGame};
+    use engine::{Action, AttackTarget, PendingChoice};
+    let db = std::sync::Arc::new(cards::core());
+    let mut t = TestGame::new(db, 2);
+    for _ in 0..4 {
+        t = t.battlefield(Seat(0), "Hill Giant");
+    }
+    for _ in 0..5 {
+        t = t.battlefield(Seat(1), "Grizzly Bears");
+    }
+    let mut game = t.build();
+    advance_until(&mut game, |g| matches!(g.pending, Some(PendingChoice::DeclareAttackers { .. }))).unwrap();
+    let giants: Vec<_> = game.players[0]
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|&id| game.object_name(id) == "Hill Giant")
+        .collect();
+    let attackers = giants.iter().map(|&g| (g, AttackTarget::Player(Seat(1)))).collect();
+    game.apply(Seat(0), &Action::DeclareAttackers { attackers }).unwrap();
+    advance_until(&mut game, |g| matches!(g.pending, Some(PendingChoice::DeclareBlockers { .. }))).unwrap();
+    let bears: Vec<_> = game.players[1].battlefield.to_vec();
+    let legal = game.legal_actions(Seat(1));
+    let shapes: Vec<&Vec<(engine::ObjectId, engine::ObjectId)>> = legal
+        .iter()
+        .filter_map(|a| match a {
+            Action::DeclareBlockers { blocks } => Some(blocks),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        shapes.iter().any(|b| b.len() == 2 && b[0].1 == b[1].1),
+        "a double block on one attacker"
+    );
+    assert!(
+        shapes
+            .iter()
+            .any(|b| b.len() >= 4 && b.iter().map(|(_, a)| a).collect::<std::collections::BTreeSet<_>>().len() >= 4),
+        "a spread over the attackers: {shapes:?}"
+    );
+    // A hand-built assignment nobody listed: bears 0 and 1 on giant 0, bear 2 on giant 3.
+    let custom = Action::DeclareBlockers {
+        blocks: vec![(bears[0], giants[0]), (bears[1], giants[0]), (bears[2], giants[3])],
+    };
+    assert!(!legal.contains(&custom));
+    game.apply(Seat(1), &custom).unwrap();
+    assert_eq!(game.objects[bears[0]].blocking, vec![giants[0]]);
+    assert_eq!(game.objects[bears[2]].blocking, vec![giants[3]]);
+}

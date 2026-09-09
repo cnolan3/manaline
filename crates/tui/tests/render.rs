@@ -715,3 +715,50 @@ fn narrow_terminals_wrap_the_footer_and_show_recent_log_lines() {
     assert!(s.contains("[x] concede"), "the whole footer is visible: {s}");
     assert!(s.contains("recent") && s.contains("something happened"), "{s}");
 }
+
+#[test]
+fn conceding_is_explained_and_graveyards_can_be_browsed() {
+    let mut game = TestGame::new(Arc::new(cards::core()), 2)
+        .battlefield(Seat(0), "Forest")
+        .graveyard(Seat(0), "Grizzly Bears")
+        .graveyard(Seat(0), "Giant Growth")
+        .graveyard(Seat(1), "Shock")
+        .build();
+    let mut app = app_for(&game, Seat(0));
+    app.mode = Mode::Normal;
+    // g opens my graveyard, newest first; Enter inspects; Tab moves to the opponent's.
+    app.handle_key(key(KeyCode::Char('g')));
+    assert!(matches!(app.mode, Mode::Graveyard { seat: Seat(0), cursor: 0 }));
+    let s = render(&app, 100, 32);
+    assert!(
+        s.contains("Your graveyard") && s.contains("Giant Growth") && s.contains("Grizzly Bears"),
+        "{s}"
+    );
+    let giant_growth = s.find("Giant Growth").unwrap();
+    let bears = s.find("Grizzly Bears").unwrap();
+    assert!(giant_growth < bears, "newest first");
+    app.handle_key(key(KeyCode::Down));
+    app.handle_key(key(KeyCode::Enter));
+    assert!(matches!(app.mode, Mode::Inspect(_)));
+    let s = render(&app, 100, 32);
+    assert!(s.contains("Creature — Bear"), "{s}");
+    app.handle_key(key(KeyCode::Esc));
+    app.handle_key(key(KeyCode::Char('g')));
+    app.handle_key(key(KeyCode::Tab));
+    assert!(matches!(app.mode, Mode::Graveyard { seat: Seat(1), .. }));
+    let s = render(&app, 100, 32);
+    assert!(
+        s.contains("P1's graveyard") && s.contains("Shock"),
+        "opponents' graveyards are public: {s}"
+    );
+
+    // The opponent concedes: the winner is told why.
+    game.apply(Seat(1), &Action::Concede).unwrap();
+    let mut app = app_for(&game, Seat(0));
+    app.mode = Mode::Normal;
+    let s = render(&app, 100, 32);
+    assert!(s.contains("YOU WIN — P1 conceded"), "{s}");
+    assert!(s.contains("GAME OVER — P0 wins, P1 conceded"), "header: {s}");
+    let text: Vec<String> = game.log.iter().map(|e| engine::text::describe_event(&game, e)).collect();
+    assert!(text.iter().any(|t| t.contains("conceded and leaves the game")), "{text:?}");
+}

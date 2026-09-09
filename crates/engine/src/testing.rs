@@ -47,6 +47,7 @@ pub struct TestGame {
     libraries: Vec<Option<Vec<CardId>>>,
     battlefield: Vec<(Seat, CardId, bool)>,
     hands: Vec<(Seat, CardId)>,
+    graveyards: Vec<(Seat, CardId)>,
     life: Vec<(Seat, i32)>,
 }
 
@@ -60,6 +61,7 @@ impl TestGame {
             libraries: vec![None; seats],
             battlefield: Vec::new(),
             hands: Vec::new(),
+            graveyards: Vec::new(),
             life: Vec::new(),
         }
     }
@@ -96,6 +98,13 @@ impl TestGame {
     pub fn hand(mut self, seat: Seat, name: &str) -> Self {
         let id = self.card(name);
         self.hands.push((seat, id));
+        self
+    }
+
+    /// Put `name` into `seat`'s graveyard.
+    pub fn graveyard(mut self, seat: Seat, name: &str) -> Self {
+        let id = self.card(name);
+        self.graveyards.push((seat, id));
         self
     }
 
@@ -141,6 +150,14 @@ impl TestGame {
         }
         for (seat, card) in self.hands {
             put_in_hand(&mut game, seat, card);
+        }
+        for (seat, card) in self.graveyards {
+            let id = game.objects.insert_with_key(|id| {
+                let mut o = GameObject::new(id, card, seat);
+                o.zone = Zone::Graveyard;
+                o
+            });
+            game.players[seat.index()].graveyard.push(id);
         }
         for (seat, life) in self.life {
             game.players[seat.index()].life = life;

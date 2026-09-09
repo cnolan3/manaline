@@ -37,6 +37,9 @@ pub struct PlayerView {
     pub name: String,
     pub life: i32,
     pub eliminated: bool,
+    /// Why the player left the game, if they have.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elimination: Option<crate::game::Elimination>,
     pub hand: HandView,
     pub library: LibraryView,
     pub graveyard: Vec<ObjectId>,

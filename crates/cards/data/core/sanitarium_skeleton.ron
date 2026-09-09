@@ -1,0 +1,9 @@
+Card(
+    name: "Sanitarium Skeleton",
+    cost: "{B}",
+    types: [Creature],
+    subtypes: ["Skeleton"],
+    pt: (1, 2),
+    text: "{2}{B}: Return this card from your graveyard to your hand.",
+    activated: [Ability(cost: [Mana("{2}{B}")], effects: [ReturnFromGraveyard(target: This, to: Hand)], from_graveyard: true)],
+)

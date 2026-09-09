@@ -1,0 +1,7 @@
+Card(
+    name: "Mental Note",
+    cost: "{U}",
+    types: [Instant],
+    text: "Mill two cards.\nDraw a card.",
+    spell: Spell(effects: [Mill(player: You, count: Const(2)), Draw(player: You, count: Const(1))]),
+)

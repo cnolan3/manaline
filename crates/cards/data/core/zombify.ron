@@ -1,0 +1,7 @@
+Card(
+    name: "Zombify",
+    cost: "{3}{B}",
+    types: [Sorcery],
+    text: "Return target creature card from your graveyard to the battlefield.",
+    spell: Spell(targets: [And([Creature, InGraveyard(You)])], effects: [ReturnFromGraveyard(target: Target(0), to: Battlefield)]),
+)

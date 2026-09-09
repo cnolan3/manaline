@@ -1,0 +1,9 @@
+Card(
+    name: "Vindictive Vampire",
+    cost: "{3}{B}",
+    types: [Creature],
+    subtypes: ["Vampire"],
+    pt: (2, 3),
+    text: "Whenever another creature you control dies, this creature deals 1 damage to each opponent and you gain 1 life.",
+    triggers: [CreatureDies(filter: And([Other, Creature, ControlledBy(You)]), effects: [DealDamage(amount: Const(1), to: Player(EachOpponent)), GainLife(player: You, amount: Const(1))])],
+)
