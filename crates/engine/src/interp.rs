@@ -208,6 +208,32 @@ impl Game {
                     }
                 }
             }
+            Effect::Mill { player, count } => {
+                let n = self.eval_amount(count, ctx).max(0) as usize;
+                for seat in self.players_of(player, ctx) {
+                    for _ in 0..n {
+                        let Some(id) = self.players[seat.index()].library.pop() else {
+                            break;
+                        };
+                        self.move_object(id, Zone::Graveyard);
+                    }
+                }
+            }
+            Effect::ReturnFromGraveyard { target, to } => {
+                for id in self.objects_of(target, ctx) {
+                    if self.objects[id].zone != Zone::Graveyard {
+                        continue;
+                    }
+                    match to {
+                        cardir::ReturnZone::Hand => self.move_object(id, Zone::Hand),
+                        cardir::ReturnZone::Battlefield => {
+                            self.objects[id].controller = ctx.you;
+                            self.move_object(id, Zone::Battlefield);
+                            self.objects[id].summoning_sick = true;
+                        }
+                    }
+                }
+            }
             Effect::Sequence(es) => {
                 // Flattened by the caller's work list; if we get here, run inline.
                 for e in es {

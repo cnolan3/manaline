@@ -49,7 +49,10 @@ your untapped sources that covers the cost; `act` accepts it as long as it pays.
 
 During your declare attackers step you choose which untapped creatures attack
 and whom they attack (in a pod, each attacker can target a different opponent).
-Attacking taps the creature. Creatures that came under your control this turn
+Attacking taps the creature. The listed attack and block actions are common
+shapes only: any legal assignment can be sent to `take_action` as a full
+`action` object (the reply shows the exact form and, for blocks, which
+blocker may block which attacker). Creatures that came under your control this turn
 cannot attack (summoning sickness) unless they have haste; the state marks
 these "sick" or "sick but hasty". The defending player then assigns blockers:
 each of their untapped creatures may block one attacker, and several may block

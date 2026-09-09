@@ -59,6 +59,10 @@ pub struct Ability {
     /// Only while you could cast a sorcery.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub sorcery_speed: bool,
+    /// Activated from the graveyard rather than the battlefield
+    /// ("{2}{B}: Return this card from your graveyard to your hand").
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub from_graveyard: bool,
 }
 
 impl Ability {
@@ -157,6 +161,16 @@ pub enum Effect {
         filter: Filter,
         count: Amount,
     },
+    /// "target player mills three cards": library top to graveyard.
+    Mill {
+        player: PlayerRef,
+        count: Amount,
+    },
+    /// "return target creature card from your graveyard to your hand / to the battlefield".
+    ReturnFromGraveyard {
+        target: Ref,
+        to: ReturnZone,
+    },
     Sequence(Vec<Effect>),
     Conditional {
         if_: Condition,
@@ -169,6 +183,15 @@ pub enum Effect {
     Unsupported {
         reason: String,
     },
+}
+
+/// Where a card returned from a graveyard goes.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum ReturnZone {
+    /// Its owner's hand.
+    Hand,
+    /// The battlefield under the controller's control.
+    Battlefield,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -225,6 +248,8 @@ pub enum Filter {
     Other,
     /// The permanent this aura or equipment is attached to.
     Attached,
+    /// A card in the named player's graveyard ("creature card from your graveyard").
+    InGraveyard(PlayerRef),
     Token,
     Subtype(String),
     Color(Color),
@@ -280,6 +305,20 @@ pub enum Trigger {
         targets: Vec<Filter>,
         effects: Vec<Effect>,
     },
+    /// "When ~ enters or dies".
+    EtbOrDies {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        targets: Vec<Filter>,
+        effects: Vec<Effect>,
+    },
+    /// "Whenever a creature dies" / "Whenever another Zombie you control dies":
+    /// some creature matching the filter (`Other` excludes this card) dies.
+    CreatureDies {
+        filter: Filter,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        targets: Vec<Filter>,
+        effects: Vec<Effect>,
+    },
 }
 
 impl Trigger {
@@ -291,7 +330,9 @@ impl Trigger {
             | Trigger::CombatDamageToPlayer { targets, .. }
             | Trigger::Upkeep { targets, .. }
             | Trigger::EndStep { targets, .. }
-            | Trigger::BecomesTapped { targets, .. } => targets,
+            | Trigger::BecomesTapped { targets, .. }
+            | Trigger::EtbOrDies { targets, .. }
+            | Trigger::CreatureDies { targets, .. } => targets,
         }
     }
 
@@ -303,7 +344,9 @@ impl Trigger {
             | Trigger::CombatDamageToPlayer { effects, .. }
             | Trigger::Upkeep { effects, .. }
             | Trigger::EndStep { effects, .. }
-            | Trigger::BecomesTapped { effects, .. } => effects,
+            | Trigger::BecomesTapped { effects, .. }
+            | Trigger::EtbOrDies { effects, .. }
+            | Trigger::CreatureDies { effects, .. } => effects,
         }
     }
 }

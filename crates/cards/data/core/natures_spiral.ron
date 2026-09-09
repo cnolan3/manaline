@@ -1,0 +1,7 @@
+Card(
+    name: "Nature's Spiral",
+    cost: "{1}{G}",
+    types: [Sorcery],
+    text: "Return target permanent card from your graveyard to your hand.",
+    spell: Spell(targets: [And([Permanent, InGraveyard(You)])], effects: [ReturnFromGraveyard(target: Target(0), to: Hand)]),
+)

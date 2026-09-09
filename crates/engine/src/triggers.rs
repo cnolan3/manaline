@@ -36,14 +36,25 @@ impl Game {
                 to: Zone::Battlefield,
                 ..
             } => {
-                self.fire_matching(*object, |t| matches!(t, Trigger::Etb { .. }), Some(Target::Object(*object)));
+                self.fire_matching(
+                    *object,
+                    |t| matches!(t, Trigger::Etb { .. } | Trigger::EtbOrDies { .. }),
+                    Some(Target::Object(*object)),
+                );
             }
             EventBase::ZoneChange {
                 object,
                 from: Zone::Battlefield,
                 to: Zone::Graveyard,
             } => {
-                self.fire_matching(*object, |t| matches!(t, Trigger::Dies { .. }), Some(Target::Object(*object)));
+                self.fire_matching(
+                    *object,
+                    |t| matches!(t, Trigger::Dies { .. } | Trigger::EtbOrDies { .. }),
+                    Some(Target::Object(*object)),
+                );
+                if self.is_creature(*object) {
+                    self.fire_creature_dies(*object);
+                }
             }
             EventBase::Attacked { attackers, .. } => {
                 for (a, _) in attackers {
@@ -104,6 +115,31 @@ impl Game {
                     index: Some(i as u8),
                     triggering,
                 });
+            }
+        }
+    }
+
+    /// "Whenever a creature dies" triggers on everything watching, including
+    /// the dying creature's own (leaves-the-battlefield abilities look back).
+    fn fire_creature_dies(&mut self, dying: ObjectId) {
+        let mut watchers = self.battlefield_objects();
+        if !watchers.contains(&dying) {
+            watchers.push(dying);
+        }
+        for id in watchers {
+            let controller = self.objects[id].controller;
+            let def = self.card_def(id).clone();
+            for (i, t) in def.ir.triggers.iter().enumerate() {
+                let Trigger::CreatureDies { filter, .. } = t else { continue };
+                let ctx = Ctx::simple(controller, Some(id));
+                if self.object_matches(dying, filter, &ctx) {
+                    self.fired.push(FiredTrigger {
+                        source: id,
+                        controller,
+                        index: Some(i as u8),
+                        triggering: Some(Target::Object(dying)),
+                    });
+                }
             }
         }
     }

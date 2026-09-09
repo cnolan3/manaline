@@ -43,6 +43,18 @@ pub enum Elimination {
     Conceded,
 }
 
+impl Elimination {
+    /// "conceded", "was reduced to 0 life", ...
+    pub fn phrase(&self) -> &'static str {
+        match self {
+            Elimination::LifeZero => "was reduced to 0 life",
+            Elimination::Poison => "took ten poison counters",
+            Elimination::DrewFromEmptyLibrary => "drew from an empty library",
+            Elimination::Conceded => "conceded",
+        }
+    }
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Outcome {
@@ -631,6 +643,7 @@ impl Game {
                     name: p.name.clone(),
                     life: p.life,
                     eliminated: p.eliminated.is_some(),
+                    elimination: p.eliminated.clone(),
                     hand: if is_you {
                         HandView::Yours(p.hand.clone())
                     } else {

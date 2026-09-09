@@ -6,7 +6,7 @@ use crate::error::RulesError;
 use crate::filter::Ctx;
 use crate::game::{Game, PendingChoice};
 use crate::types::Keyword;
-use crate::types::{ObjectId, Seat};
+use crate::types::{ObjectId, Seat, Zone};
 use std::collections::BTreeSet;
 
 /// Above this many combinations, attack and block enumeration falls back to a
@@ -163,11 +163,14 @@ impl Game {
         let mut acts = Vec::new();
         let mut battlefield = self.players[seat.index()].battlefield.clone();
         battlefield.sort();
-        for id in battlefield {
+        let mut graveyard = self.players[seat.index()].graveyard.clone();
+        graveyard.sort();
+        for id in battlefield.into_iter().chain(graveyard) {
             let def = self.card_def(id).clone();
             let obj = &self.objects[id];
+            let in_graveyard = obj.zone == Zone::Graveyard;
             for (index, ability) in def.ir.activated.iter().enumerate() {
-                if ability.is_mana_ability() || (ability.sorcery_speed && !sorcery_timing) {
+                if ability.is_mana_ability() || (ability.sorcery_speed && !sorcery_timing) || ability.from_graveyard != in_graveyard {
                     continue;
                 }
                 let mut payments = vec![crate::action::ManaPayment::default()];
@@ -379,17 +382,43 @@ impl Game {
                 }
             }
             _ => {
+                // Too many combinations to list: singles, double-blocks, full gangs,
+                // and a spread that puts one blocker on each attacker. Any other
+                // legal assignment may be sent as a full action.
                 for &a in &attackers {
-                    let all: Vec<(ObjectId, ObjectId)> = blockers.iter().filter(|&&b| self.can_block(b, a)).map(|&b| (b, a)).collect();
-                    if !all.is_empty() && legal(&all) {
-                        out.push(Action::DeclareBlockers { blocks: all });
-                    }
-                    for &b in &blockers {
+                    let can: Vec<ObjectId> = blockers.iter().copied().filter(|&b| self.can_block(b, a)).collect();
+                    let all: Vec<(ObjectId, ObjectId)> = can.iter().map(|&b| (b, a)).collect();
+                    for &b in &can {
                         let one = vec![(b, a)];
                         if legal(&one) {
                             out.push(Action::DeclareBlockers { blocks: one });
                         }
                     }
+                    for i in 0..can.len() {
+                        for j in i + 1..can.len() {
+                            let two = vec![(can[i], a), (can[j], a)];
+                            if legal(&two) {
+                                out.push(Action::DeclareBlockers { blocks: two });
+                            }
+                        }
+                    }
+                    if all.len() > 2 && legal(&all) {
+                        out.push(Action::DeclareBlockers { blocks: all });
+                    }
+                }
+                // Spread: biggest attackers first, each taking the toughest free blocker that can block it.
+                let mut by_power = attackers.clone();
+                by_power.sort_by_key(|&a| std::cmp::Reverse(self.power(a)));
+                let mut free: Vec<ObjectId> = blockers.clone();
+                free.sort_by_key(|&b| std::cmp::Reverse((self.toughness(b), self.power(b))));
+                let mut spread = Vec::new();
+                for a in by_power {
+                    if let Some(pos) = free.iter().position(|&b| self.can_block(b, a)) {
+                        spread.push((free.remove(pos), a));
+                    }
+                }
+                if spread.len() > 1 && legal(&spread) {
+                    out.push(Action::DeclareBlockers { blocks: spread });
                 }
             }
         }

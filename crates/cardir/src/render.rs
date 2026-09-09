@@ -49,11 +49,12 @@ pub fn render(card: &Card) -> String {
         lines.push(r.static_(s));
     }
     for t in &card.triggers {
+        let names_self = trigger_names_self(t);
         let mut r = R {
             card,
             targets: t.targets(),
-            in_trigger: true,
-            this_mentioned: true,
+            in_trigger: names_self,
+            this_mentioned: names_self,
         };
         lines.push(r.trigger(t));
     }
@@ -100,13 +101,20 @@ pub fn render_ability(card: &Card, a: &Ability) -> String {
 
 /// One triggered ability as a line of Oracle text.
 pub fn render_trigger(card: &Card, t: &Trigger) -> String {
+    let names_self = trigger_names_self(t);
     let mut r = R {
         card,
         targets: t.targets(),
-        in_trigger: true,
-        this_mentioned: true,
+        in_trigger: names_self,
+        this_mentioned: names_self,
     };
     r.trigger(t)
+}
+
+/// Whether the trigger's head already names the card ("When ~ enters"), so
+/// its effects say "it"; heads like "Whenever another creature dies" do not.
+fn trigger_names_self(t: &Trigger) -> bool {
+    !matches!(t, Trigger::CreatureDies { .. } | Trigger::Upkeep { .. } | Trigger::EndStep { .. })
 }
 
 /// A spell's effects as Oracle text.
@@ -235,12 +243,20 @@ impl R<'_> {
             adjectives.extend(others);
             heads = vec!["spell".into()];
         }
-        let head = match heads.len() {
+        let mut head = match heads.len() {
             0 => "permanent".to_string(),
             1 => heads.remove(0),
             2 => format!("{} or {}", heads[0], heads[1]),
             n => format!("{}, or {}", heads[..n - 1].join(", "), heads[n - 1]),
         };
+        if mentions_graveyard(f) {
+            // "creature card from your graveyard"; a bare graveyard filter is just "card".
+            head = if head == "permanent" && !mentions_permanent(f) {
+                "card".into()
+            } else {
+                format!("{head} card")
+            };
+        }
         (adjectives, head, postfixes)
     }
 
@@ -267,6 +283,13 @@ impl R<'_> {
             ),
             Filter::Subtype(s) => adjectives.push(s.clone()),
             Filter::Color(c) => adjectives.push(c.word().into()),
+            Filter::InGraveyard(p) => postfixes.push(match p {
+                PlayerRef::You => "from your graveyard".into(),
+                PlayerRef::EachPlayer => "from a graveyard".into(),
+                PlayerRef::EachOpponent => "from an opponent's graveyard".into(),
+                PlayerRef::TargetPlayer(_) | PlayerRef::TargetOpponent(_) | PlayerRef::Triggering => "from that player's graveyard".into(),
+                _ => "from its owner's graveyard".into(),
+            }),
             Filter::ControlledBy(p) => postfixes.push(match p {
                 PlayerRef::You => "you control".into(),
                 PlayerRef::EachOpponent => "your opponents control".into(),
@@ -588,6 +611,25 @@ impl R<'_> {
                     format!("{subj} sacrifices {what} of their choice")
                 }
             }
+            Effect::Mill { player, count } => {
+                let (subj, second) = self.player_subject(player);
+                let what = counted(count, "card");
+                if second {
+                    format!("mill {what}")
+                } else {
+                    format!("{subj} mills {what}")
+                }
+            }
+            Effect::ReturnFromGraveyard { target, to } => {
+                let obj = match target {
+                    Ref::This => format!("{} from your graveyard", self.this()),
+                    other => self.object(other),
+                };
+                match to {
+                    ReturnZone::Hand => format!("return {obj} to your hand"),
+                    ReturnZone::Battlefield => format!("return {obj} to the battlefield"),
+                }
+            }
             Effect::Sequence(es) => {
                 let parts: Vec<String> = es.iter().map(|e| self.clause(e)).collect();
                 parts.join(", then ")
@@ -659,6 +701,16 @@ impl R<'_> {
             Trigger::Upkeep { whose, effects, .. } => (format!("At the beginning of {}", self.step_owner(whose, "upkeep")), effects),
             Trigger::EndStep { whose, effects, .. } => (format!("At the beginning of {}", self.step_owner(whose, "end step")), effects),
             Trigger::BecomesTapped { effects, .. } => ("Whenever ~ becomes tapped".to_string(), effects),
+            Trigger::EtbOrDies { effects, .. } => ("When ~ enters or dies".to_string(), effects),
+            Trigger::CreatureDies { filter, effects, .. } => {
+                let head = if has_other(filter) {
+                    format!("Whenever another {} dies", self.noun(&without_other(filter), Number::Singular))
+                } else {
+                    let n = self.noun(filter, Number::Singular);
+                    format!("Whenever {} {n} dies", article(&n))
+                };
+                (head, effects)
+            }
         };
         let body = self.trigger_body(effects);
         format!("{head}, {body}")
@@ -675,6 +727,14 @@ impl R<'_> {
 
     /// Effects after a trigger head: the first clause lowercase, later ones as sentences.
     fn trigger_body(&mut self, effects: &[Effect]) -> String {
+        if let [Effect::DealDamage { .. }, Effect::GainLife {
+            player: PlayerRef::You, ..
+        }] = effects
+        {
+            let a = self.clause(&effects[0]);
+            let b = self.clause(&effects[1]);
+            return format!("{a} and {b}.");
+        }
         let mut out = String::new();
         for (i, e) in effects.iter().enumerate() {
             let c = self.clause(e);
@@ -698,6 +758,7 @@ impl R<'_> {
                 Cost::Mana(m) => m.to_string(),
                 Cost::Tap => "{T}".into(),
                 Cost::SacrificeThis => "Sacrifice ~".into(),
+                Cost::Sacrifice(f) if has_other(f) => format!("Sacrifice another {}", self.noun(&without_other(f), Number::Singular)),
                 Cost::Sacrifice(f) => {
                     let n = self.noun(f, Number::Singular);
                     format!("Sacrifice {} {n}", article(&n))
@@ -727,6 +788,38 @@ impl R<'_> {
     }
 }
 
+fn mentions_graveyard(f: &Filter) -> bool {
+    match f {
+        Filter::InGraveyard(_) => true,
+        Filter::And(fs) | Filter::Or(fs) => fs.iter().any(mentions_graveyard),
+        _ => false,
+    }
+}
+
+fn mentions_permanent(f: &Filter) -> bool {
+    match f {
+        Filter::Permanent => true,
+        Filter::And(fs) | Filter::Or(fs) => fs.iter().any(mentions_permanent),
+        _ => false,
+    }
+}
+
+/// The filter without its `Other`, for "another <noun>" phrasings.
+fn without_other(f: &Filter) -> Filter {
+    match f {
+        Filter::And(fs) => Filter::And(fs.iter().filter(|x| !matches!(x, Filter::Other)).cloned().collect()),
+        other => other.clone(),
+    }
+}
+
+fn has_other(f: &Filter) -> bool {
+    match f {
+        Filter::Other => true,
+        Filter::And(fs) => fs.iter().any(has_other),
+        _ => false,
+    }
+}
+
 fn plural(head: &str) -> String {
     if let Some(rest) = head.strip_suffix(" or enchantment") {
         return format!("{}s or enchantments", rest);
@@ -750,7 +843,16 @@ pub fn normalise(text: &str, name: &str) -> String {
     let mut s = text.replace(name, "~");
     // Current Oracle text refers to a permanent by its type ("this creature")
     // rather than by name; both mean the card itself.
-    for word in ["creature", "artifact", "enchantment", "land", "permanent", "Aura", "Equipment"] {
+    for word in [
+        "creature",
+        "artifact",
+        "enchantment",
+        "land",
+        "permanent",
+        "card",
+        "Aura",
+        "Equipment",
+    ] {
         s = s.replace(&format!("this {word}"), "~").replace(&format!("This {word}"), "~");
     }
     // Strip reminder text in parentheses.

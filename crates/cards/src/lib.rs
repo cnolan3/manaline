@@ -43,6 +43,7 @@ pub const DECKS: &[(&str, &str)] = &[
     ("rg-stompy", include_str!("../../../decks/rg-stompy.txt")),
     ("gw-elves", include_str!("../../../decks/gw-elves.txt")),
     ("wb-lifegain", include_str!("../../../decks/wb-lifegain.txt")),
+    ("ub-reanimator", include_str!("../../../decks/ub-reanimator.txt")),
 ];
 
 pub fn deck_text(name: &str) -> Option<&'static str> {

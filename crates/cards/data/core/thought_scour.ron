@@ -1,0 +1,7 @@
+Card(
+    name: "Thought Scour",
+    cost: "{U}",
+    types: [Instant],
+    text: "Target player mills two cards.\nDraw a card.",
+    spell: Spell(targets: [Player], effects: [Mill(player: TargetPlayer(0), count: Const(2)), Draw(player: You, count: Const(1))]),
+)

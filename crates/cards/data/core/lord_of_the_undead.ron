@@ -1,0 +1,10 @@
+Card(
+    name: "Lord of the Undead",
+    cost: "{1}{B}{B}",
+    types: [Creature],
+    subtypes: ["Zombie"],
+    pt: (2, 2),
+    text: "Other Zombie creatures get +1/+1.\n{1}{B}, {T}: Return target Zombie card from your graveyard to your hand.",
+    statics: [PtBoost(filter: And([Other, Subtype("Zombie"), Creature]), power: Const(1), toughness: Const(1))],
+    activated: [Ability(cost: [Mana("{1}{B}"), Tap], targets: [And([Subtype("Zombie"), InGraveyard(You)])], effects: [ReturnFromGraveyard(target: Target(0), to: Hand)])],
+)

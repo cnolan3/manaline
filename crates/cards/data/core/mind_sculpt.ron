@@ -1,0 +1,7 @@
+Card(
+    name: "Mind Sculpt",
+    cost: "{1}{U}",
+    types: [Sorcery],
+    text: "Target opponent mills seven cards.",
+    spell: Spell(targets: [Opponent], effects: [Mill(player: TargetOpponent(0), count: Const(7))]),
+)

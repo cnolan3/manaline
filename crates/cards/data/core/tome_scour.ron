@@ -1,0 +1,7 @@
+Card(
+    name: "Tome Scour",
+    cost: "{U}",
+    types: [Sorcery],
+    text: "Target player mills five cards.",
+    spell: Spell(targets: [Player], effects: [Mill(player: TargetPlayer(0), count: Const(5))]),
+)

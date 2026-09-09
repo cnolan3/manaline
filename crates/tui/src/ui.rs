@@ -148,9 +148,12 @@ fn draw_center(f: &mut Frame, app: &App, area: Rect) {
                 Style::default().fg(app.theme().stack).bold(),
             )
         }
-        Some(Outcome::Winner(s)) if Some(s) == app.me => ("YOU WIN".to_string(), Style::default().fg(app.theme().good).bold()),
+        Some(Outcome::Winner(s)) if Some(s) == app.me => (
+            format!("YOU WIN — {}", app.elimination_text()),
+            Style::default().fg(app.theme().good).bold(),
+        ),
         Some(Outcome::Winner(s)) => (
-            format!("GAME OVER — {} wins", app.seat_name(s)),
+            format!("GAME OVER — {} wins ({})", app.seat_name(s), app.elimination_text()),
             Style::default().fg(app.theme().danger).bold(),
         ),
         Some(Outcome::Draw) => ("GAME OVER — draw".into(), Style::default().bold()),
@@ -280,7 +283,7 @@ fn header(app: &App) -> String {
         );
     }
     let status = match view.outcome {
-        Some(Outcome::Winner(s)) => format!("GAME OVER — {} wins", app.seat_name(s)),
+        Some(Outcome::Winner(s)) => format!("GAME OVER — {} wins, {}", app.seat_name(s), app.elimination_text()),
         Some(Outcome::Draw) => "GAME OVER — draw".into(),
         None => match app.my_reason() {
             Some(ActReason::Priority) => "You have priority".into(),
@@ -904,6 +907,35 @@ fn draw_overlays(f: &mut Frame, app: &App, area: Rect) {
             let lines = vec![Line::from(format!("> {text}_"))];
             popup(f, area, "Say", lines, 60);
         }
+        Mode::Graveyard { seat, cursor } => {
+            let view = app.view.as_ref().unwrap();
+            let cards: Vec<ObjectId> = view.player(*seat).graveyard.iter().rev().copied().collect();
+            let mut lines = vec![Line::from(format!("{} cards · newest first · Tab for the next player", cards.len())).dim()];
+            if cards.is_empty() {
+                lines.push(Line::from("(empty)").dim());
+            }
+            let visible = 18usize;
+            let first = cursor.saturating_sub(visible - 1).min(cards.len().saturating_sub(visible));
+            for (i, id) in cards.iter().enumerate().skip(first).take(visible) {
+                let o = view.object(*id);
+                let name = o.map(|o| o.name.clone()).unwrap_or_else(|| id.to_string());
+                let cost = o.map(|o| o.cost.to_string()).unwrap_or_default();
+                let pt = o.and_then(|o| o.pt).map(|(p, t)| format!("  {p}/{t}")).unwrap_or_default();
+                let text = format!("{name} {cost}{pt}  {id}");
+                let style = if i == *cursor {
+                    Style::default().add_modifier(Modifier::REVERSED)
+                } else {
+                    Style::default()
+                };
+                lines.push(Line::styled(text, style));
+            }
+            let who = if Some(*seat) == app.me {
+                "Your graveyard".to_string()
+            } else {
+                format!("{}'s graveyard", app.seat_name(*seat))
+            };
+            popup(f, area, &who, lines, 56);
+        }
         Mode::Inspect(id) => {
             let mut lines = Vec::new();
             if let Some(o) = app.view.as_ref().and_then(|v| v.object(*id)) {
@@ -984,6 +1016,7 @@ fn draw_overlays(f: &mut Frame, app: &App, area: Rect) {
                 "e          activate an ability of one of your permanents",
                 "m          mulligan decision",
                 "i          inspect a card",
+                "g          browse graveyards (Tab switches player)",
                 "c          chat with the table",
                 "Enter      nudge whoever the game is waiting on",
                 "Tab        expand the next opponent",

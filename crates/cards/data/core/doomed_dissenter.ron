@@ -1,0 +1,9 @@
+Card(
+    name: "Doomed Dissenter",
+    cost: "{1}{B}",
+    types: [Creature],
+    subtypes: ["Human"],
+    pt: (1, 1),
+    text: "When this creature dies, create a 2/2 black Zombie creature token.",
+    triggers: [Dies(effects: [CreateToken(spec: TokenSpec(name: "Zombie", colors: [Black], types: [Creature], subtypes: ["Zombie"], pt: (2, 2)), count: Const(1))])],
+)

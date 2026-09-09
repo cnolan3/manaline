@@ -42,7 +42,8 @@ impl Game {
             Filter::Land => def.is_land(),
             Filter::Artifact => def.types.contains(&CardType::Artifact),
             Filter::Enchantment => def.types.contains(&CardType::Enchantment),
-            Filter::Permanent => obj.zone == Zone::Battlefield,
+            Filter::Permanent => obj.zone == Zone::Battlefield || (obj.zone == Zone::Graveyard && def.is_permanent()),
+            Filter::InGraveyard(p) => obj.zone == Zone::Graveyard && self.players_of(p, ctx).contains(&obj.owner),
             Filter::Player | Filter::Opponent => false,
             Filter::Spell => obj.zone == Zone::Stack,
             Filter::Other => ctx.this != Some(id),
@@ -116,9 +117,16 @@ impl Game {
     pub fn filter_zone(filter: &Filter) -> Zone {
         match filter {
             Filter::Spell => Zone::Stack,
+            Filter::InGraveyard(_) => Zone::Graveyard,
             Filter::And(fs) if fs.iter().any(|f| Self::filter_zone(f) == Zone::Stack) => Zone::Stack,
+            Filter::And(fs) if fs.iter().any(|f| Self::filter_zone(f) == Zone::Graveyard) => Zone::Graveyard,
             _ => Zone::Battlefield,
         }
+    }
+
+    /// Every card in every graveyard.
+    pub fn graveyard_objects(&self) -> Vec<ObjectId> {
+        self.players.iter().flat_map(|p| p.graveyard.iter().copied()).collect()
     }
 
     /// Every legal target for a filter right now, as chosen by `ctx.you`:
@@ -129,6 +137,7 @@ impl Game {
             let zone = Self::filter_zone(filter);
             let ids: Vec<ObjectId> = match zone {
                 Zone::Stack => self.stack.iter().map(|s| s.object).collect(),
+                Zone::Graveyard => self.graveyard_objects(),
                 _ => self.battlefield_objects(),
             };
             for id in ids {
@@ -215,6 +224,7 @@ impl Game {
                 let zone = Self::filter_zone(f);
                 let ids: Vec<ObjectId> = match zone {
                     Zone::Stack => self.stack.iter().map(|s| s.object).collect(),
+                    Zone::Graveyard => self.graveyard_objects(),
                     _ => self.battlefield_objects(),
                 };
                 ids.into_iter().filter(|id| self.object_matches(*id, f, ctx)).collect()

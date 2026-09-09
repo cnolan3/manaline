@@ -1,0 +1,10 @@
+Card(
+    name: "Crow of Dark Tidings",
+    cost: "{2}{B}",
+    types: [Creature],
+    subtypes: ["Zombie", "Bird"],
+    pt: (2, 1),
+    text: "Flying\nWhen this creature enters or dies, mill two cards. (Put the top two cards of your library into your graveyard.)",
+    keywords: [Flying],
+    triggers: [EtbOrDies(effects: [Mill(player: You, count: Const(2))])],
+)
