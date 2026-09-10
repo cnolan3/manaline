@@ -384,6 +384,12 @@ impl Editor {
                 }
                 Err(e) => self.status = Some(format!("could not parse {}: {e}", p.display())),
             },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                self.status = Some(format!(
+                    "{} does not exist yet; [s] writes it (an agent should save_deck to exactly this path)",
+                    p.display()
+                ))
+            }
             Err(e) => self.status = Some(format!("could not read {}: {e}", p.display())),
         }
     }

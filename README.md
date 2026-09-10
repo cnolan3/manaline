@@ -85,6 +85,7 @@ cargo run -- deck edit green                        # tweak a shipped deck: save
 cargo run -- cards search 't:creature c:r mv<=2'    # Scryfall-style search; --all includes unimplemented cards
 cargo run -- replay <file.jsonl> --step             # step through a recorded game in the client
 cargo run -- play --deck green --vs random --theme mono
+cargo run -- play --deck green --vs claude --opp-deck agent   # the agent picks one of the existing decks
 cargo run -- mcp --http 127.0.0.1:7454              # card search and deck stats for an agent, no game needed
 cargo run -- status                                 # running daemons, MCP servers, stale sockets
 cargo run -- daemon stop [--game ID]                # stop daemons gracefully

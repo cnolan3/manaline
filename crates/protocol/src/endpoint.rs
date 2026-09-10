@@ -98,6 +98,88 @@ pub fn display_path(p: &Path) -> String {
     p.display().to_string()
 }
 
+/// An open deckbuilder announces itself here so an MCP server helping the
+/// human can find the file they are editing: one JSON file per editor
+/// process under `<runtime dir>/editors/`, removed when the editor exits and
+/// ignored once its process is gone.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct EditorSession {
+    pub pid: u32,
+    pub path: PathBuf,
+    pub format: String,
+}
+
+/// Where editor markers live: `<runtime dir>/editors`.
+pub fn editor_sessions_dir() -> PathBuf {
+    runtime_dir().join("editors")
+}
+
+impl EditorSession {
+    /// Record this process as editing `path` (canonicalised when possible). Writes `<dir>/<pid>.json`.
+    pub fn announce(path: &Path, format: &str) -> std::io::Result<EditorSession> {
+        let dir = editor_sessions_dir();
+        std::fs::create_dir_all(&dir)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+        }
+        let session = EditorSession {
+            pid: std::process::id(),
+            path: std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()),
+            format: format.to_string(),
+        };
+        let json = serde_json::to_vec_pretty(&session).map_err(std::io::Error::other)?;
+        std::fs::write(session.marker_path(), json)?;
+        Ok(session)
+    }
+
+    /// Remove this editor's marker file.
+    pub fn withdraw(&self) {
+        let _ = std::fs::remove_file(self.marker_path());
+    }
+
+    /// Every editor whose process is still alive, sorted by marker file name.
+    /// Markers that fail to parse or whose process is gone are deleted on the way.
+    pub fn live() -> Vec<EditorSession> {
+        let dir = editor_sessions_dir();
+        let Ok(entries) = std::fs::read_dir(&dir) else { return Vec::new() };
+        let mut files: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+        files.sort();
+        let mut out = Vec::new();
+        for file in files {
+            if file.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            let parsed = std::fs::read(&file)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<EditorSession>(&bytes).ok());
+            match parsed {
+                Some(s) if process_alive(s.pid) => out.push(s),
+                _ => {
+                    let _ = std::fs::remove_file(&file);
+                }
+            }
+        }
+        out
+    }
+
+    fn marker_path(&self) -> PathBuf {
+        editor_sessions_dir().join(format!("{}.json", self.pid))
+    }
+}
+
+#[cfg(unix)]
+fn process_alive(pid: u32) -> bool {
+    // SAFETY: signal 0 only checks for the process's existence; kill has no preconditions.
+    unsafe { libc::kill(pid as i32, 0) == 0 }
+}
+
+#[cfg(not(unix))]
+fn process_alive(_pid: u32) -> bool {
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -120,5 +202,31 @@ mod tests {
         assert!(runtime_dir().to_string_lossy().contains("manaline"));
         assert!(socket_path("abc").to_string_lossy().ends_with("abc.sock"));
         assert!(replay_path("abc").to_string_lossy().ends_with("games/abc.jsonl"));
+    }
+    #[test]
+    fn editor_sessions_announce_and_expire() {
+        let deck = std::env::temp_dir().join(format!("manaline-editor-test-{}.txt", std::process::id()));
+        std::fs::write(&deck, "4 Lightning Bolt\n").unwrap();
+        let session = EditorSession::announce(&deck, "modern").unwrap();
+        assert_eq!(session.pid, std::process::id());
+        assert_eq!(session.format, "modern");
+        assert!(EditorSession::live().contains(&session));
+
+        // A marker for a process that does not exist is dropped and deleted.
+        let dead = EditorSession {
+            pid: 4_000_000_000,
+            path: deck.clone(),
+            format: "modern".into(),
+        };
+        let dead_marker = editor_sessions_dir().join(format!("{}.json", dead.pid));
+        std::fs::write(&dead_marker, serde_json::to_vec(&dead).unwrap()).unwrap();
+        let live = EditorSession::live();
+        assert!(live.contains(&session));
+        assert!(!live.iter().any(|s| s.pid == dead.pid));
+        assert!(!dead_marker.exists());
+
+        session.withdraw();
+        assert!(!EditorSession::live().contains(&session));
+        let _ = std::fs::remove_file(&deck);
     }
 }

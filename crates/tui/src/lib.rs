@@ -313,11 +313,19 @@ async fn replay_loop(app: &mut App, terminal: &mut ratatui::DefaultTerminal) -> 
 /// Run the deckbuilder on its own (`manaline deck edit`).
 pub async fn run_editor(setup: editor::EditorSetup) -> Result<()> {
     let mut ed = editor::Editor::new(setup).map_err(|e| anyhow!(e))?;
+    // Announce the open file so an MCP server can find what the human is editing.
+    let session = ed
+        .path
+        .clone()
+        .and_then(|p| protocol::endpoint::EditorSession::announce(&p, &ed.format.name).ok());
     let guard = TerminalGuard::enter()?;
     let mut terminal = ratatui::init();
     let result = editor_loop(&mut ed, &mut terminal).await;
     ratatui::restore();
     drop(guard);
+    if let Some(session) = session {
+        session.withdraw();
+    }
     result
 }
 

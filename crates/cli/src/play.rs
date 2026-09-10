@@ -19,7 +19,8 @@ pub struct PlayArgs {
     /// `claude`, `codex`, or `mcp` (starts the MCP server on seat 1 and tells you how to connect).
     #[arg(long, default_value = "random")]
     pub vs: String,
-    /// The bot's deck (defaults to a built-in deck that differs from yours).
+    /// The opponent's deck (defaults to a built-in deck that differs from yours). With an agent,
+    /// `agent` leaves the seat empty so the agent chooses one of the existing decks itself.
     #[arg(long)]
     pub opp_deck: Option<String>,
     #[arg(long, default_value = "cube")]
@@ -52,12 +53,14 @@ pub async fn play(args: PlayArgs) -> Result<()> {
         "mcp" => Opponent::Agent(AgentKind::Generic),
         other => bail!("unknown opponent {other:?}; use random, human, claude, codex, or mcp"),
     };
+    // `--opp-deck agent`: the agent's seat starts empty and it picks a deck itself.
+    let agent_chooses = matches!(opponent, Opponent::Agent(_)) && args.opp_deck.as_deref() == Some("agent");
     let opp_deck_name = match &args.opp_deck {
-        Some(d) => d.clone(),
-        None => default_opponent_deck(&args.deck),
+        Some(d) if !agent_chooses => d.clone(),
+        _ => default_opponent_deck(&args.deck),
     };
     let opp_decklist = crate::deck_text(&opp_deck_name)?;
-    if !matches!(opponent, Opponent::Human) {
+    if !matches!(opponent, Opponent::Human) && !agent_chooses {
         check_deck(&opp_decklist, &format, &db, &opp_deck_name)?;
     }
 
@@ -85,9 +88,13 @@ pub async fn play(args: PlayArgs) -> Result<()> {
             bot_task = Some(tokio::spawn(bot::run(settings)));
         }
         Opponent::Agent(kind) => {
-            let (child, url) = spawn_mcp(&socket, &tokens[1], &opp_deck_name, kind.name()).await?;
+            let deck = if agent_chooses { None } else { Some(opp_deck_name.as_str()) };
+            let (child, url) = spawn_mcp(&socket, &tokens[1], deck, kind.name()).await?;
             mcp_child = Some(child);
             hints.push(agent_hints(kind, &url, &socket, &tokens[1]));
+            if agent_chooses {
+                hints.push("The agent's seat has no deck: it must pick one with list_decks and submit_deck before the game starts.".into());
+            }
         }
         Opponent::Human => {
             let mut lines = vec!["To seat the other player, run this in another terminal:".to_string()];
@@ -187,21 +194,28 @@ fn agent_hints(kind: AgentKind, url: &str, socket: &std::path::Path, token: &pro
     lines.join("\n")
 }
 
-/// Spawn `manaline mcp` on seat 1 and read the URL it prints.
-async fn spawn_mcp(socket: &std::path::Path, token: &protocol::Token, deck: &str, name: &str) -> Result<(tokio::process::Child, String)> {
+/// Spawn `manaline mcp` on seat 1 and read the URL it prints. With no deck the
+/// seat starts empty and the agent submits a deck of its own choosing.
+async fn spawn_mcp(
+    socket: &std::path::Path,
+    token: &protocol::Token,
+    deck: Option<&str>,
+    name: &str,
+) -> Result<(tokio::process::Child, String)> {
     let exe = std::env::current_exe().context("locating the manaline binary")?;
     let log_dir = protocol::endpoint::data_dir().join("logs");
     std::fs::create_dir_all(&log_dir).ok();
     let log_path = log_dir.join(format!("mcp-{}.log", std::process::id()));
     let log_file = std::fs::File::create(&log_path).with_context(|| format!("creating {}", log_path.display()))?;
     let mut cmd = tokio::process::Command::new(exe);
-    cmd.arg("mcp")
-        .arg("--connect")
+    cmd.arg("mcp");
+    if let Some(deck) = deck {
+        cmd.arg("--deck").arg(deck);
+    }
+    cmd.arg("--connect")
         .arg(socket)
         .arg("--token")
         .arg(&token.0)
-        .arg("--deck")
-        .arg(deck)
         .arg("--name")
         .arg(name)
         .arg("--http")

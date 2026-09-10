@@ -3,7 +3,10 @@
 
 use daemon::{CreateGame, Daemon, DaemonConfig, DaemonHandle};
 use engine::{Action, Outcome, Seat};
-use mcp::server::{DeckStatsParams, GetCardParams, GetLogParams, SaveDeckParams, SayParams, SearchParams, TakeActionParams, WaitParams};
+use mcp::server::{
+    DeckStatsParams, GetCardParams, GetDeckParams, GetLogParams, SaveDeckParams, SayParams, SearchParams, SubmitDeckParams,
+    TakeActionParams, WaitParams,
+};
 use mcp::SessionConfig;
 use protocol::{Client, ClientError, Endpoint, ServerMessage, Token};
 use rand::seq::SliceRandom;
@@ -424,10 +427,13 @@ async fn streamable_http_lists_tools_and_serves_resources() {
         "submit_deck",
         "search_cards",
         "deck_stats",
-        "save_deck",
     ] {
         assert!(names.contains(&expected), "missing {expected} in {names:?}");
     }
+    assert!(
+        !names.contains(&"save_deck"),
+        "save_deck is for deckbuilding only, not a seat in a game: {names:?}"
+    );
     let take = tools["result"]["tools"]
         .as_array()
         .unwrap()
@@ -674,6 +680,62 @@ async fn search_and_deck_stats_tools_work_before_the_game_starts() {
         "{sc}"
     );
 
+    // A seat started without a deck is told to pick one; it lists, reads, and submits by name.
+    let res = server.get_legal_actions().await.unwrap();
+    assert!(is_error(&res) && text_of(&res).contains("submit_deck"), "{}", text_of(&res));
+    let res = server.list_decks().await.unwrap();
+    let listing = text_of(&res);
+    assert!(listing.contains("rg-stompy") && listing.contains("legal"), "{listing}");
+    assert!(
+        !listing.contains("deckbuilder"),
+        "seated servers say nothing about an editor: {listing}"
+    );
+    let res = server
+        .get_deck(Parameters(GetDeckParams { name: Some("blue".into()) }))
+        .await
+        .unwrap();
+    assert!(
+        !is_error(&res) && text_of(&res).contains("Island") && text_of(&res).contains("curve"),
+        "{}",
+        text_of(&res)
+    );
+    let res = server
+        .get_deck(Parameters(GetDeckParams {
+            name: Some("no-such-deck".into()),
+        }))
+        .await
+        .unwrap();
+    assert!(is_error(&res));
+    let res = server.get_deck(Parameters(GetDeckParams { name: None })).await.unwrap();
+    assert!(is_error(&res), "seated: a name is required");
+    let res = server
+        .save_deck(Parameters(SaveDeckParams {
+            decklist: "17 Forest\n".into(),
+            name: Some("x".into()),
+            path: None,
+            overwrite: None,
+        }))
+        .await
+        .unwrap();
+    assert!(is_error(&res) && text_of(&res).contains("only available"), "{}", text_of(&res));
+    let res = server
+        .submit_deck(Parameters(SubmitDeckParams {
+            name: Some("no-such-deck".into()),
+            decklist: None,
+        }))
+        .await
+        .unwrap();
+    assert!(is_error(&res));
+    let res = server
+        .submit_deck(Parameters(SubmitDeckParams {
+            name: Some("blue".into()),
+            decklist: None,
+        }))
+        .await
+        .unwrap();
+    assert!(!is_error(&res) && text_of(&res).contains("ready"), "{}", text_of(&res));
+    assert!(server.session.as_ref().unwrap().lobby().seats[1].deck_ok);
+
     r.handle.shutdown();
     r.task.await.unwrap();
 }
@@ -786,4 +848,56 @@ async fn a_standalone_server_serves_card_data_without_a_game() {
         .await
         .unwrap();
     assert!(is_error(&res));
+
+    // With a deckbuilder open on a file, no name or path means that file; get_deck reads it.
+    let open_file = std::env::temp_dir()
+        .join(format!("manaline-open-{}", std::process::id()))
+        .join("tokens.txt");
+    std::fs::create_dir_all(open_file.parent().unwrap()).unwrap();
+    std::fs::write(&open_file, "17 Plains\n").unwrap();
+    let announced = protocol::endpoint::EditorSession::announce(&open_file, "cube").unwrap();
+    let res = server
+        .save_deck(Parameters(SaveDeckParams {
+            decklist: "17 Plains\n4 Raise the Alarm\n4 Attended Knight\n".into(),
+            name: None,
+            path: None,
+            overwrite: None,
+        }))
+        .await
+        .unwrap();
+    assert!(
+        !is_error(&res) && text_of(&res).contains("open in the deckbuilder"),
+        "{}",
+        text_of(&res)
+    );
+    assert!(std::fs::read_to_string(&open_file).unwrap().contains("Attended Knight"));
+    let res = server.get_deck(Parameters(GetDeckParams { name: None })).await.unwrap();
+    assert!(!is_error(&res) && text_of(&res).contains("Attended Knight"), "{}", text_of(&res));
+    let res = server.list_decks().await.unwrap();
+    assert!(text_of(&res).contains("open in the deckbuilder"), "{}", text_of(&res));
+    let res = server
+        .save_deck(Parameters(SaveDeckParams {
+            decklist: "1 Forest".into(),
+            name: Some("x".into()),
+            path: Some("y".into()),
+            overwrite: None,
+        }))
+        .await
+        .unwrap();
+    assert!(is_error(&res) && text_of(&res).contains("not both"));
+    announced.withdraw();
+    let res = server
+        .save_deck(Parameters(SaveDeckParams {
+            decklist: "1 Forest".into(),
+            name: None,
+            path: None,
+            overwrite: None,
+        }))
+        .await
+        .unwrap();
+    assert!(is_error(&res) && text_of(&res).contains("no deckbuilder open"), "{}", text_of(&res));
+    let res = server.get_deck(Parameters(GetDeckParams { name: None })).await.unwrap();
+    assert!(is_error(&res));
+    let res = server.list_decks().await.unwrap();
+    assert!(text_of(&res).contains("No deckbuilder is open"), "{}", text_of(&res));
 }

@@ -102,18 +102,19 @@ everything.
    creature and still hold priority) and lists the next legal actions.
 4. Repeat step 3 until it is no longer your turn to act, then go back to 1.
 
-## Building a deck
+## Choosing a deck
 
-Between games, `manaline mcp --http 127.0.0.1:7454` serves these tools with no
-game attached, for deckbuilding.
+If your seat at the table has no deck, pick one of the existing decks before
+the game starts. `list_decks` shows every deck with its colours and legality in
+the table's format, `get_deck` reads one out with its curve and colour
+analysis, and `submit_deck` with that deck's `name` plays it as-is. You cannot
+build a new deck during a game.
 
-`search_cards` finds cards with Scryfall-style queries (`t:creature c:g mv<=2`,
-`o:"draw a card"`, `kw:flying`), returning only cards this engine can play
-unless you ask otherwise. `deck_stats` analyses a decklist you write (one
-`N Card Name` per line): curve, colour sources against pips, and legality in
-the table's format. `save_deck` writes it to a file the human can play or open
-in the deckbuilder; `submit_deck` sends it into a game's lobby. A 40-card deck wants about 17
-lands; a 60-card deck about 24.
+Between games, with no game attached, the same server helps a human at the
+deckbuilder: `search_cards` finds cards with Scryfall-style queries
+(`t:creature c:g mv<=2`, `o:"draw a card"`, `kw:flying`), `deck_stats` analyses
+a decklist (one `N Card Name` per line) for curve, colour sources against pips,
+and legality, and `save_deck` writes a deck file for them.
 
 Use `say` to talk to the other players; it is a friendly table. You may
 `concede` at any point if the game is clearly lost, but play it out while

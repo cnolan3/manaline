@@ -14,6 +14,7 @@ use rmcp::service::RequestContext;
 use rmcp::{prompt, prompt_handler, prompt_router, tool, tool_handler, tool_router, RoleServer, ServerHandler};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -106,22 +107,92 @@ pub struct DeckStatsParams {
 pub struct SaveDeckParams {
     /// A decklist in the standard text format: one `N Card Name` per line.
     pub decklist: String,
-    /// A deck name; saved as `<name>.txt` in the manaline decks folder. Pass this or `path`.
+    /// A deck name; saved as `<name>.txt` in the human's decks directory. With neither `name` nor
+    /// `path`, the file the human has open in the deckbuilder is written.
     #[serde(default)]
     pub name: Option<String>,
-    /// An explicit file path to write instead.
+    /// An exact file path to write instead of a name.
     #[serde(default)]
     pub path: Option<String>,
-    /// Replace an existing file. Default false: an existing file is an error.
+    /// Replace an existing file. Default false: an existing file is an error (the file open in
+    /// the deckbuilder is always allowed).
     #[serde(default)]
     pub overwrite: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct SubmitDeckParams {
+    /// The `name` of a deck from `list_decks`, to play it as-is. Pass this or `decklist`.
+    #[serde(default)]
+    pub name: Option<String>,
     /// A decklist in the standard text format: one `N Card Name` per line.
-    pub decklist: String,
+    #[serde(default)]
+    pub decklist: Option<String>,
 }
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct GetDeckParams {
+    /// A deck from `list_decks` or a file path. Omit it to read the file the human has open in
+    /// the deckbuilder.
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+/// A deck reachable by name (any of the deck directories) or by path.
+struct DeckSource {
+    name: String,
+    /// The directory it was found in, for the listing.
+    origin: String,
+    text: String,
+}
+
+/// Every deck reachable by name, in `cards::deck_dirs` order (first match wins).
+fn available_decks() -> Vec<DeckSource> {
+    let mut out = Vec::new();
+    for name in cards::deck_names() {
+        let Some(path) = cards::deck_path(&name) else { continue };
+        let Ok(text) = std::fs::read_to_string(&path) else { continue };
+        let origin = path.parent().map(|d| d.display().to_string()).unwrap_or_default();
+        out.push(DeckSource { name, origin, text });
+    }
+    out
+}
+
+/// Resolve a deck by name or, failing that, as a file path.
+fn find_deck(name: &str) -> Option<DeckSource> {
+    let name = name.trim();
+    if let Some(path) = cards::deck_path(name) {
+        let text = std::fs::read_to_string(&path).ok()?;
+        let origin = path.parent().map(|d| d.display().to_string()).unwrap_or_default();
+        return Some(DeckSource {
+            name: name.trim_end_matches(".txt").to_string(),
+            origin,
+            text,
+        });
+    }
+    let text = std::fs::read_to_string(name).ok()?;
+    Some(DeckSource {
+        name: name.to_string(),
+        origin: "file".into(),
+        text,
+    })
+}
+
+/// The file the human has open in the deckbuilder, if exactly one editor is running.
+fn open_editor() -> Result<Option<protocol::endpoint::EditorSession>, String> {
+    let mut live = protocol::endpoint::EditorSession::live();
+    match live.len() {
+        0 => Ok(None),
+        1 => Ok(live.pop()),
+        _ => Err(format!(
+            "several deckbuilders are open ({}); name the file with `path`",
+            live.iter().map(|e| e.path.display().to_string()).collect::<Vec<_>>().join(", ")
+        )),
+    }
+}
+
+/// Tools that only make sense with no game attached (helping a human at the deckbuilder).
+const DECKBUILDING_ONLY_TOOLS: &[&str] = &["save_deck"];
 
 fn text_and_json(text: String, json: serde_json::Value) -> CallToolResult {
     let mut r = CallToolResult::success(vec![ContentBlock::text(text)]);
@@ -147,6 +218,22 @@ fn no_game() -> CallToolResult {
         "No game is connected: this server is serving card data only (search_cards, deck_stats, get_card, and the resources). \
          Start a game with `manaline play --vs claude` and point your client at the URL it prints to play.",
     )
+}
+
+/// Deck-level and per-card problems from a check report, as one list of strings.
+fn problems_of(report: &deckstats::CheckReport) -> Vec<String> {
+    report
+        .deck
+        .iter()
+        .map(ToString::to_string)
+        .chain(
+            report
+                .lines
+                .iter()
+                .filter(|l| l.status != deckstats::CardStatus::Ok)
+                .map(|l| format!("{}: {}", l.name, l.status)),
+        )
+        .collect()
 }
 
 fn tool_error(msg: impl Into<String>) -> CallToolResult {
@@ -175,6 +262,54 @@ impl McpServer {
 
     pub fn card_index(&self) -> Arc<cardsearch::Index> {
         self.index.get_or_init(|| Arc::new(cardsearch::Index::load(&self.cards))).clone()
+    }
+
+    /// Card count, colour letters, legality, and problems for a decklist.
+    fn summarise(&self, text: &str) -> (u32, String, bool, Vec<String>) {
+        let Ok(list) = deckstats::parse(text) else {
+            return (0, String::new(), false, vec!["unreadable decklist".into()]);
+        };
+        let res = list.resolve(&self.cards);
+        let stats = deckstats::Stats::compute(&res.deck, &self.cards);
+        let report = deckstats::check::check(&list, &self.format, &self.cards, None);
+        let colours: String = stats.pips.keys().map(|c| c.symbol()).collect();
+        (list.main_count(), colours, report.is_legal(), problems_of(&report))
+    }
+
+    /// The `deck_stats` reply for a decklist.
+    fn deck_stats_result(&self, decklist: &str) -> CallToolResult {
+        let list = match deckstats::parse(decklist) {
+            Ok(l) => l,
+            Err(e) => return tool_error(format!("could not read the decklist: {e}")),
+        };
+        let db = self.cards.clone();
+        let res = list.resolve(&db);
+        let stats = deckstats::Stats::compute(&res.deck, &db);
+        let report = deckstats::check::check(&list, &self.format, &db, None);
+        let mut text = deckstats::stats::render(&stats, &self.format.name);
+        if report.is_legal() {
+            text.push_str("\nlegal in this format\n");
+        } else {
+            text.push_str("\nproblems:\n");
+            for v in &report.deck {
+                text.push_str(&format!("  - {v}\n"));
+            }
+            for l in report.lines.iter().filter(|l| l.status != deckstats::CardStatus::Ok) {
+                text.push_str(&format!("  - {} {}: {}\n", l.count, l.name, l.status));
+            }
+        }
+        let problems = problems_of(&report);
+        text_and_json(
+            text,
+            serde_json::json!({
+                "cards": stats.cards, "lands": stats.lands, "creatures": stats.creatures, "other_spells": stats.noncreature_spells,
+                "average_mana_value": stats.average_mv, "median_mana_value": stats.median_mv, "interaction": stats.interaction,
+                "curve": stats.curve.iter().map(|(mv, (c, o))| serde_json::json!({"mana_value": mv, "creatures": c, "other": o})).collect::<Vec<_>>(),
+                "pips": stats.pips.iter().map(|(c, n)| (c.word().to_string(), n)).collect::<std::collections::BTreeMap<_, _>>(),
+                "sources": stats.sources.iter().map(|(c, n)| (c.word().to_string(), n)).collect::<std::collections::BTreeMap<_, _>>(),
+                "legal": report.is_legal(), "problems": problems,
+            }),
+        )
     }
 
     fn state_result(&self, session: &Session, view: &GameView, legal: &[LegalAction], extra: Option<serde_json::Value>) -> CallToolResult {
@@ -517,11 +652,13 @@ impl McpServer {
 
     #[tool(
         name = "save_deck",
-        description = "Write a decklist to a deck file the human can play or open in the deckbuilder. Give a `name` (saved to the manaline decks folder) or a `path`. Unknown card names are refused; the file is written in canonical order. Returns the path and the deck's legality in this format."
+        description = "Write a decklist to a deck file for the human you are helping at the deckbuilder. With no name or path it writes to the file they have open (which reloads); or give a `name` (saved in their decks directory) or an exact `path`; an existing file needs overwrite: true. Unknown card names are refused with suggestions; the file is written in canonical order. Returns the path and the deck's legality. Not available while seated in a game."
     )]
     pub async fn save_deck(&self, Parameters(p): Parameters<SaveDeckParams>) -> Result<CallToolResult, ErrorData> {
-        if let Some(session) = &self.session {
-            session.begin_call();
+        if self.session.is_some() {
+            return Ok(tool_error(
+                "save_deck is only available when helping a human at the deckbuilder (no game connected). At a table, pick one of the existing decks with list_decks and submit_deck.",
+            ));
         }
         let list = match deckstats::parse(&p.decklist) {
             Ok(l) => l,
@@ -539,15 +676,24 @@ impl McpServer {
                 .collect();
             return Ok(tool_error(format!("unknown cards, nothing written: {}", names.join(", "))));
         }
+        let mut open_file = false;
         let path = match (p.path, p.name) {
-            (Some(path), _) => std::path::PathBuf::from(path),
+            (Some(_), Some(_)) => return Ok(tool_error("pass either name or path, not both")),
+            (Some(path), None) => std::path::PathBuf::from(path),
             (None, Some(name)) => match cards::user_deck_path(&name) {
                 Some(p) => p,
                 None => return Ok(tool_error("give a plain deck name (no slashes) or an explicit path")),
             },
-            (None, None) => return Ok(tool_error("pass a name or a path")),
+            (None, None) => match open_editor() {
+                Ok(Some(e)) => {
+                    open_file = true;
+                    e.path
+                }
+                Ok(None) => return Ok(tool_error("pass a name or a path; the human has no deckbuilder open to save into")),
+                Err(e) => return Ok(tool_error(e)),
+            },
         };
-        if path.exists() && !p.overwrite.unwrap_or(false) {
+        if path.exists() && !p.overwrite.unwrap_or(false) && !open_file {
             return Ok(tool_error(format!(
                 "{} already exists; pass overwrite: true to replace it",
                 path.display()
@@ -577,6 +723,11 @@ impl McpServer {
             .collect();
         let count: u32 = list.main_count();
         let mut out = format!("Saved {count} cards to {}.\n", path.display());
+        if open_file {
+            out.push_str(
+                "That is the file the human has open in the deckbuilder; it reloads (or warns them, if they had unsaved edits).\n",
+            );
+        }
         if report.is_legal() {
             out.push_str(&format!(
                 "Legal in {}. Play it with: manaline play --deck {}",
@@ -603,49 +754,7 @@ impl McpServer {
         if let Some(session) = &self.session {
             session.begin_call();
         }
-        let list = match deckstats::parse(&p.decklist) {
-            Ok(l) => l,
-            Err(e) => return Ok(tool_error(format!("could not read the decklist: {e}"))),
-        };
-        let db = self.cards.clone();
-        let res = list.resolve(&db);
-        let stats = deckstats::Stats::compute(&res.deck, &db);
-        let report = deckstats::check::check(&list, &self.format, &db, None);
-        let mut text = deckstats::stats::render(&stats, &self.format.name);
-        if report.is_legal() {
-            text.push_str("\nlegal in this format\n");
-        } else {
-            text.push_str("\nproblems:\n");
-            for v in &report.deck {
-                text.push_str(&format!("  - {v}\n"));
-            }
-            for l in report.lines.iter().filter(|l| l.status != deckstats::CardStatus::Ok) {
-                text.push_str(&format!("  - {} {}: {}\n", l.count, l.name, l.status));
-            }
-        }
-        let problems: Vec<String> = report
-            .deck
-            .iter()
-            .map(ToString::to_string)
-            .chain(
-                report
-                    .lines
-                    .iter()
-                    .filter(|l| l.status != deckstats::CardStatus::Ok)
-                    .map(|l| format!("{}: {}", l.name, l.status)),
-            )
-            .collect();
-        Ok(text_and_json(
-            text,
-            serde_json::json!({
-                "cards": stats.cards, "lands": stats.lands, "creatures": stats.creatures, "other_spells": stats.noncreature_spells,
-                "average_mana_value": stats.average_mv, "median_mana_value": stats.median_mv, "interaction": stats.interaction,
-                "curve": stats.curve.iter().map(|(mv, (c, o))| serde_json::json!({"mana_value": mv, "creatures": c, "other": o})).collect::<Vec<_>>(),
-                "pips": stats.pips.iter().map(|(c, n)| (c.word().to_string(), n)).collect::<std::collections::BTreeMap<_, _>>(),
-                "sources": stats.sources.iter().map(|(c, n)| (c.word().to_string(), n)).collect::<std::collections::BTreeMap<_, _>>(),
-                "legal": report.is_legal(), "problems": problems,
-            }),
-        ))
+        Ok(self.deck_stats_result(&p.decklist))
     }
 
     #[tool(
@@ -704,8 +813,90 @@ impl McpServer {
     }
 
     #[tool(
+        name = "list_decks",
+        description = "Every deck you could play as it is, by name: card count, colours, whether it is legal in this format, and where it lives. Use get_deck to read one and submit_deck with its name to play it."
+    )]
+    pub async fn list_decks(&self) -> Result<CallToolResult, ErrorData> {
+        if let Some(session) = &self.session {
+            session.begin_call();
+        }
+        let mut text = String::new();
+        let mut json = Vec::new();
+        for d in available_decks() {
+            let (cards, colours, legal, problems) = self.summarise(&d.text);
+            let _ = writeln!(
+                text,
+                "{:<16} {:>3} cards  {:<6} {:<10} {}",
+                d.name,
+                cards,
+                colours,
+                if legal { "legal" } else { "not legal" },
+                d.origin
+            );
+            json.push(serde_json::json!({ "name": d.name, "origin": d.origin, "cards": cards, "colors": colours, "legal": legal, "problems": problems }));
+        }
+        if json.is_empty() {
+            text.push_str("no decks available\n");
+        }
+        let _ = writeln!(text, "\ndecks are looked up in: {}", cards::deck_dirs_text());
+        if self.session.is_none() {
+            match open_editor() {
+                Ok(Some(e)) => {
+                    let _ = writeln!(
+                        text,
+                        "The human has {} open in the deckbuilder ({} format): save_deck with no name or path writes there, and get_deck with no name reads it.",
+                        e.path.display(),
+                        e.format
+                    );
+                }
+                Ok(None) => text.push_str("No deckbuilder is open right now.\n"),
+                Err(e) => {
+                    let _ = writeln!(text, "{e}");
+                }
+            }
+        }
+        Ok(text_and_json(
+            text,
+            serde_json::json!({ "decks": json, "format": self.format.name }),
+        ))
+    }
+
+    #[tool(
+        name = "get_deck",
+        description = "Read one deck from list_decks (or a file path), or with no name the file the human has open in the deckbuilder: its full decklist text plus the same analysis deck_stats gives."
+    )]
+    pub async fn get_deck(&self, Parameters(p): Parameters<GetDeckParams>) -> Result<CallToolResult, ErrorData> {
+        if let Some(session) = &self.session {
+            session.begin_call();
+        }
+        let name = match p.name {
+            Some(n) => n,
+            None if self.session.is_none() => match open_editor() {
+                Ok(Some(e)) => e.path.display().to_string(),
+                Ok(None) => return Ok(tool_error("pass a deck name or path; the human has no deckbuilder open")),
+                Err(e) => return Ok(tool_error(e)),
+            },
+            None => return Ok(tool_error("pass a deck name from list_decks")),
+        };
+        let Some(d) = find_deck(&name) else {
+            return Ok(tool_error(format!("no deck named {name:?}; list_decks shows what is available")));
+        };
+        let stats = self.deck_stats_result(&d.text);
+        let mut text = format!("{} ({})\n\n{}\n", d.name, d.origin, d.text.trim_end());
+        if let Some(t) = stats.content.first().and_then(|c| c.as_text()) {
+            text.push('\n');
+            text.push_str(&t.text);
+        }
+        let mut json = serde_json::json!({ "name": d.name, "origin": d.origin, "decklist": d.text });
+        if let Some(sc) = stats.structured_content {
+            json["stats"] = sc;
+        }
+        Ok(text_and_json(text, json))
+    }
+
+    #[tool(
         name = "submit_deck",
-        description = "Submit your decklist (standard text format, e.g. \"17 Forest\\n4 Grizzly Bears\") and ready up. Only needed if the game has not started and no deck was given for you."
+        description = "Choose the deck you will play and ready up: the `name` of a deck from list_decks (played as-is), or a full decklist in the standard text format. Only needed if the game has not started and no deck was given for you."
     )]
     pub async fn submit_deck(&self, Parameters(p): Parameters<SubmitDeckParams>) -> Result<CallToolResult, ErrorData> {
         let Some(session) = self.session.as_ref() else {
@@ -714,7 +905,15 @@ impl McpServer {
         if session.started() {
             return Ok(tool_error("the game has already started"));
         }
-        match session.client.set_deck(&p.decklist).await {
+        let decklist = match (p.name, p.decklist) {
+            (Some(name), _) => match find_deck(&name) {
+                Some(d) => d.text,
+                None => return Ok(tool_error(format!("no deck named {name:?}; list_decks shows what is available"))),
+            },
+            (None, Some(text)) => text,
+            (None, None) => return Ok(tool_error("pass a deck name from list_decks or a decklist")),
+        };
+        match session.client.set_deck(&decklist).await {
             Ok(Ok(())) => {}
             Ok(Err(violations)) => {
                 let list: Vec<String> = violations.iter().map(|v| format!("- {v}")).collect();
@@ -779,6 +978,29 @@ impl McpServer {
 #[tool_handler]
 #[prompt_handler]
 impl ServerHandler for McpServer {
+    /// The generated list, minus tools that only make sense with no game attached.
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<rmcp::model::ListToolsResult, ErrorData> {
+        let supports_cache_hints = context
+            .protocol_version()
+            .is_some_and(|version| version >= rmcp::model::ProtocolVersion::V_2026_07_28);
+        let mut tools = Self::tool_router().list_all();
+        if self.session.is_some() {
+            tools.retain(|t| !DECKBUILDING_ONLY_TOOLS.contains(&t.name.as_ref()));
+        }
+        Ok(rmcp::model::ListToolsResult {
+            result_type: Some(rmcp::model::ResultType::COMPLETE),
+            tools,
+            meta: None,
+            next_cursor: None,
+            ttl_ms: supports_cache_hints.then_some(0),
+            cache_scope: supports_cache_hints.then_some(CacheScope::Public),
+        })
+    }
+
     fn get_info(&self) -> ServerInfo {
         let mut info = ServerInfo::new(
             ServerCapabilities::builder()
@@ -793,9 +1015,18 @@ impl ServerHandler for McpServer {
                 "manaline: you are seat {} in a game of Magic: The Gathering. Read `{PRIMER_URI}` for the rules, then loop wait_for_turn → take_action. Use `say` to talk to the table.",
                 session.me.0
             )),
-            None => info.with_instructions(format!(
-                "manaline card data (no game connected): use search_cards, deck_stats, get_card, and `{CUBE_URI}` to build a deck; `{PRIMER_URI}` has the rules."
-            )),
+            None => {
+                let open = match open_editor() {
+                    Ok(Some(e)) => format!(
+                        " The human has {} open in the deckbuilder: get_deck with no name reads it, save_deck with no name or path writes to it.",
+                        e.path.display()
+                    ),
+                    _ => String::new(),
+                };
+                info.with_instructions(format!(
+                    "manaline card data (no game connected): you are helping the human build a deck. Use list_decks, get_deck, search_cards, deck_stats, get_card, `{CUBE_URI}`, and save_deck; `{PRIMER_URI}` has the rules.{open}"
+                ))
+            }
         }
     }
 
