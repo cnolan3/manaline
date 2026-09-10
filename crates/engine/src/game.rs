@@ -117,13 +117,13 @@ pub enum PendingChoice {
         seat: Seat,
         filter: cardir::Filter,
         count: i32,
-        resume: crate::stack::Resume,
+        resume: crate::stack::Continuation,
     },
     /// An effect asks `seat` to discard `count` cards of their choice.
     EffectDiscard {
         seat: Seat,
         count: i32,
-        resume: crate::stack::Resume,
+        resume: crate::stack::Continuation,
     },
 }
 
@@ -837,15 +837,11 @@ impl Game {
         for (source, static_) in self.active_statics() {
             let ctx = crate::filter::Ctx::simple(self.objects[source].controller, Some(source));
             match static_ {
-                cardir::Static::PtBoost { filter, keywords, .. } if keywords.contains(&kw) => {
-                    if self.object_matches(id, filter, &ctx) {
-                        return true;
-                    }
+                cardir::Static::PtBoost { filter, keywords, .. } if keywords.contains(&kw) && self.object_matches(id, filter, &ctx) => {
+                    return true;
                 }
-                cardir::Static::GrantKeyword { filter, keyword } if *keyword == kw => {
-                    if self.object_matches(id, filter, &ctx) {
-                        return true;
-                    }
+                cardir::Static::GrantKeyword { filter, keyword } if *keyword == kw && self.object_matches(id, filter, &ctx) => {
+                    return true;
                 }
                 _ => {}
             }

@@ -74,10 +74,8 @@ impl Ctx<'_> {
                 }
             }
             Filter::Not(f) => self.filter(f),
-            Filter::Attached => {
-                if !self.card.is_aura() && !self.card.is_equipment() {
-                    self.err("Filter::Attached on a card that is neither an aura nor equipment");
-                }
+            Filter::Attached if !self.card.is_aura() && !self.card.is_equipment() => {
+                self.err("Filter::Attached on a card that is neither an aura nor equipment")
             }
             Filter::Subtype(s) if s.trim().is_empty() => self.err("empty subtype"),
             _ => {}

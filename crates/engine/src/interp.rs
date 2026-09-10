@@ -1,24 +1,28 @@
 //! `engine::interp`: one arm per IR effect (§4.1). Adding a primitive means
 //! an enum variant, an arm here, a renderer arm, and a test.
+//!
+//! `step` applies one effect. Effects that unfold into more work (a
+//! `Sequence`, a branch of a `Conditional`, "each player discards") hand back
+//! a `Frame` for the evaluator in `stack.rs` to push, so a choice raised
+//! anywhere inside them pauses the whole resolution and resumes it intact.
 
 use crate::action::{DamageTarget, Target};
 use crate::card::CardDef;
 use crate::event::Event;
 use crate::filter::Ctx;
 use crate::game::{Expiry, Game, Modifier, ModifierKind};
-use crate::stack::Suspend;
+use crate::stack::Frame;
 use crate::types::{Keyword, Mana, ObjectId, Seat, Zone};
 use cardir::{Condition, CounterKind, Effect};
 
 impl Game {
-    /// Apply one effect, or report the choice it needs first.
-    pub(crate) fn apply_effect(&mut self, ctx: &Ctx, effect: &Effect) -> Result<(), Suspend> {
+    /// Apply one effect. Returns a frame when the effect has more work that
+    /// must run (and may pause) after this step.
+    pub(crate) fn step(&mut self, ctx: &Ctx, effect: &Effect) -> Option<Frame> {
         match effect {
             Effect::DealDamage { amount, to } => {
                 let n = self.eval_amount(amount, ctx);
-                let Some(source) = ctx.this else {
-                    return Ok(());
-                };
+                let source = ctx.this?;
                 for target in self.refs_of(to, ctx) {
                     let dt = match target {
                         Target::Object(o) => DamageTarget::Object(o),
@@ -46,27 +50,11 @@ impl Game {
                 }
             }
             Effect::Discard { player, count, random } => {
-                let n = self.eval_amount(count, ctx).max(0);
-                let seats = self.players_of(player, ctx);
-                // Several players discarding by choice would need several suspensions;
-                // v1 cards only ever name one player or discard at random.
-                for seat in seats {
-                    let hand = self.players[seat.index()].hand.len() as i32;
-                    if hand == 0 || n == 0 {
-                        continue;
-                    }
-                    if *random || hand <= n {
-                        let mut hand: Vec<ObjectId> = self.players[seat.index()].hand.clone();
-                        if *random {
-                            use rand::seq::SliceRandom;
-                            hand.shuffle(&mut self.rng);
-                        }
-                        let chosen: Vec<ObjectId> = hand.into_iter().take(n as usize).collect();
-                        self.discard(seat, &chosen);
-                    } else {
-                        return Err(Suspend::Discard { seat, count: n });
-                    }
-                }
+                return Some(Frame::Discard {
+                    seats: self.players_of(player, ctx),
+                    count: self.eval_amount(count, ctx),
+                    random: *random,
+                });
             }
             Effect::GainLife { player, amount } => {
                 let n = self.eval_amount(amount, ctx);
@@ -183,30 +171,11 @@ impl Game {
                 }
             }
             Effect::Sacrifice { player, filter, count } => {
-                let n = self.eval_amount(count, ctx).max(0);
-                for seat in self.players_of(player, ctx) {
-                    let sub = Ctx { you: seat, ..ctx.clone() };
-                    let candidates: Vec<ObjectId> = self.players[seat.index()]
-                        .battlefield
-                        .clone()
-                        .into_iter()
-                        .filter(|id| self.object_matches(*id, filter, &sub))
-                        .collect();
-                    if candidates.is_empty() || n == 0 {
-                        continue;
-                    }
-                    if candidates.len() as i32 <= n {
-                        for id in candidates {
-                            self.sacrifice(seat, id);
-                        }
-                    } else {
-                        return Err(Suspend::Sacrifice {
-                            seat,
-                            filter: filter.clone(),
-                            count: n,
-                        });
-                    }
-                }
+                return Some(Frame::Sacrifice {
+                    seats: self.players_of(player, ctx),
+                    filter: filter.clone(),
+                    count: self.eval_amount(count, ctx),
+                });
             }
             Effect::Mill { player, count } => {
                 let n = self.eval_amount(count, ctx).max(0) as usize;
@@ -235,10 +204,10 @@ impl Game {
                 }
             }
             Effect::Sequence(es) => {
-                // Flattened by the caller's work list; if we get here, run inline.
-                for e in es {
-                    self.apply_effect(ctx, e)?;
-                }
+                return Some(Frame::Effects {
+                    effects: es.clone(),
+                    next: 0,
+                });
             }
             Effect::Conditional { if_, then, else_ } => {
                 let holds = match if_ {
@@ -255,15 +224,15 @@ impl Game {
                         })
                     }
                 };
-                if holds {
-                    self.apply_effect(ctx, then)?;
-                } else if let Some(e) = else_ {
-                    self.apply_effect(ctx, e)?;
-                }
+                let branch = if holds { Some(then) } else { else_.as_ref() };
+                return branch.map(|e| Frame::Effects {
+                    effects: vec![(**e).clone()],
+                    next: 0,
+                });
             }
             Effect::Unsupported { .. } => {}
         }
-        Ok(())
+        None
     }
 
     /// Damage from a source: marks it on creatures (deathtouch remembered),
@@ -370,10 +339,10 @@ impl Game {
         id
     }
 
-    /// Answer a pending sacrifice or effect-driven discard and resume.
+    /// Answer a pending sacrifice or effect-driven discard, then continue the
+    /// resolution that asked.
     pub(crate) fn answer_choice(&mut self, seat: Seat, objects: &[ObjectId]) {
-        let pending = self.pending.take();
-        match pending {
+        match self.pending.take() {
             Some(crate::game::PendingChoice::Sacrifice { resume, .. }) => {
                 for &id in objects {
                     self.sacrifice(seat, id);

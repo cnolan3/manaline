@@ -29,6 +29,8 @@ fn db_with_extras() -> Arc<engine::CardDb> {
         r#"Card(name: "Flash Bear", cost: "{1}{G}", types: [Creature], subtypes: ["Bear"], pt: (2, 2), text: "Flash", keywords: [Flash])"#,
         r#"Card(name: "Double Bear", cost: "{1}{R}", types: [Creature], subtypes: ["Bear"], pt: (2, 2), text: "Double strike", keywords: [DoubleStrike])"#,
         r#"Card(name: "Test Sac Outlet", cost: "{B}", types: [Creature], subtypes: ["Ghoul"], pt: (1, 1), text: "Sacrifice a creature: You gain 2 life.", activated: [Ability(cost: [Sacrifice(Creature)], effects: [GainLife(player: You, amount: Const(2))])])"#,
+        r#"Card(name: "Test Nested Edict", cost: "{1}{B}", types: [Sorcery], text: "Target opponent sacrifices a creature of their choice, then draw a card.", spell: Spell(targets: [Opponent], effects: [Sequence([Sacrifice(player: TargetOpponent(0), filter: Creature, count: Const(1)), Draw(player: You, count: Const(1))])]))"#,
+        r#"Card(name: "Test Wheel", cost: "{2}{B}", types: [Sorcery], text: "Each player discards a card. You gain 1 life.", spell: Spell(effects: [Discard(player: EachPlayer, count: Const(1)), GainLife(player: You, amount: Const(1))]))"#,
     ];
     let mut all = cards::core_ir();
     for text in extras {
@@ -335,6 +337,75 @@ fn mind_rot_lets_the_target_choose_what_to_discard() {
     game.apply(Seat(1), &pick).unwrap();
     assert_eq!(game.players[1].hand.len(), 1);
     assert_eq!(game.players[1].graveyard.len(), 2);
+}
+
+#[test]
+fn a_choice_inside_a_sequence_keeps_the_rest_of_the_sequence() {
+    let mut game = TestGame::new(db_with_extras(), 2)
+        .battlefield(Seat(0), "Swamp")
+        .battlefield(Seat(0), "Swamp")
+        .hand(Seat(0), "Test Nested Edict")
+        .library(Seat(0), &["Forest"; 3])
+        .battlefield(Seat(1), "Grizzly Bears")
+        .battlefield(Seat(1), "Hill Giant")
+        .build();
+    let hand_before = game.players[0].hand.len();
+    cast(&mut game, Seat(0), "Test Nested Edict", &[Target::Player(Seat(1))]);
+    resolve_top(&mut game);
+    assert!(matches!(game.pending, Some(PendingChoice::Sacrifice { seat: Seat(1), .. })));
+    let bears = bf(&game, Seat(1), "Grizzly Bears");
+    game.apply(
+        Seat(1),
+        &Action::ChooseTargets {
+            targets: vec![Target::Object(bears)],
+        },
+    )
+    .unwrap();
+    assert_eq!(game.objects[bears].zone, Zone::Graveyard);
+    assert_eq!(
+        game.players[0].hand.len(),
+        hand_before - 1 + 1,
+        "the draw after the sacrifice still happens"
+    );
+    assert!(game.pending.is_none());
+    assert_eq!(game.priority, Some(Seat(0)));
+}
+
+#[test]
+fn each_player_discarding_asks_every_seat_in_turn() {
+    let mut game = TestGame::new(db_with_extras(), 3)
+        .battlefield(Seat(0), "Swamp")
+        .battlefield(Seat(0), "Swamp")
+        .battlefield(Seat(0), "Swamp")
+        .hand(Seat(0), "Test Wheel")
+        .hand(Seat(0), "Forest") // plus the turn-one draw: a pod's starting player draws
+        .hand(Seat(1), "Forest")
+        .hand(Seat(1), "Grizzly Bears")
+        .hand(Seat(2), "Forest")
+        .build();
+    cast(&mut game, Seat(0), "Test Wheel", &[]);
+    resolve_top(&mut game);
+    // Seat 0 has two cards left and chooses; seat 1 chooses; seat 2's only card goes on its own.
+    for seat in [Seat(0), Seat(1)] {
+        assert!(
+            matches!(game.pending, Some(PendingChoice::EffectDiscard { seat: s, count: 1, .. }) if s == seat),
+            "{:?}",
+            game.pending
+        );
+        assert_eq!(game.must_act().get(&seat), Some(&ActReason::Discard));
+        let pick = game
+            .legal_actions(seat)
+            .into_iter()
+            .find(|a| matches!(a, Action::Discard { .. }))
+            .unwrap();
+        game.apply(seat, &pick).unwrap();
+    }
+    assert!(game.pending.is_none(), "{:?}", game.pending);
+    assert_eq!(game.players[0].hand.len(), 1);
+    assert_eq!(game.players[1].hand.len(), 1);
+    assert_eq!(game.players[2].hand.len(), 0);
+    assert_eq!(game.players[0].life, 21, "the effect after the discards still runs");
+    assert_eq!(game.priority, Some(Seat(0)));
 }
 
 // ----- triggers -----

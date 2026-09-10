@@ -172,7 +172,8 @@ impl Game {
                 Some(PendingChoice::DeclareBlockers { remaining, .. }) => self.continue_blockers(remaining),
                 Some(PendingChoice::Mulligan { .. }) | Some(PendingChoice::BottomCards { .. }) => self.advance_mulligan(seat),
                 Some(PendingChoice::ChooseTargets { .. }) => {
-                    if self.place_triggers() && self.priority.is_none() {
+                    let placed = self.place_triggers();
+                    if placed && self.priority.is_none() {
                         self.give_priority_to_active();
                     }
                 }

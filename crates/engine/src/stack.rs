@@ -1,5 +1,7 @@
 //! The stack: casting spells, activating abilities, placing triggers, and
-//! resolving all three (§3.3, §3.5). Resolution may suspend on a choice.
+//! resolving all three (§3.3, §3.5). Resolution runs on an explicit frame
+//! stack so it can pause on a player's choice at any depth and continue
+//! later from serialisable state.
 
 use crate::action::{ManaPayment, Target, EQUIP_ABILITY};
 use crate::error::RulesError;
@@ -8,22 +10,38 @@ use crate::filter::Ctx;
 use crate::game::{Game, PendingChoice, StackKind, StackObject};
 use crate::types::{ObjectId, Seat, Zone};
 use cardir::{Cost, Effect, Filter};
-use std::collections::VecDeque;
 
-/// What to do once an effect list finishes running.
+/// One step of work the evaluator still has to do. Frames are pushed as an
+/// effect unfolds (a `Sequence` becomes an `Effects` frame, "each player
+/// discards" becomes a `Discard` frame over the remaining seats) and popped
+/// as they finish, so pausing at any depth loses nothing.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum After {
-    Nothing,
-    /// An instant or sorcery goes to its owner's graveyard.
-    SpellToGraveyard(ObjectId),
+pub enum Frame {
+    /// Run `effects` in order; `next` is the index of the one to run next.
+    Effects { effects: Vec<Effect>, next: usize },
+    /// Each of `seats`, in order, discards `count` cards (at random, or by choice).
+    Discard { seats: Vec<Seat>, count: i32, random: bool },
+    /// Each of `seats`, in order, sacrifices `count` permanents matching `filter`.
+    Sacrifice { seats: Vec<Seat>, filter: Filter, count: i32 },
 }
 
-/// A resolution paused on a player's choice.
+/// A resolution in progress: what it is evaluating relative to, and the
+/// frames still to run (top of the stack last). Stored inside a
+/// `PendingChoice` while a player decides, and picked up again afterwards.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct Resume {
+pub struct Continuation {
     pub ctx: Ctx,
-    pub remaining: Vec<Effect>,
-    pub after: After,
+    pub frames: Vec<Frame>,
+}
+
+impl Continuation {
+    /// Run `effects` in order under `ctx`.
+    pub fn new(ctx: Ctx, effects: Vec<Effect>) -> Continuation {
+        Continuation {
+            ctx,
+            frames: vec![Frame::Effects { effects, next: 0 }],
+        }
+    }
 }
 
 impl Game {
@@ -176,7 +194,7 @@ impl Game {
         self.move_object(id, Zone::Graveyard);
     }
 
-    /// Resolve the top object. Returns `false` if resolution suspended on a choice.
+    /// Resolve the top object. Returns `false` if resolution paused on a choice.
     pub(crate) fn resolve(&mut self, so: StackObject) -> bool {
         let StackObject {
             object,
@@ -215,11 +233,11 @@ impl Game {
                 }
                 // An instant or sorcery leaves the stack as it resolves; nothing in
                 // v1 can observe the difference, and it keeps every object in exactly
-                // one zone list while a resolution is suspended on a choice.
+                // one zone list while a resolution is paused on a choice.
                 let effects = def.ir.spell.as_ref().map(|s| s.effects.clone()).unwrap_or_default();
                 self.move_object(object, Zone::Graveyard);
                 self.emit(Event::Resolved { object });
-                self.run_effects(ctx, effects.into(), After::Nothing)
+                self.run(Continuation::new(ctx, effects))
             }
             StackKind::Ability { source, index } => {
                 let def = self.card_def(source).clone();
@@ -233,7 +251,7 @@ impl Game {
                 if self.all_targets_illegal(&ability.targets, &ctx) {
                     return true;
                 }
-                self.run_effects(ctx, ability.effects.into(), After::Nothing)
+                self.run(Continuation::new(ctx, ability.effects))
             }
             StackKind::Equip { source } => {
                 if let Some(Target::Object(t)) = targets.first() {
@@ -263,7 +281,7 @@ impl Game {
                 if self.all_targets_illegal(trigger.targets(), &ctx) {
                     return true;
                 }
-                self.run_effects(ctx, trigger.effects().to_vec().into(), After::Nothing)
+                self.run(Continuation::new(ctx, trigger.effects().to_vec()))
             }
             StackKind::Prowess { source } => {
                 if self.objects[source].zone == Zone::Battlefield {
@@ -299,51 +317,101 @@ impl Game {
     }
 
     /// Continue a resolution that paused on a choice.
-    pub(crate) fn resume(&mut self, r: Resume) {
-        let done = self.run_effects(r.ctx, r.remaining.into(), r.after);
-        if done {
+    pub(crate) fn resume(&mut self, k: Continuation) {
+        if self.run(k) {
             self.give_priority_to_active();
         }
     }
 
-    /// Run effects front to back. Returns `true` when finished; `false` when
-    /// a player must choose something first (the state carries the resume).
-    pub(crate) fn run_effects(&mut self, ctx: Ctx, mut work: VecDeque<Effect>, after: After) -> bool {
-        while let Some(effect) = work.pop_front() {
-            match self.apply_effect(&ctx, &effect) {
-                Ok(()) => {}
-                Err(pending) => {
-                    let remaining: Vec<Effect> = work.into_iter().collect();
-                    let resume = Resume {
-                        ctx: ctx.clone(),
-                        remaining,
-                        after,
+    /// Run the continuation to completion. Returns `true` when finished;
+    /// `false` when a player must choose something first, in which case the
+    /// continuation (with the frame that asked still on it) is stored in
+    /// `pending` and nobody holds priority.
+    pub(crate) fn run(&mut self, mut k: Continuation) -> bool {
+        while let Some(frame) = k.frames.pop() {
+            match frame {
+                Frame::Effects { effects, next } => {
+                    let Some(effect) = effects.get(next).cloned() else { continue };
+                    if next + 1 < effects.len() {
+                        k.frames.push(Frame::Effects { effects, next: next + 1 });
+                    }
+                    if let Some(pushed) = self.step(&k.ctx, &effect) {
+                        k.frames.push(pushed);
+                    }
+                }
+                Frame::Discard { mut seats, count, random } => {
+                    if count <= 0 {
+                        continue;
+                    }
+                    let Some(seat) = (!seats.is_empty()).then(|| seats.remove(0)) else {
+                        continue;
                     };
-                    self.pending = Some(match pending {
-                        Suspend::Sacrifice { seat, filter, count } => PendingChoice::Sacrifice {
-                            seat,
-                            filter,
+                    if !seats.is_empty() {
+                        k.frames.push(Frame::Discard { seats, count, random });
+                    }
+                    let hand = self.players[seat.index()].hand.len() as i32;
+                    if hand == 0 {
+                        continue;
+                    }
+                    if random || hand <= count {
+                        let mut hand: Vec<ObjectId> = self.players[seat.index()].hand.clone();
+                        if random {
+                            use rand::seq::SliceRandom;
+                            hand.shuffle(&mut self.rng);
+                        }
+                        let chosen: Vec<ObjectId> = hand.into_iter().take(count as usize).collect();
+                        self.discard(seat, &chosen);
+                        continue;
+                    }
+                    self.pending = Some(PendingChoice::EffectDiscard { seat, count, resume: k });
+                    self.priority = None;
+                    return false;
+                }
+                Frame::Sacrifice { mut seats, filter, count } => {
+                    if count <= 0 {
+                        continue;
+                    }
+                    let Some(seat) = (!seats.is_empty()).then(|| seats.remove(0)) else {
+                        continue;
+                    };
+                    if !seats.is_empty() {
+                        k.frames.push(Frame::Sacrifice {
+                            seats,
+                            filter: filter.clone(),
                             count,
-                            resume,
-                        },
-                        Suspend::Discard { seat, count } => PendingChoice::EffectDiscard { seat, count, resume },
+                        });
+                    }
+                    // The filter is read from the sacrificing player's side ("a creature you control").
+                    let sub = Ctx {
+                        you: seat,
+                        ..k.ctx.clone()
+                    };
+                    let candidates: Vec<ObjectId> = self.players[seat.index()]
+                        .battlefield
+                        .clone()
+                        .into_iter()
+                        .filter(|id| self.object_matches(*id, &filter, &sub))
+                        .collect();
+                    if candidates.is_empty() {
+                        continue;
+                    }
+                    if candidates.len() as i32 <= count {
+                        for id in candidates {
+                            self.sacrifice(seat, id);
+                        }
+                        continue;
+                    }
+                    self.pending = Some(PendingChoice::Sacrifice {
+                        seat,
+                        filter,
+                        count,
+                        resume: k,
                     });
                     self.priority = None;
                     return false;
                 }
             }
         }
-        if let After::SpellToGraveyard(id) = after {
-            if self.objects.get(id).map(|o| o.zone == Zone::Stack).unwrap_or(false) {
-                self.move_object(id, Zone::Graveyard);
-            }
-        }
         true
     }
-}
-
-/// A choice an effect needs before it can continue.
-pub(crate) enum Suspend {
-    Sacrifice { seat: Seat, filter: Filter, count: i32 },
-    Discard { seat: Seat, count: i32 },
 }

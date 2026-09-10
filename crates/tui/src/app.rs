@@ -1096,11 +1096,7 @@ impl App {
                     p.amounts[p.cursor] += 1;
                 }
             }
-            KeyCode::Left | KeyCode::Char('-') => {
-                if p.amounts[p.cursor] > 0 {
-                    p.amounts[p.cursor] -= 1;
-                }
-            }
+            KeyCode::Left | KeyCode::Char('-') if p.amounts[p.cursor] > 0 => p.amounts[p.cursor] -= 1,
             KeyCode::Enter => {
                 let total: i32 = p.amounts.iter().sum();
                 if total != p.power {

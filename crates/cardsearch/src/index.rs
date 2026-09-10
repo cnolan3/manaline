@@ -98,7 +98,7 @@ impl Index {
                 )
             })
             .collect();
-        entries.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        entries.sort_by_key(|e| e.name.to_lowercase());
         Index { entries, from_cache: true }
     }
 
@@ -133,7 +133,7 @@ impl Index {
                 )
             })
             .collect();
-        entries.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        entries.sort_by_key(|e| e.name.to_lowercase());
         Index {
             entries,
             from_cache: false,

@@ -82,18 +82,16 @@ impl Game {
             }
             EventBase::PhaseChanged { phase: Phase::Upkeep } => self.fire_step_triggers(true),
             EventBase::PhaseChanged { phase: Phase::End } => self.fire_step_triggers(false),
-            EventBase::Cast { seat, object, .. } => {
-                if !self.card_def(*object).is_creature() {
-                    // Prowess on each creature the caster controls.
-                    for id in self.players[seat.index()].battlefield.clone() {
-                        if self.is_creature(id) && self.has_keyword(id, Keyword::Prowess) {
-                            self.fired.push(FiredTrigger {
-                                source: id,
-                                controller: *seat,
-                                index: None,
-                                triggering: Some(Target::Object(*object)),
-                            });
-                        }
+            EventBase::Cast { seat, object, .. } if !self.card_def(*object).is_creature() => {
+                // Prowess on each creature the caster controls.
+                for id in self.players[seat.index()].battlefield.clone() {
+                    if self.is_creature(id) && self.has_keyword(id, Keyword::Prowess) {
+                        self.fired.push(FiredTrigger {
+                            source: id,
+                            controller: *seat,
+                            index: None,
+                            triggering: Some(Target::Object(*object)),
+                        });
                     }
                 }
             }
