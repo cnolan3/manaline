@@ -28,6 +28,7 @@ libc.workspace = true
 
 [dev-dependencies]
 manaline-daemon = { path = "../daemon" }
+manaline-tui = { path = "../tui" }
 rand.workspace = true
 rand_chacha.workspace = true
 tokio = { workspace = true, features = ["full"] }

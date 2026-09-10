@@ -107,6 +107,9 @@ pub struct EditorSession {
     pub pid: u32,
     pub path: PathBuf,
     pub format: String,
+    /// The editor's Unix socket, if it accepts requests (see `crate::editor`).
+    #[serde(default)]
+    pub socket: Option<PathBuf>,
 }
 
 /// Where editor markers live: `<runtime dir>/editors`.
@@ -114,9 +117,23 @@ pub fn editor_sessions_dir() -> PathBuf {
     runtime_dir().join("editors")
 }
 
+/// Where the editor running as `pid` should listen: `<editors dir>/<pid>.sock`.
+pub fn socket_path_for(pid: u32) -> PathBuf {
+    editor_sessions_dir().join(format!("{pid}.sock"))
+}
+
 impl EditorSession {
     /// Record this process as editing `path` (canonicalised when possible). Writes `<dir>/<pid>.json`.
     pub fn announce(path: &Path, format: &str) -> std::io::Result<EditorSession> {
+        Self::write_marker(path, format, None)
+    }
+
+    /// As `announce`, but also record the socket this editor listens on for agent requests.
+    pub fn announce_with_socket(path: &Path, format: &str, socket: &Path) -> std::io::Result<EditorSession> {
+        Self::write_marker(path, format, Some(socket.to_path_buf()))
+    }
+
+    fn write_marker(path: &Path, format: &str, socket: Option<PathBuf>) -> std::io::Result<EditorSession> {
         let dir = editor_sessions_dir();
         std::fs::create_dir_all(&dir)?;
         #[cfg(unix)]
@@ -128,6 +145,7 @@ impl EditorSession {
             pid: std::process::id(),
             path: std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()),
             format: format.to_string(),
+            socket,
         };
         let json = serde_json::to_vec_pretty(&session).map_err(std::io::Error::other)?;
         std::fs::write(session.marker_path(), json)?;
@@ -210,6 +228,7 @@ mod tests {
         let session = EditorSession::announce(&deck, "modern").unwrap();
         assert_eq!(session.pid, std::process::id());
         assert_eq!(session.format, "modern");
+        assert_eq!(session.socket, None);
         assert!(EditorSession::live().contains(&session));
 
         // A marker for a process that does not exist is dropped and deleted.
@@ -217,6 +236,7 @@ mod tests {
             pid: 4_000_000_000,
             path: deck.clone(),
             format: "modern".into(),
+            socket: None,
         };
         let dead_marker = editor_sessions_dir().join(format!("{}.json", dead.pid));
         std::fs::write(&dead_marker, serde_json::to_vec(&dead).unwrap()).unwrap();
@@ -225,6 +245,16 @@ mod tests {
         assert!(!live.iter().any(|s| s.pid == dead.pid));
         assert!(!dead_marker.exists());
 
+        // An editor that accepts requests records its socket, and `live()` reports it.
+        let sock = socket_path_for(std::process::id());
+        let with_socket = EditorSession::announce_with_socket(&deck, "modern", &sock).unwrap();
+        assert_eq!(with_socket.socket.as_deref(), Some(sock.as_path()));
+        assert!(sock.to_string_lossy().ends_with(&format!("{}.sock", std::process::id())));
+        let live = EditorSession::live();
+        assert_eq!(live.iter().find(|s| s.pid == with_socket.pid), Some(&with_socket));
+
+        with_socket.withdraw();
+        assert!(!EditorSession::live().contains(&with_socket));
         session.withdraw();
         assert!(!EditorSession::live().contains(&session));
         let _ = std::fs::remove_file(&deck);

@@ -169,3 +169,77 @@ fn the_search_pane_only_offers_playable_cards_and_shows_a_card() {
     );
     assert!(ed.results.is_empty());
 }
+
+#[test]
+fn agent_requests_apply_like_keystrokes_and_are_marked() {
+    use protocol::editor::{EditorReply, EditorRequest};
+    let path = tempfile("agent", "17 Forest\n4 Grizzly Bears\n");
+    let mut ed = setup(Some(path.clone()), &std::fs::read_to_string(&path).unwrap());
+    match ed.apply_request(EditorRequest::Status) {
+        EditorReply::Status(st) => {
+            assert_eq!(st.cards, 21);
+            assert!(!st.dirty && st.last_agent_action.is_none());
+        }
+        other => panic!("{other:?}"),
+    }
+    match ed.apply_request(EditorRequest::AddCard {
+        name: "llanowar elves".into(),
+        count: 4,
+    }) {
+        EditorReply::Changed { message, status } => {
+            assert_eq!(message, "added 4 Llanowar Elves (now 4)");
+            assert!(status.dirty && status.cards == 25);
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(ed.agent_marked("Llanowar Elves") && !ed.agent_marked("Forest"));
+    assert_eq!(ed.status.as_deref(), Some("agent added 4 Llanowar Elves (now 4)"));
+    let s = render(&ed, 120, 36);
+    assert!(s.contains("◆ agent"), "{s}");
+    assert!(matches!(
+        ed.apply_request(EditorRequest::AddCard {
+            name: "Black Lotus".into(),
+            count: 1
+        }),
+        EditorReply::Error { .. }
+    ));
+    assert!(matches!(
+        ed.apply_request(EditorRequest::RemoveCard {
+            name: "Plummet".into(),
+            count: 1,
+            all: false
+        }),
+        EditorReply::Error { .. }
+    ));
+    match ed.apply_request(EditorRequest::SetCount {
+        name: "Grizzly Bears".into(),
+        count: 0,
+    }) {
+        EditorReply::Changed { status, .. } => assert_eq!(status.cards, 21),
+        other => panic!("{other:?}"),
+    }
+    assert!(!ed.main.iter().any(|(n, _)| n == "Grizzly Bears"));
+    match ed.apply_request(EditorRequest::Deck) {
+        EditorReply::Deck(d) => {
+            assert!(d.groups.iter().any(|g| g.title == "Creatures" && g.count == 4));
+            assert!(d.groups.iter().any(|g| g.title == "Lands" && g.cards[0].name == "Forest"));
+        }
+        other => panic!("{other:?}"),
+    }
+    // The human's undo key undoes the agent's change too.
+    ed.handle_key(key(KeyCode::Tab));
+    ed.handle_key(key(KeyCode::Char('u')));
+    assert!(ed.main.iter().any(|(n, _)| n == "Grizzly Bears"));
+    assert!(matches!(ed.apply_request(EditorRequest::Undo), EditorReply::Changed { .. }));
+    assert!(!ed.main.iter().any(|(n, _)| n == "Llanowar Elves"));
+    match ed.apply_request(EditorRequest::Save) {
+        EditorReply::Saved { path: p, status } => {
+            assert_eq!(p, path);
+            assert!(!status.dirty);
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(std::fs::read_to_string(&path)
+        .unwrap()
+        .starts_with("Deck\n4 Grizzly Bears\n17 Forest\n"));
+}

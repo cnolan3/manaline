@@ -4,8 +4,8 @@
 use daemon::{CreateGame, Daemon, DaemonConfig, DaemonHandle};
 use engine::{Action, Outcome, Seat};
 use mcp::server::{
-    DeckStatsParams, GetCardParams, GetDeckParams, GetLogParams, SaveDeckParams, SayParams, SearchParams, SubmitDeckParams,
-    TakeActionParams, WaitParams,
+    DeckStatsParams, EditorCardParams, EditorRemoveParams, EditorReplaceParams, EditorSetCountParams, GetCardParams, GetDeckParams,
+    GetLogParams, SayParams, SearchParams, SubmitDeckParams, TakeActionParams, WaitParams,
 };
 use mcp::SessionConfig;
 use protocol::{Client, ClientError, Endpoint, ServerMessage, Token};
@@ -431,8 +431,8 @@ async fn streamable_http_lists_tools_and_serves_resources() {
         assert!(names.contains(&expected), "missing {expected} in {names:?}");
     }
     assert!(
-        !names.contains(&"save_deck"),
-        "save_deck is for deckbuilding only, not a seat in a game: {names:?}"
+        !names.iter().any(|n| n.starts_with("editor_")),
+        "deckbuilder tools are hidden from a seat in a game: {names:?}"
     );
     let take = tools["result"]["tools"]
         .as_array()
@@ -690,10 +690,7 @@ async fn search_and_deck_stats_tools_work_before_the_game_starts() {
         !listing.contains("deckbuilder"),
         "seated servers say nothing about an editor: {listing}"
     );
-    let res = server
-        .get_deck(Parameters(GetDeckParams { name: Some("blue".into()) }))
-        .await
-        .unwrap();
+    let res = server.get_deck(Parameters(GetDeckParams { name: "blue".into() })).await.unwrap();
     assert!(
         !is_error(&res) && text_of(&res).contains("Island") && text_of(&res).contains("curve"),
         "{}",
@@ -701,23 +698,17 @@ async fn search_and_deck_stats_tools_work_before_the_game_starts() {
     );
     let res = server
         .get_deck(Parameters(GetDeckParams {
-            name: Some("no-such-deck".into()),
+            name: "no-such-deck".into(),
         }))
         .await
         .unwrap();
     assert!(is_error(&res));
-    let res = server.get_deck(Parameters(GetDeckParams { name: None })).await.unwrap();
-    assert!(is_error(&res), "seated: a name is required");
-    let res = server
-        .save_deck(Parameters(SaveDeckParams {
-            decklist: "17 Forest\n".into(),
-            name: Some("x".into()),
-            path: None,
-            overwrite: None,
-        }))
-        .await
-        .unwrap();
-    assert!(is_error(&res) && text_of(&res).contains("only available"), "{}", text_of(&res));
+    let res = server.editor_status().await.unwrap();
+    assert!(
+        is_error(&res) && text_of(&res).contains("only available"),
+        "seated: no deckbuilder tools: {}",
+        text_of(&res)
+    );
     let res = server
         .submit_deck(Parameters(SubmitDeckParams {
             name: Some("no-such-deck".into()),
@@ -787,117 +778,133 @@ async fn a_standalone_server_serves_card_data_without_a_game() {
     assert!(is_error(&res));
     assert!(mcp::server::cube_text(&server.cards).contains("Serra Angel"));
 
-    // save_deck writes canonical text, refuses unknown cards, and reports legality.
-    let dir = std::env::temp_dir().join(format!("manaline-save-{}", std::process::id()));
+    // With no deckbuilder open, the editor tools say so.
+    let res = server.editor_status().await.unwrap();
+    assert!(
+        is_error(&res) && text_of(&res).contains("no deckbuilder is open"),
+        "{}",
+        text_of(&res)
+    );
+    let res = server.list_decks().await.unwrap();
+    assert!(text_of(&res).contains("No deckbuilder is open"), "{}", text_of(&res));
+
+    // A deckbuilder open on a file: every change goes through it, is visible in its state, and only
+    // reaches the file on save.
+    let dir = std::env::temp_dir().join(format!("manaline-editor-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    let path = dir.join("agent.txt");
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("tokens.txt");
+    std::fs::write(&file, "17 Plains\n").unwrap();
+    let db = std::sync::Arc::new(cards::core());
+    let index = std::sync::Arc::new(cardsearch::Index::from_db(&db));
+    let editor = tui::editor::Editor::new(tui::editor::EditorSetup {
+        path: Some(file.clone()),
+        text: "17 Plains\n".into(),
+        format: engine::Format::cube(),
+        db,
+        index,
+        known: None,
+        theme: Default::default(),
+    })
+    .unwrap();
+    let editor = std::sync::Arc::new(std::sync::Mutex::new(editor));
+    let socket = dir.join("editor.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let service = tokio::spawn(tui::editor_service(listener, editor.clone()));
+    let announced = protocol::endpoint::EditorSession::announce_with_socket(&file, "cube", &socket).unwrap();
+
+    let res = server.editor_status().await.unwrap();
+    assert!(!is_error(&res) && text_of(&res).contains("17 cards"), "{}", text_of(&res));
+    let res = server.list_decks().await.unwrap();
+    assert!(text_of(&res).contains("open in the deckbuilder"), "{}", text_of(&res));
     let res = server
-        .save_deck(Parameters(SaveDeckParams {
-            decklist: "4 Grizly Bears\n17 Forest\n".into(),
-            name: None,
-            path: Some(path.display().to_string()),
-            overwrite: None,
+        .editor_add_card(Parameters(EditorCardParams {
+            name: "Raise the Alarm".into(),
+            count: Some(4),
         }))
         .await
         .unwrap();
     assert!(
-        is_error(&res) && text_of(&res).contains("did you mean Grizzly Bears"),
+        !is_error(&res) && text_of(&res).contains("added 4 Raise the Alarm"),
         "{}",
         text_of(&res)
     );
-    assert!(!path.exists());
-    let deck = format!(
-        "17 Forest\n4 Grizzly Bears\n{}",
-        "4 Llanowar Elves\n4 Centaur Courser\n4 Giant Growth\n4 Craw Wurm\n3 Elvish Visionary\n"
+    assert!(
+        editor.lock().unwrap().agent_marked("Raise the Alarm"),
+        "the human sees the change marked"
+    );
+    assert!(editor.lock().unwrap().dirty);
+    let res = server
+        .editor_add_card(Parameters(EditorCardParams {
+            name: "Raise teh Alarm".into(),
+            count: None,
+        }))
+        .await
+        .unwrap();
+    assert!(
+        is_error(&res) && text_of(&res).contains("did you mean Raise the Alarm"),
+        "{}",
+        text_of(&res)
     );
     let res = server
-        .save_deck(Parameters(SaveDeckParams {
-            decklist: deck.clone(),
-            name: None,
-            path: Some(path.display().to_string()),
-            overwrite: None,
+        .editor_set_count(Parameters(EditorSetCountParams {
+            name: "Attended Knight".into(),
+            count: 3,
         }))
         .await
         .unwrap();
     assert!(!is_error(&res), "{}", text_of(&res));
-    let sc = res.structured_content.clone().unwrap();
-    assert_eq!(sc["cards"], 40);
-    assert_eq!(sc["legal"], true);
-    let text = std::fs::read_to_string(&path).unwrap();
+    let res = server
+        .editor_remove_card(Parameters(EditorRemoveParams {
+            name: "Attended Knight".into(),
+            count: None,
+            all: None,
+        }))
+        .await
+        .unwrap();
+    assert!(!is_error(&res) && text_of(&res).contains("now 2"), "{}", text_of(&res));
+    let res = server.editor_deck().await.unwrap();
+    let deck = text_of(&res);
     assert!(
-        text.starts_with("Deck\n4 Llanowar Elves") && text.ends_with("17 Forest\n"),
-        "canonical order: {text}"
+        deck.contains("Creatures (2)") && deck.contains(" 4 Raise the Alarm") && deck.contains("Lands (17)"),
+        "{deck}"
     );
-    let res = server
-        .save_deck(Parameters(SaveDeckParams {
-            decklist: deck,
-            name: None,
-            path: Some(path.display().to_string()),
-            overwrite: None,
-        }))
-        .await
-        .unwrap();
-    assert!(is_error(&res) && text_of(&res).contains("already exists"));
-    let res = server
-        .save_deck(Parameters(SaveDeckParams {
-            decklist: "1 Forest".into(),
-            name: Some("../evil".into()),
-            path: None,
-            overwrite: None,
-        }))
-        .await
-        .unwrap();
-    assert!(is_error(&res));
-
-    // With a deckbuilder open on a file, no name or path means that file; get_deck reads it.
-    let open_file = std::env::temp_dir()
-        .join(format!("manaline-open-{}", std::process::id()))
-        .join("tokens.txt");
-    std::fs::create_dir_all(open_file.parent().unwrap()).unwrap();
-    std::fs::write(&open_file, "17 Plains\n").unwrap();
-    let announced = protocol::endpoint::EditorSession::announce(&open_file, "cube").unwrap();
-    let res = server
-        .save_deck(Parameters(SaveDeckParams {
-            decklist: "17 Plains\n4 Raise the Alarm\n4 Attended Knight\n".into(),
-            name: None,
-            path: None,
-            overwrite: None,
-        }))
-        .await
-        .unwrap();
+    let res = server.editor_undo().await.unwrap();
+    assert!(!is_error(&res), "{}", text_of(&res));
+    assert!(text_of(&server.editor_deck().await.unwrap()).contains("Creatures (3)"));
+    let res = server.editor_stats().await.unwrap();
     assert!(
-        !is_error(&res) && text_of(&res).contains("open in the deckbuilder"),
+        !is_error(&res) && text_of(&res).contains("curve") && text_of(&res).contains("sample opening hands"),
         "{}",
         text_of(&res)
     );
-    assert!(std::fs::read_to_string(&open_file).unwrap().contains("Attended Knight"));
-    let res = server.get_deck(Parameters(GetDeckParams { name: None })).await.unwrap();
-    assert!(!is_error(&res) && text_of(&res).contains("Attended Knight"), "{}", text_of(&res));
-    let res = server.list_decks().await.unwrap();
-    assert!(text_of(&res).contains("open in the deckbuilder"), "{}", text_of(&res));
+    assert!(editor.lock().unwrap().show_stats, "the human sees the stats pane too");
     let res = server
-        .save_deck(Parameters(SaveDeckParams {
-            decklist: "1 Forest".into(),
-            name: Some("x".into()),
-            path: Some("y".into()),
-            overwrite: None,
+        .editor_replace_deck(Parameters(EditorReplaceParams {
+            decklist: "17 Plains\n4 Grizly Bears\n".into(),
         }))
         .await
         .unwrap();
-    assert!(is_error(&res) && text_of(&res).contains("not both"));
+    assert!(is_error(&res) && text_of(&res).contains("nothing changed"), "{}", text_of(&res));
+    let res = server
+        .editor_replace_deck(Parameters(EditorReplaceParams {
+            decklist: "17 Plains\n4 Suntail Hawk\n".into(),
+        }))
+        .await
+        .unwrap();
+    assert!(!is_error(&res) && text_of(&res).contains("21 cards"), "{}", text_of(&res));
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        "17 Plains\n",
+        "nothing touched the file yet"
+    );
+    let res = server.editor_save().await.unwrap();
+    assert!(!is_error(&res) && text_of(&res).contains("Saved"), "{}", text_of(&res));
+    let saved = std::fs::read_to_string(&file).unwrap();
+    assert!(saved.starts_with("Deck\n4 Suntail Hawk\n17 Plains\n"), "canonical order: {saved}");
+    assert!(!editor.lock().unwrap().dirty);
+
     announced.withdraw();
-    let res = server
-        .save_deck(Parameters(SaveDeckParams {
-            decklist: "1 Forest".into(),
-            name: None,
-            path: None,
-            overwrite: None,
-        }))
-        .await
-        .unwrap();
-    assert!(is_error(&res) && text_of(&res).contains("no deckbuilder open"), "{}", text_of(&res));
-    let res = server.get_deck(Parameters(GetDeckParams { name: None })).await.unwrap();
-    assert!(is_error(&res));
-    let res = server.list_decks().await.unwrap();
-    assert!(text_of(&res).contains("No deckbuilder is open"), "{}", text_of(&res));
+    service.abort();
+    let _ = std::fs::remove_dir_all(&dir);
 }

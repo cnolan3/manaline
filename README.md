@@ -18,8 +18,8 @@ editor opens from the lobby with `d`, and saving there resubmits the deck.
 Search is the `cardsearch` crate: `t:creature c:g mv<=2 o:"draw a card"
 kw:flying -t:elf (bear or wurm)`, over every Oracle card when the Scryfall
 cache is present. It powers `manaline cards search`, the editor, and the MCP
-`search_cards` tool; `deck_stats` is on the MCP server too, so an agent can
-build its own deck.
+`search_cards` tool; `deck_stats` and the `editor_*` tools are on the MCP server too, so an agent
+can help build a deck through the open editor.
 
 Also in this milestone: colour themes (`default`, `mono`, `high-contrast`)
 chosen in the settings menu or with `--theme`; an 80×24 layout that wraps the
@@ -96,6 +96,13 @@ Deckbuilder keys: type to search, `↑↓` and `Enter` to add, `Tab` to the deck
 pane, `+`/`-`/`x` to change counts, `t` for stats and sample hands, `s` to
 save, `u` to undo, `q` to quit, `?` for the rest. `scripts/screencast.sh`
 records a short tour with asciinema.
+
+An agent can sit with you at the deckbuilder: run `manaline mcp --http
+127.0.0.1:7454` alongside `manaline deck edit <file>`, and its `editor_*` tools
+add and remove cards, pull up stats, undo, and save through the editor you
+already have open. Every change the agent makes is highlighted in place, so you
+see it arrive and can take it back with `u`. The MCP server never writes deck
+files itself; only the editor does, when you or `editor_save` saves.
 
 Deck files: one `N Card Name` per line, optional `Deck` / `Sideboard` headers,
 `//` comments, `(SET) 123` printing suffixes tolerated. A deck name works

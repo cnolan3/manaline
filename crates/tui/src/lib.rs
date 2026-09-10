@@ -312,32 +312,77 @@ async fn replay_loop(app: &mut App, terminal: &mut ratatui::DefaultTerminal) -> 
 
 /// Run the deckbuilder on its own (`manaline deck edit`).
 pub async fn run_editor(setup: editor::EditorSetup) -> Result<()> {
-    let mut ed = editor::Editor::new(setup).map_err(|e| anyhow!(e))?;
-    // Announce the open file so an MCP server can find what the human is editing.
-    let session = ed
-        .path
-        .clone()
-        .and_then(|p| protocol::endpoint::EditorSession::announce(&p, &ed.format.name).ok());
+    let ed = editor::Editor::new(setup).map_err(|e| anyhow!(e))?;
+    let ed = std::sync::Arc::new(std::sync::Mutex::new(ed));
+    // Listen for an MCP server acting on the human's behalf.
+    let socket = protocol::endpoint::socket_path_for(std::process::id());
+    let _ = std::fs::remove_file(&socket);
+    let service = match tokio::net::UnixListener::bind(&socket) {
+        Ok(listener) => Some(tokio::spawn(editor_service(listener, ed.clone()))),
+        Err(e) => {
+            eprintln!("deckbuilder socket unavailable ({e}); agents cannot drive this editor");
+            None
+        }
+    };
+    // Announce the open file (and the socket) so an MCP server can find what the human is editing.
+    let announced = {
+        let g = ed.lock().unwrap();
+        g.path.clone().and_then(|p| match &service {
+            Some(_) => protocol::endpoint::EditorSession::announce_with_socket(&p, &g.format.name, &socket).ok(),
+            None => protocol::endpoint::EditorSession::announce(&p, &g.format.name).ok(),
+        })
+    };
     let guard = TerminalGuard::enter()?;
     let mut terminal = ratatui::init();
-    let result = editor_loop(&mut ed, &mut terminal).await;
+    let result = editor_loop(&ed, &mut terminal).await;
     ratatui::restore();
     drop(guard);
-    if let Some(session) = session {
-        session.withdraw();
+    if let Some(a) = announced {
+        a.withdraw();
     }
+    if let Some(s) = service {
+        s.abort();
+    }
+    let _ = std::fs::remove_file(&socket);
     result
 }
 
-async fn editor_loop(ed: &mut editor::Editor, terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
-    let mut events = EventStream::new();
-    let mut tick = tokio::time::interval(Duration::from_secs(1));
+/// Serve agent requests on the editor's socket: one request per connection,
+/// applied to the shared editor between the human's own keystrokes.
+pub async fn editor_service(listener: tokio::net::UnixListener, ed: std::sync::Arc<std::sync::Mutex<editor::Editor>>) {
     loop {
-        terminal.draw(|f| editor_ui::draw(f, ed))?;
+        let Ok((stream, _)) = listener.accept().await else { return };
+        let ed = ed.clone();
+        tokio::spawn(async move {
+            let (r, w) = stream.into_split();
+            let mut reader: protocol::FramedReader<_, protocol::editor::EditorRequest> = protocol::FramedReader::new(r);
+            let mut writer: protocol::FramedWriter<_, protocol::editor::EditorReply> = protocol::FramedWriter::new(w);
+            let reply = match reader.recv().await {
+                Ok(req) => ed.lock().unwrap().apply_request(req),
+                Err(e) => protocol::editor::EditorReply::Error {
+                    message: format!("bad request: {e}"),
+                },
+            };
+            let _ = writer.send(&reply).await;
+        });
+    }
+}
+
+async fn editor_loop(ed: &std::sync::Arc<std::sync::Mutex<editor::Editor>>, terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
+    let mut events = EventStream::new();
+    // Redraw often enough that an agent's change (and its highlight) shows promptly.
+    let mut tick = tokio::time::interval(Duration::from_millis(250));
+    let mut ticks: u32 = 0;
+    loop {
+        {
+            let g = ed.lock().unwrap();
+            terminal.draw(|f| editor_ui::draw(f, &g))?;
+        }
         tokio::select! {
             ev = events.next() => match ev {
                 Some(Ok(TermEvent::Key(key))) if key.kind != KeyEventKind::Release => {
-                    for c in ed.handle_key(key) {
+                    let commands = ed.lock().unwrap().handle_key(key);
+                    for c in commands {
                         if c == editor::EditorCommand::Quit {
                             return Ok(());
                         }
@@ -347,7 +392,12 @@ async fn editor_loop(ed: &mut editor::Editor, terminal: &mut ratatui::DefaultTer
                 Some(Err(e)) => return Err(e.into()),
                 None => return Ok(()),
             },
-            _ = tick.tick() => ed.check_disk(),
+            _ = tick.tick() => {
+                ticks += 1;
+                if ticks % 4 == 0 {
+                    ed.lock().unwrap().check_disk();
+                }
+            }
         }
     }
 }

@@ -70,6 +70,10 @@ pub struct Editor {
     disk_mtime: Option<SystemTime>,
     pub disk_changed: bool,
     pub theme: crate::theme::Theme,
+    /// The last thing an agent did through the editor, for the status line and the MCP reply.
+    pub last_agent_action: Option<String>,
+    /// Rows an agent just changed, highlighted until they age out.
+    pub agent_marks: Vec<(String, std::time::Instant)>,
 }
 
 impl Editor {
@@ -111,6 +115,8 @@ impl Editor {
             disk_mtime,
             disk_changed: false,
             theme: setup.theme,
+            last_agent_action: None,
+            agent_marks: Vec::new(),
         };
         ed.search();
         ed.recompute();
@@ -611,4 +617,233 @@ fn type_rank(c: &engine::CardDef) -> u8 {
 
 fn mtime(p: &Path) -> Option<SystemTime> {
     std::fs::metadata(p).ok()?.modified().ok()
+}
+
+// ----- what an agent may do through the editor (over its socket) -----
+
+use protocol::editor::{DeckCard, DeckGroup, EditorDeck, EditorReply, EditorRequest, EditorStatus};
+
+/// How long an agent's change stays highlighted in the deck pane.
+pub const AGENT_MARK_SECS: u64 = 4;
+
+impl Editor {
+    fn note_agent(&mut self, what: String, name: Option<&str>) {
+        self.status = Some(format!("agent {what}"));
+        self.last_agent_action = Some(what);
+        if let Some(n) = name {
+            self.agent_marks.retain(|(m, _)| !m.eq_ignore_ascii_case(n));
+            self.agent_marks.push((n.to_string(), std::time::Instant::now()));
+        }
+    }
+
+    /// Whether an agent changed this row recently (drives the highlight).
+    pub fn agent_marked(&self, name: &str) -> bool {
+        self.agent_marks
+            .iter()
+            .any(|(m, at)| m.eq_ignore_ascii_case(name) && at.elapsed().as_secs() < AGENT_MARK_SECS)
+    }
+
+    /// The canonical name of a playable card, or a message with a suggestion.
+    fn playable(&self, name: &str) -> Result<String, String> {
+        match self.index.get(name) {
+            Some(e) if e.implemented => Ok(e.name.clone()),
+            Some(e) => Err(format!("{} is not a card the engine can play yet", e.name)),
+            None => {
+                let hint = deckstats::parse::suggest(name, &self.db)
+                    .map(|s| format!(" (did you mean {s}?)"))
+                    .unwrap_or_default();
+                Err(format!("no card named {name:?}{hint}"))
+            }
+        }
+    }
+
+    pub fn status_report(&self) -> EditorStatus {
+        EditorStatus {
+            path: self.path.clone().unwrap_or_default(),
+            format: self.format.name.clone(),
+            cards: self.card_count(),
+            dirty: self.dirty,
+            legal: self.report.is_legal(),
+            legality: self.legality_line(),
+            last_agent_action: self.last_agent_action.clone(),
+        }
+    }
+
+    pub fn deck_report(&self) -> EditorDeck {
+        let mut groups: Vec<DeckGroup> = Vec::new();
+        for row in self.rows() {
+            match row {
+                Row::Header(title, count) => groups.push(DeckGroup {
+                    title,
+                    count,
+                    cards: Vec::new(),
+                }),
+                Row::Card { name, count } => {
+                    let problem = match self.status_of(&name) {
+                        Some(CardStatus::Ok) | None => String::new(),
+                        Some(s) => s.to_string(),
+                    };
+                    let cost = self.card_cost(&name);
+                    if let Some(g) = groups.last_mut() {
+                        g.cards.push(DeckCard {
+                            name,
+                            count,
+                            cost,
+                            problem,
+                        });
+                    }
+                }
+            }
+        }
+        EditorDeck {
+            status: self.status_report(),
+            groups,
+        }
+    }
+
+    /// Apply one request from an agent, exactly as the human's keys would.
+    pub fn apply_request(&mut self, req: EditorRequest) -> EditorReply {
+        match req {
+            EditorRequest::Status => EditorReply::Status(self.status_report()),
+            EditorRequest::Deck => EditorReply::Deck(self.deck_report()),
+            EditorRequest::AddCard { name, count } => {
+                let count = count.max(1);
+                let name = match self.playable(&name) {
+                    Ok(n) => n,
+                    Err(e) => return EditorReply::Error { message: e },
+                };
+                self.add(&name, count);
+                let now = self.main.iter().find(|(n, _)| *n == name).map(|(_, c)| *c).unwrap_or(0);
+                self.note_agent(format!("added {count} {name} (now {now})"), Some(&name));
+                EditorReply::Changed {
+                    message: self.last_agent_action.clone().unwrap_or_default(),
+                    status: self.status_report(),
+                }
+            }
+            EditorRequest::RemoveCard { name, count, all } => {
+                let Some((name, have)) = self.main.iter().find(|(n, _)| n.eq_ignore_ascii_case(&name)).cloned() else {
+                    return EditorReply::Error {
+                        message: format!("{name} is not in the deck"),
+                    };
+                };
+                let n = if all { u32::MAX } else { count.max(1) };
+                self.remove(&name, n);
+                let left = self.main.iter().find(|(x, _)| *x == name).map(|(_, c)| *c).unwrap_or(0);
+                let what = if left == 0 {
+                    format!("removed {name} (was {have})")
+                } else {
+                    format!("removed {n} {name} (now {left})")
+                };
+                self.note_agent(what, Some(&name));
+                EditorReply::Changed {
+                    message: self.last_agent_action.clone().unwrap_or_default(),
+                    status: self.status_report(),
+                }
+            }
+            EditorRequest::SetCount { name, count } => {
+                let name = match self.playable(&name) {
+                    Ok(n) => n,
+                    Err(e) => return EditorReply::Error { message: e },
+                };
+                let have = self.main.iter().find(|(n, _)| *n == name).map(|(_, c)| *c).unwrap_or(0);
+                if count > have {
+                    self.add(&name, count - have);
+                } else if count < have {
+                    self.remove(&name, have - count);
+                }
+                self.note_agent(format!("set {name} to {count} (was {have})"), Some(&name));
+                EditorReply::Changed {
+                    message: self.last_agent_action.clone().unwrap_or_default(),
+                    status: self.status_report(),
+                }
+            }
+            EditorRequest::ReplaceDeck { decklist } => {
+                let list = match deckstats::parse(&decklist) {
+                    Ok(l) => l,
+                    Err(e) => {
+                        return EditorReply::Error {
+                            message: format!("could not read the decklist: {e}"),
+                        }
+                    }
+                };
+                let mut main: Vec<(String, u32)> = Vec::new();
+                for e in list.main() {
+                    let name = match self.playable(&e.name) {
+                        Ok(n) => n,
+                        Err(err) => {
+                            return EditorReply::Error {
+                                message: format!("nothing changed: {err}"),
+                            }
+                        }
+                    };
+                    match main.iter_mut().find(|(n, _)| *n == name) {
+                        Some((_, c)) => *c += e.count,
+                        None => main.push((name, e.count)),
+                    }
+                }
+                self.snapshot();
+                self.main = main;
+                self.dirty = true;
+                self.recompute();
+                self.agent_marks = self.main.iter().map(|(n, _)| (n.clone(), std::time::Instant::now())).collect();
+                self.note_agent(format!("replaced the deck ({} cards)", self.card_count()), None);
+                EditorReply::Changed {
+                    message: self.last_agent_action.clone().unwrap_or_default(),
+                    status: self.status_report(),
+                }
+            }
+            EditorRequest::Undo => {
+                if self.undo.is_empty() {
+                    return EditorReply::Error {
+                        message: "nothing to undo".into(),
+                    };
+                }
+                self.undo();
+                self.note_agent("undid the last change".into(), None);
+                EditorReply::Changed {
+                    message: self.last_agent_action.clone().unwrap_or_default(),
+                    status: self.status_report(),
+                }
+            }
+            EditorRequest::Stats => {
+                self.show_stats = true;
+                self.deal_hands();
+                let mut text = deckstats::stats::render(&self.stats, &self.format.name);
+                if !self.hands.is_empty() {
+                    text.push_str("\nsample opening hands:\n");
+                    for h in &self.hands {
+                        text.push_str("  ");
+                        text.push_str(&h.join(", "));
+                        text.push('\n');
+                    }
+                }
+                let s = &self.stats;
+                let json = serde_json::json!({
+                    "cards": s.cards, "lands": s.lands, "creatures": s.creatures, "other_spells": s.noncreature_spells,
+                    "average_mana_value": s.average_mv, "median_mana_value": s.median_mv, "interaction": s.interaction,
+                    "curve": s.curve.iter().map(|(mv, (c, o))| serde_json::json!({"mana_value": mv, "creatures": c, "other": o})).collect::<Vec<_>>(),
+                    "pips": s.pips.iter().map(|(c, n)| (c.word().to_string(), n)).collect::<std::collections::BTreeMap<_, _>>(),
+                    "sources": s.sources.iter().map(|(c, n)| (c.word().to_string(), n)).collect::<std::collections::BTreeMap<_, _>>(),
+                    "sample_hands": self.hands,
+                });
+                self.note_agent("looked at the stats".into(), None);
+                EditorReply::Stats {
+                    text,
+                    json,
+                    status: self.status_report(),
+                }
+            }
+            EditorRequest::Save => match self.save() {
+                Ok(_) => {
+                    let path = self.path.clone().unwrap_or_default();
+                    self.note_agent(format!("saved {}", path.display()), None);
+                    EditorReply::Saved {
+                        path,
+                        status: self.status_report(),
+                    }
+                }
+                Err(e) => EditorReply::Error { message: e },
+            },
+        }
+    }
 }

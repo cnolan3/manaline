@@ -136,6 +136,10 @@ fn draw_deck(f: &mut Frame, ed: &Editor, area: Rect) {
                         style = style.fg(ed.theme.danger);
                     }
                 }
+                if ed.agent_marked(name) {
+                    text.push_str("  ◆ agent");
+                    style = style.fg(ed.theme.warn).add_modifier(Modifier::BOLD);
+                }
                 if card_index == ed.deck_cursor {
                     cursor_line = lines.len();
                     style = if focused {

@@ -1117,6 +1117,7 @@ dependencies = [
  "manaline-deckstats",
  "manaline-engine",
  "manaline-protocol",
+ "manaline-tui",
  "rand 0.8.8",
  "rand_chacha",
  "rmcp",

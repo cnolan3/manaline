@@ -104,23 +104,6 @@ pub struct DeckStatsParams {
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
-pub struct SaveDeckParams {
-    /// A decklist in the standard text format: one `N Card Name` per line.
-    pub decklist: String,
-    /// A deck name; saved as `<name>.txt` in the human's decks directory. With neither `name` nor
-    /// `path`, the file the human has open in the deckbuilder is written.
-    #[serde(default)]
-    pub name: Option<String>,
-    /// An exact file path to write instead of a name.
-    #[serde(default)]
-    pub path: Option<String>,
-    /// Replace an existing file. Default false: an existing file is an error (the file open in
-    /// the deckbuilder is always allowed).
-    #[serde(default)]
-    pub overwrite: Option<bool>,
-}
-
-#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct SubmitDeckParams {
     /// The `name` of a deck from `list_decks`, to play it as-is. Pass this or `decklist`.
     #[serde(default)]
@@ -132,10 +115,8 @@ pub struct SubmitDeckParams {
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct GetDeckParams {
-    /// A deck from `list_decks` or a file path. Omit it to read the file the human has open in
-    /// the deckbuilder.
-    #[serde(default)]
-    pub name: Option<String>,
+    /// A deck from `list_decks` or a file path.
+    pub name: String,
 }
 
 /// A deck reachable by name (any of the deck directories) or by path.
@@ -191,8 +172,53 @@ fn open_editor() -> Result<Option<protocol::endpoint::EditorSession>, String> {
     }
 }
 
-/// Tools that only make sense with no game attached (helping a human at the deckbuilder).
-const DECKBUILDING_ONLY_TOOLS: &[&str] = &["save_deck"];
+/// Tools that drive the human's open deckbuilder; hidden from a seat in a game.
+const DECKBUILDING_ONLY_TOOLS: &[&str] = &[
+    "editor_status",
+    "editor_deck",
+    "editor_add_card",
+    "editor_remove_card",
+    "editor_set_count",
+    "editor_replace_deck",
+    "editor_undo",
+    "editor_stats",
+    "editor_save",
+];
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct EditorCardParams {
+    /// The card's name.
+    pub name: String,
+    /// How many copies. Default 1.
+    #[serde(default)]
+    pub count: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct EditorRemoveParams {
+    /// The card's name.
+    pub name: String,
+    /// How many copies to remove. Default 1.
+    #[serde(default)]
+    pub count: Option<u32>,
+    /// Remove every copy.
+    #[serde(default)]
+    pub all: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct EditorSetCountParams {
+    /// The card's name.
+    pub name: String,
+    /// The exact number of copies; 0 removes it.
+    pub count: u32,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct EditorReplaceParams {
+    /// The whole main deck, in the standard text format: one `N Card Name` per line.
+    pub decklist: String,
+}
 
 fn text_and_json(text: String, json: serde_json::Value) -> CallToolResult {
     let mut r = CallToolResult::success(vec![ContentBlock::text(text)]);
@@ -217,6 +243,20 @@ fn no_game() -> CallToolResult {
     tool_error(
         "No game is connected: this server is serving card data only (search_cards, deck_stats, get_card, and the resources). \
          Start a game with `manaline play --vs claude` and point your client at the URL it prints to play.",
+    )
+}
+
+fn status_text(st: &protocol::editor::EditorStatus) -> String {
+    format!(
+        "Deckbuilder on {} ({} format): {}{}{}",
+        st.path.display(),
+        st.format,
+        st.legality,
+        if st.dirty { " · unsaved changes" } else { "" },
+        st.last_agent_action
+            .as_ref()
+            .map(|a| format!(" · last agent action: {a}"))
+            .unwrap_or_default()
     )
 }
 
@@ -310,6 +350,58 @@ impl McpServer {
                 "legal": report.is_legal(), "problems": problems,
             }),
         )
+    }
+
+    /// Send one request to the human's open deckbuilder and turn the reply into a tool result.
+    async fn editor(&self, req: protocol::editor::EditorRequest) -> CallToolResult {
+        if self.session.is_some() {
+            return tool_error("the deckbuilder tools are only available when helping a human (no game connected)");
+        }
+        let editor = match open_editor() {
+            Ok(Some(e)) => e,
+            Ok(None) => return tool_error("no deckbuilder is open; ask the human to run `manaline deck edit <file>` and try again"),
+            Err(e) => return tool_error(e),
+        };
+        let Some(socket) = editor.socket.clone() else {
+            return tool_error(format!(
+                "the deckbuilder on {} is not accepting requests; ask the human to reopen it",
+                editor.path.display()
+            ));
+        };
+        use protocol::editor::EditorReply;
+        match protocol::editor::request(&socket, &req).await {
+            Ok(EditorReply::Status(st)) => text_and_json(status_text(&st), serde_json::to_value(&st).unwrap_or_default()),
+            Ok(EditorReply::Deck(d)) => {
+                let mut text = status_text(&d.status);
+                text.push('\n');
+                for g in &d.groups {
+                    let _ = writeln!(text, "{} ({})", g.title, g.count);
+                    for c in &g.cards {
+                        let problem = if c.problem.is_empty() {
+                            String::new()
+                        } else {
+                            format!("  ← {}", c.problem)
+                        };
+                        let _ = writeln!(text, "  {:>2} {} {}{problem}", c.count, c.name, c.cost);
+                    }
+                }
+                text_and_json(text, serde_json::to_value(&d).unwrap_or_default())
+            }
+            Ok(EditorReply::Changed { message, status }) => text_and_json(
+                format!("{message}\n{}", status_text(&status)),
+                serde_json::json!({ "message": message, "status": status }),
+            ),
+            Ok(EditorReply::Stats { text, json, status }) => text_and_json(
+                format!("{}\n{text}", status_text(&status)),
+                serde_json::json!({ "stats": json, "status": status }),
+            ),
+            Ok(EditorReply::Saved { path, status }) => text_and_json(
+                format!("Saved {}.\n{}", path.display(), status_text(&status)),
+                serde_json::json!({ "path": path, "status": status }),
+            ),
+            Ok(EditorReply::Error { message }) => tool_error(message),
+            Err(e) => tool_error(format!("could not reach the deckbuilder: {e}")),
+        }
     }
 
     fn state_result(&self, session: &Session, view: &GameView, legal: &[LegalAction], extra: Option<serde_json::Value>) -> CallToolResult {
@@ -651,99 +743,93 @@ impl McpServer {
     }
 
     #[tool(
-        name = "save_deck",
-        description = "Write a decklist to a deck file for the human you are helping at the deckbuilder. With no name or path it writes to the file they have open (which reloads); or give a `name` (saved in their decks directory) or an exact `path`; an existing file needs overwrite: true. Unknown card names are refused with suggestions; the file is written in canonical order. Returns the path and the deck's legality. Not available while seated in a game."
+        name = "editor_status",
+        description = "Whether the human has a deckbuilder open, which file and format, the card count, unsaved changes, and the legality line. All editor_* tools act on that open deckbuilder: the human sees every change, can undo it, and the file only changes on save."
     )]
-    pub async fn save_deck(&self, Parameters(p): Parameters<SaveDeckParams>) -> Result<CallToolResult, ErrorData> {
-        if self.session.is_some() {
-            return Ok(tool_error(
-                "save_deck is only available when helping a human at the deckbuilder (no game connected). At a table, pick one of the existing decks with list_decks and submit_deck.",
-            ));
-        }
-        let list = match deckstats::parse(&p.decklist) {
-            Ok(l) => l,
-            Err(e) => return Ok(tool_error(format!("could not read the decklist: {e}"))),
-        };
-        let res = list.resolve(&self.cards);
-        if !res.unresolved.is_empty() {
-            let names: Vec<String> = res
-                .unresolved
-                .iter()
-                .map(|u| match &u.suggestion {
-                    Some(s) => format!("{} (did you mean {s}?)", u.entry.name),
-                    None => u.entry.name.clone(),
-                })
-                .collect();
-            return Ok(tool_error(format!("unknown cards, nothing written: {}", names.join(", "))));
-        }
-        let mut open_file = false;
-        let path = match (p.path, p.name) {
-            (Some(_), Some(_)) => return Ok(tool_error("pass either name or path, not both")),
-            (Some(path), None) => std::path::PathBuf::from(path),
-            (None, Some(name)) => match cards::user_deck_path(&name) {
-                Some(p) => p,
-                None => return Ok(tool_error("give a plain deck name (no slashes) or an explicit path")),
-            },
-            (None, None) => match open_editor() {
-                Ok(Some(e)) => {
-                    open_file = true;
-                    e.path
-                }
-                Ok(None) => return Ok(tool_error("pass a name or a path; the human has no deckbuilder open to save into")),
-                Err(e) => return Ok(tool_error(e)),
-            },
-        };
-        if path.exists() && !p.overwrite.unwrap_or(false) && !open_file {
-            return Ok(tool_error(format!(
-                "{} already exists; pass overwrite: true to replace it",
-                path.display()
-            )));
-        }
-        if let Some(dir) = path.parent() {
-            if let Err(e) = std::fs::create_dir_all(dir) {
-                return Ok(tool_error(format!("could not create {}: {e}", dir.display())));
-            }
-        }
-        let text = list.to_text(&self.cards);
-        if let Err(e) = std::fs::write(&path, &text) {
-            return Ok(tool_error(format!("could not write {}: {e}", path.display())));
-        }
-        let report = deckstats::check::check(&list, &self.format, &self.cards, None);
-        let problems: Vec<String> = report
-            .deck
-            .iter()
-            .map(ToString::to_string)
-            .chain(
-                report
-                    .lines
-                    .iter()
-                    .filter(|l| l.status != deckstats::CardStatus::Ok)
-                    .map(|l| format!("{}: {}", l.name, l.status)),
-            )
-            .collect();
-        let count: u32 = list.main_count();
-        let mut out = format!("Saved {count} cards to {}.\n", path.display());
-        if open_file {
-            out.push_str(
-                "That is the file the human has open in the deckbuilder; it reloads (or warns them, if they had unsaved edits).\n",
-            );
-        }
-        if report.is_legal() {
-            out.push_str(&format!(
-                "Legal in {}. Play it with: manaline play --deck {}",
-                self.format.name,
-                path.display()
-            ));
-        } else {
-            out.push_str(&format!("Not yet legal in {}:\n", self.format.name));
-            for pr in &problems {
-                out.push_str(&format!("  - {pr}\n"));
-            }
-        }
-        Ok(text_and_json(
-            out,
-            serde_json::json!({ "path": path, "cards": count, "legal": report.is_legal(), "problems": problems, "text": text }),
-        ))
+    pub async fn editor_status(&self) -> Result<CallToolResult, ErrorData> {
+        Ok(self.editor(protocol::editor::EditorRequest::Status).await)
+    }
+
+    #[tool(
+        name = "editor_deck",
+        description = "The deck as the open deckbuilder holds it right now: grouped by type with counts and costs, each card's legality problem if any, and the status line."
+    )]
+    pub async fn editor_deck(&self) -> Result<CallToolResult, ErrorData> {
+        Ok(self.editor(protocol::editor::EditorRequest::Deck).await)
+    }
+
+    #[tool(
+        name = "editor_add_card",
+        description = "Add copies of a card to the open deckbuilder's deck (only cards the engine can play; unknown names get a suggestion). The human sees the row highlighted."
+    )]
+    pub async fn editor_add_card(&self, Parameters(p): Parameters<EditorCardParams>) -> Result<CallToolResult, ErrorData> {
+        Ok(self
+            .editor(protocol::editor::EditorRequest::AddCard {
+                name: p.name,
+                count: p.count.unwrap_or(1),
+            })
+            .await)
+    }
+
+    #[tool(
+        name = "editor_remove_card",
+        description = "Remove copies of a card from the open deckbuilder's deck, or every copy with all: true."
+    )]
+    pub async fn editor_remove_card(&self, Parameters(p): Parameters<EditorRemoveParams>) -> Result<CallToolResult, ErrorData> {
+        Ok(self
+            .editor(protocol::editor::EditorRequest::RemoveCard {
+                name: p.name,
+                count: p.count.unwrap_or(1),
+                all: p.all.unwrap_or(false),
+            })
+            .await)
+    }
+
+    #[tool(
+        name = "editor_set_count",
+        description = "Set a card to an exact number of copies in the open deckbuilder's deck; 0 removes it."
+    )]
+    pub async fn editor_set_count(&self, Parameters(p): Parameters<EditorSetCountParams>) -> Result<CallToolResult, ErrorData> {
+        Ok(self
+            .editor(protocol::editor::EditorRequest::SetCount {
+                name: p.name,
+                count: p.count,
+            })
+            .await)
+    }
+
+    #[tool(
+        name = "editor_replace_deck",
+        description = "Replace the whole main deck in the open deckbuilder with a decklist, as one undoable step. Refused entirely if any card is unknown or unplayable."
+    )]
+    pub async fn editor_replace_deck(&self, Parameters(p): Parameters<EditorReplaceParams>) -> Result<CallToolResult, ErrorData> {
+        Ok(self
+            .editor(protocol::editor::EditorRequest::ReplaceDeck { decklist: p.decklist })
+            .await)
+    }
+
+    #[tool(
+        name = "editor_undo",
+        description = "Undo the last change in the open deckbuilder, whether yours or the human's."
+    )]
+    pub async fn editor_undo(&self) -> Result<CallToolResult, ErrorData> {
+        Ok(self.editor(protocol::editor::EditorRequest::Undo).await)
+    }
+
+    #[tool(
+        name = "editor_stats",
+        description = "Curve, colour pips against sources, interaction count, land odds, and sample opening hands for the deck as currently edited; also switches the deckbuilder's right pane to the same stats so the human sees them."
+    )]
+    pub async fn editor_stats(&self) -> Result<CallToolResult, ErrorData> {
+        Ok(self.editor(protocol::editor::EditorRequest::Stats).await)
+    }
+
+    #[tool(
+        name = "editor_save",
+        description = "Ask the open deckbuilder to write its deck to its file, in canonical order."
+    )]
+    pub async fn editor_save(&self) -> Result<CallToolResult, ErrorData> {
+        Ok(self.editor(protocol::editor::EditorRequest::Save).await)
     }
 
     #[tool(
@@ -844,12 +930,12 @@ impl McpServer {
                 Ok(Some(e)) => {
                     let _ = writeln!(
                         text,
-                        "The human has {} open in the deckbuilder ({} format): save_deck with no name or path writes there, and get_deck with no name reads it.",
+                        "The human has {} open in the deckbuilder ({} format): the editor_* tools act on it.",
                         e.path.display(),
                         e.format
                     );
                 }
-                Ok(None) => text.push_str("No deckbuilder is open right now.\n"),
+                Ok(None) => text.push_str("No deckbuilder is open right now; the editor_* tools need one.\n"),
                 Err(e) => {
                     let _ = writeln!(text, "{e}");
                 }
@@ -863,21 +949,13 @@ impl McpServer {
 
     #[tool(
         name = "get_deck",
-        description = "Read one deck from list_decks (or a file path), or with no name the file the human has open in the deckbuilder: its full decklist text plus the same analysis deck_stats gives."
+        description = "Read one deck from list_decks (or a file path): its full decklist text plus the same analysis deck_stats gives."
     )]
     pub async fn get_deck(&self, Parameters(p): Parameters<GetDeckParams>) -> Result<CallToolResult, ErrorData> {
         if let Some(session) = &self.session {
             session.begin_call();
         }
-        let name = match p.name {
-            Some(n) => n,
-            None if self.session.is_none() => match open_editor() {
-                Ok(Some(e)) => e.path.display().to_string(),
-                Ok(None) => return Ok(tool_error("pass a deck name or path; the human has no deckbuilder open")),
-                Err(e) => return Ok(tool_error(e)),
-            },
-            None => return Ok(tool_error("pass a deck name from list_decks")),
-        };
+        let name = p.name;
         let Some(d) = find_deck(&name) else {
             return Ok(tool_error(format!("no deck named {name:?}; list_decks shows what is available")));
         };
@@ -1017,14 +1095,11 @@ impl ServerHandler for McpServer {
             )),
             None => {
                 let open = match open_editor() {
-                    Ok(Some(e)) => format!(
-                        " The human has {} open in the deckbuilder: get_deck with no name reads it, save_deck with no name or path writes to it.",
-                        e.path.display()
-                    ),
-                    _ => String::new(),
+                    Ok(Some(e)) => format!(" The human has {} open in the deckbuilder: the editor_* tools act on it.", e.path.display()),
+                    _ => " No deckbuilder is open yet; ask the human to run `manaline deck edit <file>` before changing a deck.".to_string(),
                 };
                 info.with_instructions(format!(
-                    "manaline card data (no game connected): you are helping the human build a deck. Use list_decks, get_deck, search_cards, deck_stats, get_card, `{CUBE_URI}`, and save_deck; `{PRIMER_URI}` has the rules.{open}"
+                    "manaline card data (no game connected): you are helping the human build a deck in their open deckbuilder. Look things up with search_cards, get_card, deck_stats, list_decks, and get_deck; change the deck only through editor_add_card, editor_remove_card, editor_set_count, editor_replace_deck, editor_undo, editor_stats, and editor_save. `{PRIMER_URI}` has the rules.{open}"
                 ))
             }
         }

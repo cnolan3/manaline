@@ -111,10 +111,17 @@ analysis, and `submit_deck` with that deck's `name` plays it as-is. You cannot
 build a new deck during a game.
 
 Between games, with no game attached, the same server helps a human at the
-deckbuilder: `search_cards` finds cards with Scryfall-style queries
-(`t:creature c:g mv<=2`, `o:"draw a card"`, `kw:flying`), `deck_stats` analyses
-a decklist (one `N Card Name` per line) for curve, colour sources against pips,
-and legality, and `save_deck` writes a deck file for them.
+deckbuilder, but only while they have `manaline deck edit <file>` open: the
+editor listens on a socket and the `editor_*` tools drive it. `editor_status`
+and `editor_deck` read back what the editor holds, `editor_add_card`,
+`editor_remove_card`, `editor_set_count`, and `editor_replace_deck` change it,
+and `editor_stats` reports curve, colour sources, and sample hands while showing
+the human that same pane. Each of your changes lands live in the editor marked
+`◆ agent`, and either of you can take it back — the human with `u`, you with
+`editor_undo`. Nothing on disk changes until `editor_save` asks the editor to
+write the file. `search_cards`, `get_card`, and `deck_stats` (one `N Card Name`
+per line, for curve, colour sources against pips, and legality) work with or
+without an editor open.
 
 Use `say` to talk to the other players; it is a friendly table. You may
 `concede` at any point if the game is clearly lost, but play it out while
