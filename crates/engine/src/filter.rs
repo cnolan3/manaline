@@ -4,6 +4,7 @@ use crate::action::Target;
 use crate::game::Game;
 use crate::types::{CardType, Keyword, ObjectId, Seat, Zone};
 use cardir::{Amount, Filter, PlayerRef, Ref};
+use std::collections::BTreeMap;
 
 /// What a filter is evaluated relative to.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -16,15 +17,27 @@ pub struct Ctx {
     pub targets: Vec<Target>,
     /// The object or player that caused a trigger.
     pub triggering: Option<Target>,
+    /// What each `Chosen ... bind` picked as the effect resolved, by name.
+    #[serde(default)]
+    pub bindings: BTreeMap<String, Vec<Target>>,
+    /// Options picked by index ("you may": 0 did it, 1 declined), by name.
+    #[serde(default)]
+    pub options: BTreeMap<String, u8>,
 }
 
 impl Ctx {
     pub fn simple(you: Seat, this: Option<ObjectId>) -> Ctx {
+        Ctx::new(you, this, Vec::new(), None)
+    }
+
+    pub fn new(you: Seat, this: Option<ObjectId>, targets: Vec<Target>, triggering: Option<Target>) -> Ctx {
         Ctx {
             you,
             this,
-            targets: Vec::new(),
-            triggering: None,
+            targets,
+            triggering,
+            bindings: BTreeMap::new(),
+            options: BTreeMap::new(),
         }
     }
 }
@@ -132,6 +145,16 @@ impl Game {
     /// Every legal target for a filter right now, as chosen by `ctx.you`:
     /// objects in the filter's zone (hexproof excludes opponents' spells) and players.
     pub fn targets_for(&self, filter: &Filter, ctx: &Ctx) -> Vec<Target> {
+        self.matching(filter, ctx, true)
+    }
+
+    /// Everything a filter admits right now for a choice that does not target
+    /// ("a creature you control"): like `targets_for`, but hexproof is no bar.
+    pub fn choosable(&self, filter: &Filter, ctx: &Ctx) -> Vec<Target> {
+        self.matching(filter, ctx, false)
+    }
+
+    fn matching(&self, filter: &Filter, ctx: &Ctx, targeted: bool) -> Vec<Target> {
         let mut out = Vec::new();
         if Self::filter_admits_objects(filter) {
             let zone = Self::filter_zone(filter);
@@ -141,7 +164,7 @@ impl Game {
                 _ => self.battlefield_objects(),
             };
             for id in ids {
-                if self.object_matches(id, filter, ctx) && self.can_target(id, ctx.you) {
+                if self.object_matches(id, filter, ctx) && (!targeted || self.can_target(id, ctx.you)) {
                     out.push(Target::Object(id));
                 }
             }
@@ -236,6 +259,20 @@ impl Game {
                 .and_then(|t| t.attached_to)
                 .into_iter()
                 .collect(),
+            Ref::Named(name) => ctx
+                .bindings
+                .get(name)
+                .map(|ts| {
+                    ts.iter()
+                        .filter_map(|t| match t {
+                            Target::Object(id) => Some(*id),
+                            _ => None,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            // A `Chosen` is turned into a `Named` by the evaluator before any effect runs.
+            Ref::Chosen { .. } => Vec::new(),
         }
     }
 
@@ -245,6 +282,7 @@ impl Game {
             Ref::Target(i) => ctx.targets.get(*i as usize).copied().into_iter().collect(),
             Ref::Player(p) => self.players_of(p, ctx).into_iter().map(Target::Player).collect(),
             Ref::Triggering => ctx.triggering.into_iter().collect(),
+            Ref::Named(name) => ctx.bindings.get(name).cloned().unwrap_or_default(),
             Ref::Each(f) => {
                 let mut out: Vec<Target> = self.objects_of(r, ctx).into_iter().map(Target::Object).collect();
                 if Self::filter_admits_players(f) {

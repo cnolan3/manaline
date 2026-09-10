@@ -1,0 +1,9 @@
+Card(
+    name: "Gravedigger",
+    cost: "{3}{B}",
+    types: [Creature],
+    subtypes: ["Zombie"],
+    pt: (2, 2),
+    text: "When this creature enters, you may return target creature card from your graveyard to your hand.",
+    triggers: [Etb(targets: [And([Creature, InGraveyard(You)])], effects: [May(effect: ReturnFromGraveyard(target: Target(0), to: Hand))])],
+)

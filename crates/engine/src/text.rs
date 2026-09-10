@@ -348,6 +348,13 @@ pub fn describe_action(game: &Game, a: &Action) -> String {
             format!("{} assigns {}", obj(game, *attacker), list.join(", "))
         }
         Action::ChooseTargets { targets } => {
+            let verb = match &game.pending {
+                Some(crate::game::PendingChoice::Choose { prompt, .. }) => prompt.as_str(),
+                _ => "Choose",
+            };
+            if targets.is_empty() {
+                return format!("{verb} nothing");
+            }
             let list: Vec<String> = targets
                 .iter()
                 .map(|t| match t {
@@ -355,9 +362,14 @@ pub fn describe_action(game: &Game, a: &Action) -> String {
                     crate::action::Target::Player(p) => who(game, *p),
                 })
                 .collect();
-            format!("Choose {}", list.join(", "))
+            format!("{verb} {}", list.join(", "))
         }
-        Action::ChooseMode { mode } => format!("Choose mode {mode}"),
+        Action::ChooseMode { mode } => match &game.pending {
+            Some(crate::game::PendingChoice::ChooseOption { labels, .. }) if (*mode as usize) < labels.len() => {
+                labels[*mode as usize].clone()
+            }
+            _ => format!("Choose option {mode}"),
+        },
         Action::Discard { objects } => {
             let list: Vec<String> = objects.iter().map(|o| obj(game, *o)).collect();
             format!("Discard {}", list.join(", "))

@@ -1,0 +1,10 @@
+Card(
+    name: "Whitemane Lion",
+    cost: "{1}{W}",
+    types: [Creature],
+    subtypes: ["Cat"],
+    pt: (2, 2),
+    text: "Flash\nWhen this creature enters, return a creature you control to its owner's hand.",
+    keywords: [Flash],
+    triggers: [Etb(effects: [ReturnToHand(target: Chosen(who: You, filter: And([Creature, ControlledBy(You)]), count: Exactly(1)))])],
+)

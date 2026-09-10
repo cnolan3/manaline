@@ -10,19 +10,91 @@ use crate::action::{DamageTarget, Target};
 use crate::card::CardDef;
 use crate::event::Event;
 use crate::filter::Ctx;
+use crate::game::ActReason;
 use crate::game::{Expiry, Game, Modifier, ModifierKind};
-use crate::stack::Frame;
+use crate::stack::{Frame, MAY_BIND};
 use crate::types::{Keyword, Mana, ObjectId, Seat, Zone};
-use cardir::{Condition, CounterKind, Effect};
+use cardir::{Condition, CounterKind, Effect, Filter, Quantity, Ref};
+
+/// The `Ref` positions where a `Chosen` may sit: an effect's own target.
+fn direct_refs_mut(e: &mut Effect) -> Vec<&mut Ref> {
+    match e {
+        Effect::DealDamage { to, .. } => vec![to],
+        Effect::Destroy { target }
+        | Effect::Exile { target }
+        | Effect::Tap { target }
+        | Effect::Untap { target }
+        | Effect::ReturnToHand { target }
+        | Effect::CounterSpell { target }
+        | Effect::ModifyPt { target, .. }
+        | Effect::GrantKeyword { target, .. }
+        | Effect::AddCounters { target, .. }
+        | Effect::ReturnFromGraveyard { target, .. } => vec![target],
+        _ => Vec::new(),
+    }
+}
+
+/// The verb of an effect, for the menu that asks a player to choose for it.
+fn verb_of(e: &Effect) -> &'static str {
+    match e {
+        Effect::DealDamage { .. } => "Deal damage to",
+        Effect::Destroy { .. } => "Destroy",
+        Effect::Exile { .. } => "Exile",
+        Effect::Tap { .. } => "Tap",
+        Effect::Untap { .. } => "Untap",
+        Effect::ReturnToHand { .. } | Effect::ReturnFromGraveyard { .. } => "Return",
+        Effect::CounterSpell { .. } => "Counter",
+        Effect::AddCounters { .. } => "Put counters on",
+        _ => "Choose",
+    }
+}
 
 impl Game {
-    /// Apply one effect. Returns a frame when the effect has more work that
-    /// must run (and may pause) after this step.
-    pub(crate) fn step(&mut self, ctx: &Ctx, effect: &Effect) -> Option<Frame> {
+    /// Apply one effect. Returns frames for work that must run (and may
+    /// pause) after this step, in push order: the last is done first.
+    pub(crate) fn step(&mut self, ctx: &Ctx, specs: &[Filter], effect: &Effect) -> Vec<Frame> {
+        // An effect that picks its own object ("a creature you control") first
+        // asks for the pick, then runs again with the answer bound by name.
+        let mut resolved = effect.clone();
+        for r in direct_refs_mut(&mut resolved) {
+            if let Ref::Chosen { who, filter, count, bind } = r {
+                let name = bind.clone().unwrap_or_else(|| format!("$chosen{}", ctx.bindings.len()));
+                let seat = self.players_of(who, ctx).first().copied().unwrap_or(ctx.you);
+                let options = self.choosable(filter, ctx);
+                let (min, max) = match count {
+                    Quantity::Exactly(n) => (*n as usize, *n as usize),
+                    Quantity::UpTo(n) => (0, *n as usize),
+                    Quantity::AnyNumber => (0, options.len()),
+                };
+                let ask = Frame::Choose {
+                    seat,
+                    options,
+                    min,
+                    max,
+                    prompt: verb_of(effect).into(),
+                    reason: ActReason::Choice,
+                    bind: name.clone(),
+                };
+                *r = Ref::Named(name);
+                return vec![
+                    Frame::Effects {
+                        effects: vec![resolved],
+                        next: 0,
+                    },
+                    ask,
+                ];
+            }
+        }
+        self.apply_effect(ctx, specs, effect)
+    }
+
+    fn apply_effect(&mut self, ctx: &Ctx, specs: &[Filter], effect: &Effect) -> Vec<Frame> {
         match effect {
             Effect::DealDamage { amount, to } => {
                 let n = self.eval_amount(amount, ctx);
-                let source = ctx.this?;
+                let Some(source) = ctx.this else {
+                    return Vec::new();
+                };
                 for target in self.refs_of(to, ctx) {
                     let dt = match target {
                         Target::Object(o) => DamageTarget::Object(o),
@@ -50,11 +122,11 @@ impl Game {
                 }
             }
             Effect::Discard { player, count, random } => {
-                return Some(Frame::Discard {
+                return vec![Frame::Discard {
                     seats: self.players_of(player, ctx),
                     count: self.eval_amount(count, ctx),
                     random: *random,
-                });
+                }];
             }
             Effect::GainLife { player, amount } => {
                 let n = self.eval_amount(amount, ctx);
@@ -171,11 +243,11 @@ impl Game {
                 }
             }
             Effect::Sacrifice { player, filter, count } => {
-                return Some(Frame::Sacrifice {
+                return vec![Frame::Sacrifice {
                     seats: self.players_of(player, ctx),
                     filter: filter.clone(),
                     count: self.eval_amount(count, ctx),
-                });
+                }];
             }
             Effect::Mill { player, count } => {
                 let n = self.eval_amount(count, ctx).max(0) as usize;
@@ -204,10 +276,10 @@ impl Game {
                 }
             }
             Effect::Sequence(es) => {
-                return Some(Frame::Effects {
+                return vec![Frame::Effects {
                     effects: es.clone(),
                     next: 0,
-                });
+                }];
             }
             Effect::Conditional { if_, then, else_ } => {
                 let holds = match if_ {
@@ -225,14 +297,37 @@ impl Game {
                     }
                 };
                 let branch = if holds { Some(then) } else { else_.as_ref() };
-                return branch.map(|e| Frame::Effects {
-                    effects: vec![(**e).clone()],
-                    next: 0,
-                });
+                return branch
+                    .map(|e| Frame::Effects {
+                        effects: vec![(**e).clone()],
+                        next: 0,
+                    })
+                    .into_iter()
+                    .collect();
+            }
+            Effect::May { effect, then, otherwise } => {
+                let label = match ctx.this {
+                    Some(this) => capitalize(&cardir::render_clause(&self.card_def(this).ir, specs, effect)),
+                    None => "Do it".into(),
+                };
+                let mut did = vec![(**effect).clone()];
+                did.extend(then.iter().cloned());
+                // The option is asked first (pushed last); the branch it picked runs after.
+                return vec![
+                    Frame::Branch {
+                        bind: MAY_BIND.into(),
+                        branches: vec![did, otherwise.clone()],
+                    },
+                    Frame::ChooseOption {
+                        seat: ctx.you,
+                        labels: vec![label, "Don't".into()],
+                        bind: MAY_BIND.into(),
+                    },
+                ];
             }
             Effect::Unsupported { .. } => {}
         }
-        None
+        Vec::new()
     }
 
     /// Damage from a source: marks it on creatures (deathtouch remembered),
@@ -339,21 +434,34 @@ impl Game {
         id
     }
 
-    /// Answer a pending sacrifice or effect-driven discard, then continue the
+    /// Answer a pending pick with what was chosen, then continue the
     /// resolution that asked.
-    pub(crate) fn answer_choice(&mut self, seat: Seat, objects: &[ObjectId]) {
+    pub(crate) fn answer_choice(&mut self, targets: &[Target]) {
         match self.pending.take() {
-            Some(crate::game::PendingChoice::Sacrifice { resume, .. }) => {
-                for &id in objects {
-                    self.sacrifice(seat, id);
-                }
-                self.resume(resume);
-            }
-            Some(crate::game::PendingChoice::EffectDiscard { resume, .. }) => {
-                self.discard(seat, objects);
+            Some(crate::game::PendingChoice::Choose { bind, mut resume, .. }) => {
+                resume.ctx.bindings.insert(bind, targets.to_vec());
                 self.resume(resume);
             }
             other => self.pending = other,
         }
+    }
+
+    /// Answer a pending option ("you may": do it, or don't), then continue.
+    pub(crate) fn answer_option(&mut self, mode: u8) {
+        match self.pending.take() {
+            Some(crate::game::PendingChoice::ChooseOption { bind, mut resume, .. }) => {
+                resume.ctx.options.insert(bind, mode);
+                self.resume(resume);
+            }
+            other => self.pending = other,
+        }
+    }
+}
+
+fn capitalize(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+        None => String::new(),
     }
 }

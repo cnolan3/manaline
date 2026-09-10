@@ -112,17 +112,26 @@ pub enum PendingChoice {
         specs: Vec<cardir::Filter>,
         trigger: crate::triggers::FiredTrigger,
     },
-    /// An effect asks `seat` to sacrifice `count` permanents matching `filter`.
-    Sacrifice {
+    /// A resolving effect asks `seat` to pick between `min` and `max` of
+    /// `options` (what to sacrifice, discard, return, ...). Answered with
+    /// `ChooseTargets`; the pick is bound to `bind` and the resolution continues.
+    Choose {
         seat: Seat,
-        filter: cardir::Filter,
-        count: i32,
+        options: Vec<Target>,
+        min: usize,
+        max: usize,
+        /// The verb, for menus: "Sacrifice", "Discard", "Return".
+        prompt: String,
+        reason: ActReason,
+        bind: String,
         resume: crate::stack::Continuation,
     },
-    /// An effect asks `seat` to discard `count` cards of their choice.
-    EffectDiscard {
+    /// A resolving effect asks `seat` to pick one of `labels` ("you may":
+    /// do it, or don't). Answered with `ChooseMode`.
+    ChooseOption {
         seat: Seat,
-        count: i32,
+        labels: Vec<String>,
+        bind: String,
         resume: crate::stack::Continuation,
     },
 }
@@ -137,8 +146,8 @@ impl PendingChoice {
             | PendingChoice::AssignDamage { seat, .. }
             | PendingChoice::Discard { seat, .. }
             | PendingChoice::ChooseTargets { seat, .. }
-            | PendingChoice::Sacrifice { seat, .. }
-            | PendingChoice::EffectDiscard { seat, .. } => *seat,
+            | PendingChoice::Choose { seat, .. }
+            | PendingChoice::ChooseOption { seat, .. } => *seat,
         }
     }
 
@@ -149,8 +158,9 @@ impl PendingChoice {
             PendingChoice::DeclareAttackers { .. } => ActReason::DeclareAttackers,
             PendingChoice::DeclareBlockers { .. } => ActReason::DeclareBlockers,
             PendingChoice::AssignDamage { .. } => ActReason::AssignDamage,
-            PendingChoice::Discard { .. } | PendingChoice::EffectDiscard { .. } => ActReason::Discard,
-            PendingChoice::ChooseTargets { .. } | PendingChoice::Sacrifice { .. } => ActReason::Choice,
+            PendingChoice::Discard { .. } => ActReason::Discard,
+            PendingChoice::Choose { reason, .. } => *reason,
+            PendingChoice::ChooseTargets { .. } | PendingChoice::ChooseOption { .. } => ActReason::Choice,
         }
     }
 }
@@ -573,25 +583,17 @@ impl Game {
             } => self.activate_ability(seat, *object, *ability, targets, payment)?,
             Action::ChooseTargets { targets } => match &self.pending {
                 Some(PendingChoice::ChooseTargets { .. }) => self.choose_trigger_targets(targets),
-                Some(PendingChoice::Sacrifice { .. }) => {
-                    let objects: Vec<ObjectId> = targets
-                        .iter()
-                        .filter_map(|t| match t {
-                            Target::Object(o) => Some(*o),
-                            _ => None,
-                        })
-                        .collect();
-                    self.answer_choice(seat, &objects)
-                }
+                Some(PendingChoice::Choose { .. }) => self.answer_choice(targets),
                 _ => return Err(RulesError::illegal("nothing to choose")),
+            },
+            Action::ChooseMode { mode } => match &self.pending {
+                Some(PendingChoice::ChooseOption { .. }) => self.answer_option(*mode),
+                _ => return Err(RulesError::illegal("no option to choose")),
             },
             Action::DeclareAttackers { attackers } => self.declare_attackers(seat, attackers),
             Action::DeclareBlockers { blocks } => self.declare_blockers(seat, blocks),
             Action::AssignCombatDamage { attacker, assignments } => self.assign_combat_damage(seat, *attacker, assignments),
-            Action::Discard { objects } => match &self.pending {
-                Some(PendingChoice::EffectDiscard { .. }) => self.answer_choice(seat, objects),
-                _ => self.discard_to_hand_size(seat, objects),
-            },
+            Action::Discard { objects } => self.discard_to_hand_size(seat, objects),
             Action::Mulligan { keep } => self.mulligan(seat, *keep),
             Action::BottomCards { objects } => self.bottom_cards(seat, objects),
             Action::Concede => self.eliminate(seat, Elimination::Conceded),

@@ -9,7 +9,7 @@ pub mod types;
 pub mod validate;
 
 pub use ir::*;
-pub use render::{normalise, render, render_ability, render_spell, render_trigger, round_trips};
+pub use render::{normalise, render, render_ability, render_clause, render_spell, render_trigger, round_trips};
 pub use types::{CardType, Color, Keyword, ManaCost, Supertype};
 pub use validate::{validate, ValidationError};
 
@@ -99,6 +99,32 @@ Card(
         assert!(load(bad).unwrap_err().contains("P/T"));
         let bad = r#"Card(name: "Z", cost: "{R}", types: [Sorcery], text: "", spell: Spell(effects: [Unsupported(reason: "copy")]))"#;
         assert!(load(bad).unwrap_err().contains("unsupported"));
+    }
+
+    #[test]
+    fn chosen_named_and_may_render_like_oracle() {
+        let skyfisher = r#"Card(name: "Kor Skyfisher", cost: "{1}{W}", types: [Creature], subtypes: ["Kor", "Soldier"], pt: (2, 3), text: "Flying\nWhen this creature enters, return a permanent you control to its owner's hand.", keywords: [Flying], triggers: [Etb(effects: [ReturnToHand(target: Chosen(who: You, filter: And([Permanent, ControlledBy(You)]), count: Exactly(1)))])])"#;
+        round_trips(&load(skyfisher).unwrap()).unwrap();
+        let cull = r#"Card(name: "Cull", cost: "{W}", types: [Sorcery], text: "Exile up to two creatures you control.", spell: Spell(effects: [Exile(target: Chosen(who: You, filter: And([Creature, ControlledBy(You)]), count: UpTo(2)))]))"#;
+        round_trips(&load(cull).unwrap()).unwrap();
+        let any = r#"Card(name: "Rally", cost: "{W}", types: [Instant], text: "Untap any number of creatures you control.", spell: Spell(effects: [Untap(target: Chosen(who: You, filter: And([Creature, ControlledBy(You)]), count: AnyNumber))]))"#;
+        round_trips(&load(any).unwrap()).unwrap();
+        let it = r#"Card(name: "Rest", cost: "{G}", types: [Instant], text: "Tap a creature you control, then untap it. Untap that creature.", spell: Spell(effects: [Sequence([Tap(target: Chosen(who: You, filter: And([Creature, ControlledBy(You)]), count: Exactly(1), bind: "c")), Untap(target: Named("c"))]), Untap(target: Named("c"))]))"#;
+        round_trips(&load(it).unwrap()).unwrap();
+        let may = r#"Card(name: "Reap", cost: "{B}", types: [Sorcery], text: "You may sacrifice a creature. If you do, draw two cards. If you don't, you lose 2 life.", spell: Spell(effects: [May(effect: Sacrifice(player: You, filter: Creature, count: Const(1)), then: [Draw(player: You, count: Const(2))], otherwise: [LoseLife(player: You, amount: Const(2))])]))"#;
+        round_trips(&load(may).unwrap()).unwrap();
+        let digger = r#"Card(name: "Gravedigger", cost: "{3}{B}", types: [Creature], subtypes: ["Zombie"], pt: (2, 2), text: "When this creature enters, you may return target creature card from your graveyard to your hand.", triggers: [Etb(targets: [And([Creature, InGraveyard(You)])], effects: [May(effect: ReturnFromGraveyard(target: Target(0), to: Hand))])])"#;
+        round_trips(&load(digger).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn chosen_is_only_a_direct_target_and_named_needs_its_binding() {
+        let bad = r#"Card(name: "B", cost: "{R}", types: [Instant], text: "", spell: Spell(effects: [DealDamage(amount: PowerOf(Chosen(who: You, filter: Creature, count: Exactly(1))), to: Player(You))]))"#;
+        assert!(load(bad).unwrap_err().contains("direct target"), "{}", load(bad).unwrap_err());
+        let bad = r#"Card(name: "C", cost: "{R}", types: [Instant], text: "", spell: Spell(effects: [Destroy(target: Named("x"))]))"#;
+        assert!(load(bad).unwrap_err().contains("Named"));
+        let bad = r#"Card(name: "D", cost: "{R}", types: [Instant], text: "", spell: Spell(effects: [Destroy(target: Chosen(who: You, filter: Creature, count: UpTo(0)))]))"#;
+        assert!(load(bad).unwrap_err().contains("at least one"));
     }
 
     #[test]

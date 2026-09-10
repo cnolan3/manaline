@@ -1,0 +1,9 @@
+Card(
+    name: "Fleshbag Marauder",
+    cost: "{2}{B}",
+    types: [Creature],
+    subtypes: ["Zombie", "Warrior"],
+    pt: (3, 1),
+    text: "When this creature enters, each player sacrifices a creature of their choice.",
+    triggers: [Etb(effects: [Sacrifice(player: EachPlayer, filter: Creature, count: Const(1))])],
+)

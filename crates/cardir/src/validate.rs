@@ -1,6 +1,8 @@
 //! What the schema cannot check: target indices in range, `Triggering` only
 //! inside triggers, `X` only with an X cost (none yet), P/T iff creature,
-//! auras enchant something, equipment has an equip cost, no `Unsupported`.
+//! auras enchant something, equipment has an equip cost, `Chosen` only as an
+//! effect's direct target, `Named` only after the `Chosen` that binds it, no
+//! `Unsupported`.
 
 use crate::ir::*;
 use crate::types::CardType;
@@ -16,6 +18,11 @@ struct Ctx<'a> {
     card: &'a Card,
     targets: usize,
     in_trigger: bool,
+    /// Whether the `Ref` being checked is an effect's direct target, the
+    /// one place a `Chosen` may appear.
+    direct: bool,
+    /// Names bound by earlier `Chosen`s in the current effect list.
+    bound: Vec<String>,
     errors: Vec<String>,
 }
 
@@ -58,8 +65,40 @@ impl Ctx<'_> {
                     self.err("Ref::Attached on a card that is neither an aura nor equipment");
                 }
             }
+            Ref::Chosen { who, filter, count, bind } => {
+                if !self.direct {
+                    self.err("Chosen may only be the direct target of an effect");
+                }
+                self.player_ref(who);
+                self.filter(filter);
+                match count {
+                    Quantity::Exactly(n) | Quantity::UpTo(n) if *n < 1 => self.err("Chosen count must be at least one"),
+                    _ => {}
+                }
+                if let Some(name) = bind {
+                    if name.trim().is_empty() {
+                        self.err("empty bind name");
+                    } else if self.bound.contains(name) {
+                        self.err(format!("{name:?} is bound twice"));
+                    } else {
+                        self.bound.push(name.clone());
+                    }
+                }
+            }
+            Ref::Named(name) => {
+                if !self.bound.contains(name) {
+                    self.err(format!("Named({name:?}) refers to nothing a Chosen bound earlier"));
+                }
+            }
             Ref::This => {}
         }
+    }
+
+    /// An effect's own target: the one position where `Chosen` is allowed.
+    fn direct_ref(&mut self, r: &Ref) {
+        self.direct = true;
+        self.reference(r);
+        self.direct = false;
     }
 
     fn filter(&mut self, f: &Filter) {
@@ -96,12 +135,12 @@ impl Ctx<'_> {
         match e {
             Effect::DealDamage { amount, to } => {
                 self.amount(amount);
-                self.reference(to);
+                self.direct_ref(to);
             }
             Effect::Destroy { target } | Effect::Exile { target } | Effect::Tap { target } | Effect::Untap { target } => {
-                self.reference(target)
+                self.direct_ref(target)
             }
-            Effect::ReturnToHand { target } | Effect::CounterSpell { target } => self.reference(target),
+            Effect::ReturnToHand { target } | Effect::CounterSpell { target } => self.direct_ref(target),
             Effect::Draw { player, count } => {
                 self.player_ref(player);
                 self.amount(count);
@@ -117,11 +156,11 @@ impl Ctx<'_> {
             Effect::ModifyPt {
                 target, power, toughness, ..
             } => {
-                self.reference(target);
+                self.direct_ref(target);
                 self.amount(power);
                 self.amount(toughness);
             }
-            Effect::GrantKeyword { target, .. } => self.reference(target),
+            Effect::GrantKeyword { target, .. } => self.direct_ref(target),
             Effect::CreateToken { spec, count } => {
                 self.amount(count);
                 if spec.types.contains(&CardType::Creature) != spec.pt.is_some() {
@@ -129,7 +168,7 @@ impl Ctx<'_> {
                 }
             }
             Effect::AddCounters { target, count, .. } => {
-                self.reference(target);
+                self.direct_ref(target);
                 self.amount(count);
             }
             Effect::AddMana { amount, .. } => self.amount(amount),
@@ -142,7 +181,7 @@ impl Ctx<'_> {
                 self.player_ref(player);
                 self.amount(count);
             }
-            Effect::ReturnFromGraveyard { target, .. } => self.reference(target),
+            Effect::ReturnFromGraveyard { target, .. } => self.direct_ref(target),
             Effect::Sequence(es) => {
                 if es.len() < 2 {
                     self.err("Sequence needs at least two effects");
@@ -160,6 +199,15 @@ impl Ctx<'_> {
                 }
                 self.effect(then);
                 if let Some(e) = else_ {
+                    self.effect(e);
+                }
+            }
+            Effect::May { effect, then, otherwise } => {
+                self.effect(effect);
+                for e in then {
+                    self.effect(e);
+                }
+                for e in otherwise {
                     self.effect(e);
                 }
             }
@@ -181,6 +229,8 @@ pub fn validate(card: &Card) -> Result<(), ValidationError> {
         card,
         targets: 0,
         in_trigger: false,
+        direct: false,
+        bound: Vec::new(),
         errors: Vec::new(),
     };
 
@@ -223,6 +273,7 @@ pub fn validate(card: &Card) -> Result<(), ValidationError> {
 
     if let Some(spell) = &card.spell {
         ctx.targets = spell.targets.len();
+        ctx.bound.clear();
         for f in &spell.targets {
             ctx.filter(f);
         }
@@ -257,6 +308,7 @@ pub fn validate(card: &Card) -> Result<(), ValidationError> {
     for t in &card.triggers {
         ctx.in_trigger = true;
         ctx.targets = t.targets().len();
+        ctx.bound.clear();
         for f in t.targets() {
             ctx.filter(f);
         }
@@ -276,6 +328,7 @@ pub fn validate(card: &Card) -> Result<(), ValidationError> {
     }
     for a in &card.activated {
         ctx.targets = a.targets.len();
+        ctx.bound.clear();
         for f in &a.targets {
             ctx.filter(f);
         }

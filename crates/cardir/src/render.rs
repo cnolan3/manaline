@@ -5,6 +5,7 @@
 
 use crate::ir::*;
 use crate::types::{CardType, Keyword};
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Grammatical number for a noun phrase.
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -21,6 +22,27 @@ struct R<'a> {
     in_trigger: bool,
     /// Whether `This` has been mentioned in this sentence group already.
     this_mentioned: bool,
+    /// Head noun of every `Chosen` binding seen so far, for "that creature".
+    bound: BTreeMap<String, String>,
+    /// Bindings introduced in the sentence being rendered, which read as "it".
+    bound_this_sentence: BTreeSet<String>,
+}
+
+impl<'a> R<'a> {
+    fn new(card: &'a Card, targets: &'a [Filter], in_trigger: bool) -> R<'a> {
+        R {
+            card,
+            targets,
+            in_trigger,
+            this_mentioned: in_trigger,
+            bound: BTreeMap::new(),
+            bound_this_sentence: BTreeSet::new(),
+        }
+    }
+
+    fn new_sentence(&mut self) {
+        self.bound_this_sentence.clear();
+    }
 }
 
 pub fn render(card: &Card) -> String {
@@ -31,40 +53,19 @@ pub fn render(card: &Card) -> String {
         lines.push(words.join(", "));
     }
     if let Some(f) = &card.enchant {
-        let r = R {
-            card,
-            targets: &[],
-            in_trigger: false,
-            this_mentioned: false,
-        };
+        let r = R::new(card, &[], false);
         lines.push(format!("Enchant {}", r.noun(f, Number::Singular)));
     }
     for s in &card.statics {
-        let mut r = R {
-            card,
-            targets: &[],
-            in_trigger: false,
-            this_mentioned: false,
-        };
+        let mut r = R::new(card, &[], false);
         lines.push(r.static_(s));
     }
     for t in &card.triggers {
-        let names_self = trigger_names_self(t);
-        let mut r = R {
-            card,
-            targets: t.targets(),
-            in_trigger: names_self,
-            this_mentioned: names_self,
-        };
+        let mut r = R::new(card, t.targets(), trigger_names_self(t));
         lines.push(r.trigger(t));
     }
     for a in &card.activated {
-        let mut r = R {
-            card,
-            targets: &a.targets,
-            in_trigger: false,
-            this_mentioned: false,
-        };
+        let mut r = R::new(card, &a.targets, false);
         let line = r.ability(a);
         // A basic land's mana ability is intrinsic and printed as reminder text.
         if card.is_basic() && a.is_mana_ability() {
@@ -74,12 +75,7 @@ pub fn render(card: &Card) -> String {
         }
     }
     if let Some(spell) = &card.spell {
-        let mut r = R {
-            card,
-            targets: &spell.targets,
-            in_trigger: false,
-            this_mentioned: false,
-        };
+        let mut r = R::new(card, &spell.targets, false);
         lines.push(r.sentences(&spell.effects));
     }
     if let Some(cost) = &card.equip {
@@ -90,24 +86,20 @@ pub fn render(card: &Card) -> String {
 
 /// One activated ability as a line of Oracle text.
 pub fn render_ability(card: &Card, a: &Ability) -> String {
-    let mut r = R {
-        card,
-        targets: &a.targets,
-        in_trigger: false,
-        this_mentioned: false,
-    };
+    let mut r = R::new(card, &a.targets, false);
     r.ability(a)
+}
+
+/// One effect as a clause of Oracle text ("return target creature to its
+/// owner's hand"), given the target filters it is read against.
+pub fn render_clause(card: &Card, targets: &[Filter], effect: &Effect) -> String {
+    let mut r = R::new(card, targets, false);
+    r.clause(effect)
 }
 
 /// One triggered ability as a line of Oracle text.
 pub fn render_trigger(card: &Card, t: &Trigger) -> String {
-    let names_self = trigger_names_self(t);
-    let mut r = R {
-        card,
-        targets: t.targets(),
-        in_trigger: names_self,
-        this_mentioned: names_self,
-    };
+    let mut r = R::new(card, t.targets(), trigger_names_self(t));
     r.trigger(t)
 }
 
@@ -121,12 +113,7 @@ fn trigger_names_self(t: &Trigger) -> bool {
 pub fn render_spell(card: &Card) -> String {
     match &card.spell {
         Some(spell) => {
-            let mut r = R {
-                card,
-                targets: &spell.targets,
-                in_trigger: false,
-                this_mentioned: false,
-            };
+            let mut r = R::new(card, &spell.targets, false);
             r.sentences(&spell.effects)
         }
         None => String::new(),
@@ -372,6 +359,35 @@ impl R<'_> {
                 "enchanted creature"
             })
             .into(),
+            Ref::Chosen { filter, count, bind, .. } => {
+                if let Some(name) = bind {
+                    let (_, head, _) = self.split(filter);
+                    self.bound.insert(name.clone(), head);
+                    self.bound_this_sentence.insert(name.clone());
+                }
+                self.chosen_phrase(filter, count)
+            }
+            Ref::Named(name) => {
+                if self.bound_this_sentence.contains(name) {
+                    "it".into()
+                } else {
+                    format!("that {}", self.bound.get(name).cloned().unwrap_or_else(|| "one".into()))
+                }
+            }
+        }
+    }
+
+    /// "a creature you control", "up to two permanents you control", "any number of Elves".
+    fn chosen_phrase(&self, filter: &Filter, count: &Quantity) -> String {
+        match count {
+            Quantity::Exactly(1) => {
+                let n = self.noun(filter, Number::Singular);
+                format!("{} {n}", article(&n))
+            }
+            Quantity::Exactly(k) => format!("{} {}", number_word(*k), self.noun(filter, Number::Plural)),
+            Quantity::UpTo(1) => format!("up to one {}", self.noun(filter, Number::Singular)),
+            Quantity::UpTo(k) => format!("up to {} {}", number_word(*k), self.noun(filter, Number::Plural)),
+            Quantity::AnyNumber => format!("any number of {}", self.noun(filter, Number::Plural)),
         }
     }
 
@@ -379,6 +395,7 @@ impl R<'_> {
     fn subject(&mut self, r: &Ref) -> (String, Number) {
         match r {
             Ref::Each(f) => (self.noun(f, Number::Plural), Number::Plural),
+            Ref::Chosen { count, .. } if !matches!(count, Quantity::Exactly(1)) => (self.object(r), Number::Plural),
             other => (self.object(other), Number::Singular),
         }
     }
@@ -422,6 +439,7 @@ impl R<'_> {
 
     /// One effect as a full sentence with a capital and a period.
     fn sentence(&mut self, e: &Effect) -> String {
+        self.new_sentence();
         match e {
             Effect::Sequence(es) => {
                 let c = self.clause(e);
@@ -635,6 +653,20 @@ impl R<'_> {
                 parts.join(", then ")
             }
             Effect::Conditional { .. } => self.sentence(e).trim_end_matches('.').to_string(),
+            Effect::May { effect, then, otherwise } => {
+                let mut s = format!("you may {}", self.clause(effect));
+                for (lead, effects) in [("If you do", then), ("If you don't", otherwise)] {
+                    for (i, e) in effects.iter().enumerate() {
+                        let c = self.clause(e);
+                        if i == 0 {
+                            s.push_str(&format!(". {lead}, {c}"));
+                        } else {
+                            s.push_str(&format!(". {}", capitalize(&c)));
+                        }
+                    }
+                }
+                s
+            }
             Effect::Unsupported { reason } => format!("[unsupported: {reason}]"),
         }
     }
@@ -737,6 +769,7 @@ impl R<'_> {
         }
         let mut out = String::new();
         for (i, e) in effects.iter().enumerate() {
+            self.new_sentence();
             let c = self.clause(e);
             if i == 0 {
                 out.push_str(&c);
@@ -773,6 +806,7 @@ impl R<'_> {
         }
         let mut body = String::new();
         for (i, e) in a.effects.iter().enumerate() {
+            self.new_sentence();
             let c = self.clause(e);
             if i > 0 {
                 body.push(' ');

@@ -4,7 +4,7 @@
 
 use crate::settings::Settings;
 use engine::text::describe_event_view;
-use engine::{ActReason, Action, AttackTarget, DamageTarget, EventBase, EventView, GameView, Keyword, ObjectId, Outcome, Seat};
+use engine::{ActReason, Action, AttackTarget, DamageTarget, EventBase, EventView, GameView, Keyword, ObjectId, Outcome, Seat, Target};
 use protocol::{LegalAction, LobbyView, ServerMessage};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::HashMap;
@@ -89,15 +89,19 @@ pub struct BlockPicker {
     pub cursor: usize,
 }
 
-/// Pick exactly `count` cards from hand (bottoming after a mulligan, discarding).
+/// Pick between `min` and `count` cards (bottoming after a mulligan,
+/// discarding to hand size, or answering an effect's "discard a card").
 #[derive(Clone, Debug)]
 pub struct CardPicker {
     pub title: String,
     pub cards: Vec<ObjectId>,
     pub marked: Vec<bool>,
+    pub min: usize,
     pub count: usize,
     pub cursor: usize,
     pub reason: ActReason,
+    /// Answer with `ChooseTargets` (an effect's choice) rather than a cleanup or mulligan action.
+    pub choose: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -458,39 +462,67 @@ impl App {
         true
     }
 
-    /// A checkbox list over my hand: exactly as many cards as the engine asks
-    /// for (the length of every listed action).
+    /// A checkbox list over the cards the engine offers: my whole hand for a
+    /// mulligan bottom or a cleanup discard (exactly the listed count), or the
+    /// objects the listed `ChooseTargets` answers name, between the smallest
+    /// and largest answer sizes.
     fn open_card_picker(&mut self, reason: ActReason) -> bool {
         let (Some(me), Some(view)) = (self.me, &self.view) else {
             return false;
         };
-        let engine::HandView::Yours(hand) = &view.player(me).hand else {
-            return false;
+        let fixed = self.legal.iter().find_map(|l| match &l.action {
+            Action::BottomCards { objects } | Action::Discard { objects } => Some(objects.len()),
+            _ => None,
+        });
+        let (min, count, choose, cards) = match fixed {
+            Some(n) => {
+                let engine::HandView::Yours(hand) = &view.player(me).hand else {
+                    return false;
+                };
+                (n, n, false, hand.clone())
+            }
+            None => {
+                let mut sizes = Vec::new();
+                let mut cards: Vec<ObjectId> = Vec::new();
+                for l in &self.legal {
+                    if let Action::ChooseTargets { targets } = &l.action {
+                        sizes.push(targets.len());
+                        for t in targets {
+                            if let Target::Object(id) = t {
+                                if !cards.contains(id) {
+                                    cards.push(*id);
+                                }
+                            }
+                        }
+                    }
+                }
+                cards.sort();
+                let (Some(&min), Some(&max)) = (sizes.iter().min(), sizes.iter().max()) else {
+                    return false;
+                };
+                (min, max, true, cards)
+            }
         };
-        let count = self
-            .legal
-            .iter()
-            .find_map(|l| match &l.action {
-                Action::BottomCards { objects } | Action::Discard { objects } => Some(objects.len()),
-                _ => None,
-            })
-            .unwrap_or(0);
-        if hand.is_empty() || count == 0 {
+        if cards.is_empty() || count == 0 {
             return false;
         }
-        let cards = hand.clone();
-        let title = match reason {
-            ActReason::BottomCards => format!("Put {count} on the bottom of your library"),
-            _ => format!("Discard {count} down to hand size"),
+        let title = match (reason, choose) {
+            (ActReason::BottomCards, _) => format!("Put {count} on the bottom of your library"),
+            (ActReason::Discard, false) => format!("Discard {count} down to hand size"),
+            (ActReason::Discard, true) => format!("Discard {count}"),
+            _ if min == count => format!("Choose {count}"),
+            _ => format!("Choose {min} to {count}"),
         };
         let n = cards.len();
         self.mode = Mode::Pick(CardPicker {
             title,
             cards,
             marked: vec![false; n],
+            min,
             count,
             cursor: 0,
             reason,
+            choose,
         });
         true
     }
@@ -1069,12 +1101,23 @@ impl App {
             }
             KeyCode::Enter => {
                 let objects: Vec<ObjectId> = p.cards.iter().zip(&p.marked).filter(|(_, m)| **m).map(|(id, _)| *id).collect();
-                if objects.len() != p.count {
-                    self.set_status(format!("Pick exactly {} card(s) ({} marked)", p.count, objects.len()));
+                if objects.len() < p.min || objects.len() > p.count {
+                    let want = if p.min == p.count {
+                        format!("exactly {}", p.count)
+                    } else {
+                        format!("{} to {}", p.min, p.count)
+                    };
+                    self.set_status(format!("Pick {want} card(s) ({} marked)", objects.len()));
                 } else {
-                    let action = match p.reason {
-                        ActReason::BottomCards => Action::BottomCards { objects },
-                        _ => Action::Discard { objects },
+                    let action = if p.choose {
+                        Action::ChooseTargets {
+                            targets: objects.into_iter().map(Target::Object).collect(),
+                        }
+                    } else {
+                        match p.reason {
+                            ActReason::BottomCards => Action::BottomCards { objects },
+                            _ => Action::Discard { objects },
+                        }
                     };
                     return vec![Command::Act(action)];
                 }

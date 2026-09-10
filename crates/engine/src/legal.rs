@@ -41,38 +41,25 @@ impl Game {
                         acts.push(Action::Discard { objects });
                     }
                 }
-                PendingChoice::EffectDiscard { count, .. } => {
-                    let hand = self.sorted_hand(seat);
-                    let n = (*count as usize).min(hand.len());
-                    for objects in combinations(&hand, n) {
-                        acts.push(Action::Discard { objects });
+                PendingChoice::Choose { options, min, max, .. } => {
+                    for n in *min..=*max {
+                        for targets in combinations(options, n) {
+                            acts.push(Action::ChooseTargets { targets });
+                            if acts.len() >= ENUMERATION_CAP {
+                                break;
+                            }
+                        }
+                    }
+                }
+                PendingChoice::ChooseOption { labels, .. } => {
+                    for mode in 0..labels.len() {
+                        acts.push(Action::ChooseMode { mode: mode as u8 });
                     }
                 }
                 PendingChoice::ChooseTargets { specs, trigger, .. } => {
-                    let ctx = Ctx {
-                        you: seat,
-                        this: Some(trigger.source),
-                        targets: Vec::new(),
-                        triggering: trigger.triggering,
-                    };
+                    let ctx = Ctx::new(seat, Some(trigger.source), Vec::new(), trigger.triggering);
                     for targets in self.target_combos(specs, &ctx).unwrap_or_default() {
                         acts.push(Action::ChooseTargets { targets });
-                    }
-                }
-                PendingChoice::Sacrifice { filter, count, .. } => {
-                    let ctx = Ctx::simple(seat, None);
-                    let mut candidates: Vec<ObjectId> = self.players[seat.index()]
-                        .battlefield
-                        .iter()
-                        .copied()
-                        .filter(|&c| self.object_matches(c, filter, &ctx))
-                        .collect();
-                    candidates.sort();
-                    let n = (*count as usize).min(candidates.len());
-                    for objects in combinations(&candidates, n) {
-                        acts.push(Action::ChooseTargets {
-                            targets: objects.into_iter().map(crate::action::Target::Object).collect(),
-                        });
                     }
                 }
             },
@@ -533,7 +520,7 @@ impl Game {
 }
 
 /// All `k`-element subsets of `items`, in lexicographic order of positions.
-pub(crate) fn combinations(items: &[ObjectId], k: usize) -> Vec<Vec<ObjectId>> {
+pub(crate) fn combinations<T: Copy>(items: &[T], k: usize) -> Vec<Vec<T>> {
     let n = items.len();
     if k > n {
         return Vec::new();

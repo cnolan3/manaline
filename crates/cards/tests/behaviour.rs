@@ -96,6 +96,12 @@ fn cast(game: &mut Game, name: &str, targets: &[Target]) {
 }
 
 fn cast_by(game: &mut Game, seat: Seat, name: &str, targets: &[Target]) {
+    cast_raw(game, seat, name, targets);
+    settle(game);
+}
+
+/// Cast without settling, for tests that must answer a choice themselves.
+fn cast_raw(game: &mut Game, seat: Seat, name: &str, targets: &[Target]) {
     let id = hand(game, seat, name);
     let a = game
         .legal_actions(seat)
@@ -110,6 +116,21 @@ fn cast_by(game: &mut Game, seat: Seat, name: &str, targets: &[Target]) {
                     .collect::<Vec<_>>()
             )
         });
+    game.apply(seat, &a).unwrap();
+}
+
+/// Answer a resolving effect's pick ("sacrifice a creature", "a permanent you control").
+fn pick(game: &mut Game, seat: Seat, targets: &[Target]) {
+    assert!(
+        matches!(game.pending, Some(PendingChoice::Choose { .. })),
+        "expected a pick, got {:?}",
+        game.pending
+    );
+    let a = game
+        .legal_actions(seat)
+        .into_iter()
+        .find(|a| matches!(a, Action::ChooseTargets { targets: t } if t == targets))
+        .expect("that pick is offered");
     game.apply(seat, &a).unwrap();
     settle(game);
 }
@@ -798,6 +819,37 @@ fn registry() -> BTreeMap<&'static str, Check> {
         settle(&mut game);
         assert_eq!(stats(&game, g), (3, 3));
     });
+    check!("Kor Skyfisher", || {
+        let mut game = base().battlefield(ME, "Grizzly Bears").hand(ME, "Kor Skyfisher").build();
+        let bear = bf(&game, ME, "Grizzly Bears");
+        cast_raw(&mut game, ME, "Kor Skyfisher", &[]);
+        advance_until(&mut game, |g| matches!(g.pending, Some(PendingChoice::Choose { .. }))).unwrap();
+        let options = game
+            .legal_actions(ME)
+            .iter()
+            .filter(|a| matches!(a, Action::ChooseTargets { .. }))
+            .count();
+        assert_eq!(options, 22, "twenty lands, the bear, and itself");
+        pick(&mut game, ME, &[Target::Object(bear)]);
+        assert_eq!(game.objects[bear].zone, Zone::Hand);
+        let fisher = bf(&game, ME, "Kor Skyfisher");
+        assert!(kws(&game, fisher).contains(&Keyword::Flying));
+    });
+    check!("Whitemane Lion", || {
+        let mut game = base().battlefield(ME, "Grizzly Bears").hand(ME, "Whitemane Lion").build();
+        let bear = bf(&game, ME, "Grizzly Bears");
+        let lion = hand(&game, ME, "Whitemane Lion");
+        cast_raw(&mut game, ME, "Whitemane Lion", &[]);
+        advance_until(&mut game, |g| matches!(g.pending, Some(PendingChoice::Choose { .. }))).unwrap();
+        pick(&mut game, ME, &[Target::Object(lion)]);
+        assert_eq!(game.objects[lion].zone, Zone::Hand, "it can return itself");
+        assert_eq!(game.objects[bear].zone, Zone::Battlefield);
+        // Alone, it has to return itself: no question asked.
+        let mut game = base().hand(ME, "Whitemane Lion").build();
+        let lion = hand(&game, ME, "Whitemane Lion");
+        cast(&mut game, "Whitemane Lion", &[]);
+        assert_eq!(game.objects[lion].zone, Zone::Hand);
+    });
     check!("Angel of the Dawn", || etb("Angel of the Dawn", None, |g, _| {
         let giant = bf(g, ME, "Hill Giant");
         assert_eq!(stats(g, giant), (4, 4));
@@ -1022,6 +1074,32 @@ fn registry() -> BTreeMap<&'static str, Check> {
         cast_by(&mut game, OPP, "Murder", &[Target::Object(cat)]);
         choose(&mut game, ME, Target::Player(OPP));
         assert_eq!(hand_size(&game, OPP), 0, "the Forest is discarded at random");
+    });
+    check!("Fleshbag Marauder", || {
+        let mut game = base()
+            .battlefield(ME, "Hill Giant")
+            .battlefield(OPP, "Hill Giant")
+            .hand(ME, "Fleshbag Marauder")
+            .build();
+        cast_raw(&mut game, ME, "Fleshbag Marauder", &[]);
+        advance_until(&mut game, |g| matches!(g.pending, Some(PendingChoice::Choose { .. }))).unwrap();
+        // The active player chooses first (APNAP), then the opponent.
+        assert!(matches!(game.pending, Some(PendingChoice::Choose { seat: ME, .. })));
+        let marauder = bf(&game, ME, "Fleshbag Marauder");
+        pick(&mut game, ME, &[Target::Object(marauder)]);
+        assert!(in_graveyard(&game, marauder));
+        assert_eq!(count_bf(&game, ME, "Hill Giant"), 1);
+        assert_eq!(game.players[1].battlefield.len(), 1, "the opponent lost one of two");
+    });
+    check!("Burglar Rat", || {
+        let mut game = base().hand(ME, "Burglar Rat").hand(OPP, "Forest").hand(OPP, "Forest").build();
+        cast_raw(&mut game, ME, "Burglar Rat", &[]);
+        advance_until(&mut game, |g| matches!(g.pending, Some(PendingChoice::Choose { .. }))).unwrap();
+        assert_eq!(game.must_act().get(&OPP), Some(&engine::ActReason::Discard));
+        let forest = game.players[1].hand[0];
+        pick(&mut game, OPP, &[Target::Object(forest)]);
+        assert_eq!(hand_size(&game, OPP), 1);
+        assert!(in_graveyard(&game, forest));
     });
     check!("Vampire Envoy", || {
         let mut game = base().battlefield(ME, "Vampire Envoy").build();
@@ -1352,6 +1430,26 @@ fn registry() -> BTreeMap<&'static str, Check> {
         assert_eq!(stats(g, spirit), (1, 1));
         assert!(kws(g, spirit).contains(&Keyword::Flying));
     }));
+    check!("Gravedigger", || {
+        let mut game = base().graveyard(ME, "Hill Giant").hand(ME, "Gravedigger").build();
+        let giant = gy(&game, ME, "Hill Giant");
+        cast(&mut game, "Gravedigger", &[]);
+        choose(&mut game, ME, Target::Object(giant)); // settle takes "do it"
+        assert_eq!(game.objects[giant].zone, Zone::Hand);
+        // Declining leaves the card where it is.
+        let mut game = base().graveyard(ME, "Hill Giant").hand(ME, "Gravedigger").build();
+        let giant = gy(&game, ME, "Hill Giant");
+        cast(&mut game, "Gravedigger", &[]);
+        let a = game
+            .legal_actions(ME)
+            .into_iter()
+            .find(|a| matches!(a, Action::ChooseTargets { .. }))
+            .unwrap();
+        game.apply(ME, &a).unwrap();
+        advance_until(&mut game, |g| matches!(g.pending, Some(PendingChoice::ChooseOption { .. }))).unwrap();
+        game.apply(ME, &Action::ChooseMode { mode: 1 }).unwrap();
+        assert!(in_graveyard(&game, giant));
+    });
     check!("Lord of the Undead", || {
         let mut game = base()
             .battlefield(ME, "Lord of the Undead")

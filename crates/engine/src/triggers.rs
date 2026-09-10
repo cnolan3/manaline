@@ -190,12 +190,7 @@ impl Game {
                 self.push_trigger(&f, Vec::new());
                 continue;
             }
-            let ctx = Ctx {
-                you: f.controller,
-                this: Some(f.source),
-                targets: Vec::new(),
-                triggering: f.triggering,
-            };
+            let ctx = Ctx::new(f.controller, Some(f.source), Vec::new(), f.triggering);
             let candidates: Vec<Vec<Target>> = specs.iter().map(|s| self.targets_for(s, &ctx)).collect();
             if candidates.iter().any(|c| c.is_empty()) {
                 continue; // no legal target: the trigger is removed from the stack (rule 603.3d)

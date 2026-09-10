@@ -177,7 +177,8 @@ impl Game {
                         self.give_priority_to_active();
                     }
                 }
-                Some(PendingChoice::Sacrifice { resume, .. }) | Some(PendingChoice::EffectDiscard { resume, .. }) => self.resume(resume),
+                // The chooser left: the resolution continues with nothing picked.
+                Some(PendingChoice::Choose { resume, .. }) | Some(PendingChoice::ChooseOption { resume, .. }) => self.resume(resume),
                 _ => {}
             }
         }

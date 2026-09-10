@@ -31,6 +31,9 @@ fn db_with_extras() -> Arc<engine::CardDb> {
         r#"Card(name: "Test Sac Outlet", cost: "{B}", types: [Creature], subtypes: ["Ghoul"], pt: (1, 1), text: "Sacrifice a creature: You gain 2 life.", activated: [Ability(cost: [Sacrifice(Creature)], effects: [GainLife(player: You, amount: Const(2))])])"#,
         r#"Card(name: "Test Nested Edict", cost: "{1}{B}", types: [Sorcery], text: "Target opponent sacrifices a creature of their choice, then draw a card.", spell: Spell(targets: [Opponent], effects: [Sequence([Sacrifice(player: TargetOpponent(0), filter: Creature, count: Const(1)), Draw(player: You, count: Const(1))])]))"#,
         r#"Card(name: "Test Wheel", cost: "{2}{B}", types: [Sorcery], text: "Each player discards a card. You gain 1 life.", spell: Spell(effects: [Discard(player: EachPlayer, count: Const(1)), GainLife(player: You, amount: Const(1))]))"#,
+        r#"Card(name: "Test Reap", cost: "{B}", types: [Sorcery], text: "You may sacrifice a creature. If you do, draw two cards. If you don't, you lose 2 life.", spell: Spell(effects: [May(effect: Sacrifice(player: You, filter: Creature, count: Const(1)), then: [Draw(player: You, count: Const(2))], otherwise: [LoseLife(player: You, amount: Const(2))])]))"#,
+        r#"Card(name: "Test Cull", cost: "{W}", types: [Sorcery], text: "Exile up to two creatures you control.", spell: Spell(effects: [Exile(target: Chosen(who: You, filter: And([Creature, ControlledBy(You)]), count: UpTo(2)))]))"#,
+        r#"Card(name: "Test Rouse", cost: "{G}", types: [Instant], text: "Tap a creature you control, then it gets +2/+2 until end of turn.", spell: Spell(effects: [Sequence([Tap(target: Chosen(who: You, filter: And([Creature, ControlledBy(You)]), count: Exactly(1), bind: "c")), ModifyPt(target: Named("c"), power: Const(2), toughness: Const(2), until: EndOfTurn)])]))"#,
     ];
     let mut all = cards::core_ir();
     for text in extras {
@@ -288,7 +291,14 @@ fn cruel_edict_asks_the_opponent_which_creature_to_sacrifice() {
     cast(&mut game, Seat(0), "Cruel Edict", &[Target::Player(Seat(1))]);
     resolve_top(&mut game);
     assert!(
-        matches!(game.pending, Some(PendingChoice::Sacrifice { seat: Seat(1), .. })),
+        matches!(
+            game.pending,
+            Some(PendingChoice::Choose {
+                seat: Seat(1),
+                reason: ActReason::Choice,
+                ..
+            })
+        ),
         "{:?}",
         game.pending
     );
@@ -324,16 +334,22 @@ fn mind_rot_lets_the_target_choose_what_to_discard() {
     resolve_top(&mut game);
     assert!(matches!(
         game.pending,
-        Some(PendingChoice::EffectDiscard {
+        Some(PendingChoice::Choose {
             seat: Seat(1),
-            count: 2,
+            min: 2,
+            max: 2,
+            reason: ActReason::Discard,
             ..
         })
     ));
     assert_eq!(game.must_act().get(&Seat(1)), Some(&ActReason::Discard));
     let choices = game.legal_actions(Seat(1));
-    assert_eq!(choices.iter().filter(|a| matches!(a, Action::Discard { .. })).count(), 3, "C(3,2)");
-    let pick = choices.into_iter().find(|a| matches!(a, Action::Discard { .. })).unwrap();
+    assert_eq!(
+        choices.iter().filter(|a| matches!(a, Action::ChooseTargets { .. })).count(),
+        3,
+        "C(3,2)"
+    );
+    let pick = choices.into_iter().find(|a| matches!(a, Action::ChooseTargets { .. })).unwrap();
     game.apply(Seat(1), &pick).unwrap();
     assert_eq!(game.players[1].hand.len(), 1);
     assert_eq!(game.players[1].graveyard.len(), 2);
@@ -352,7 +368,7 @@ fn a_choice_inside_a_sequence_keeps_the_rest_of_the_sequence() {
     let hand_before = game.players[0].hand.len();
     cast(&mut game, Seat(0), "Test Nested Edict", &[Target::Player(Seat(1))]);
     resolve_top(&mut game);
-    assert!(matches!(game.pending, Some(PendingChoice::Sacrifice { seat: Seat(1), .. })));
+    assert!(matches!(game.pending, Some(PendingChoice::Choose { seat: Seat(1), .. })));
     let bears = bf(&game, Seat(1), "Grizzly Bears");
     game.apply(
         Seat(1),
@@ -388,7 +404,7 @@ fn each_player_discarding_asks_every_seat_in_turn() {
     // Seat 0 has two cards left and chooses; seat 1 chooses; seat 2's only card goes on its own.
     for seat in [Seat(0), Seat(1)] {
         assert!(
-            matches!(game.pending, Some(PendingChoice::EffectDiscard { seat: s, count: 1, .. }) if s == seat),
+            matches!(game.pending, Some(PendingChoice::Choose { seat: s, min: 1, reason: ActReason::Discard, .. }) if s == seat),
             "{:?}",
             game.pending
         );
@@ -396,7 +412,7 @@ fn each_player_discarding_asks_every_seat_in_turn() {
         let pick = game
             .legal_actions(seat)
             .into_iter()
-            .find(|a| matches!(a, Action::Discard { .. }))
+            .find(|a| matches!(a, Action::ChooseTargets { .. }))
             .unwrap();
         game.apply(seat, &pick).unwrap();
     }
@@ -406,6 +422,142 @@ fn each_player_discarding_asks_every_seat_in_turn() {
     assert_eq!(game.players[2].hand.len(), 0);
     assert_eq!(game.players[0].life, 21, "the effect after the discards still runs");
     assert_eq!(game.priority, Some(Seat(0)));
+}
+
+#[test]
+fn you_may_asks_and_runs_the_branch_that_was_picked() {
+    // Decline: the "if you don't" branch runs.
+    let mut game = TestGame::new(db_with_extras(), 2)
+        .battlefield(Seat(0), "Swamp")
+        .battlefield(Seat(0), "Grizzly Bears")
+        .hand(Seat(0), "Test Reap")
+        .library(Seat(0), &["Forest"; 4])
+        .build();
+    cast(&mut game, Seat(0), "Test Reap", &[]);
+    resolve_top(&mut game);
+    assert!(
+        matches!(game.pending, Some(PendingChoice::ChooseOption { seat: Seat(0), .. })),
+        "{:?}",
+        game.pending
+    );
+    assert_eq!(game.must_act().get(&Seat(0)), Some(&ActReason::Choice));
+    let acts = game.legal_actions(Seat(0));
+    let labels: Vec<String> = acts
+        .iter()
+        .filter(|a| matches!(a, Action::ChooseMode { .. }))
+        .map(|a| engine::text::describe_action(&game, a))
+        .collect();
+    assert_eq!(labels, vec!["Sacrifice a creature".to_string(), "Don't".to_string()]);
+    game.apply(Seat(0), &Action::ChooseMode { mode: 1 }).unwrap();
+    assert_eq!(game.players[0].life, 18);
+    assert_eq!(game.players[0].hand.len(), 0);
+    assert_eq!(game.players[0].battlefield.len(), 2, "nothing sacrificed");
+    assert!(game.pending.is_none());
+    assert_eq!(game.priority, Some(Seat(0)));
+
+    // Accept: the sacrifice is a real choice, and the "if you do" branch follows it.
+    let mut game = TestGame::new(db_with_extras(), 2)
+        .battlefield(Seat(0), "Swamp")
+        .battlefield(Seat(0), "Grizzly Bears")
+        .battlefield(Seat(0), "Hill Giant")
+        .hand(Seat(0), "Test Reap")
+        .library(Seat(0), &["Forest"; 4])
+        .build();
+    let giant = bf(&game, Seat(0), "Hill Giant");
+    cast(&mut game, Seat(0), "Test Reap", &[]);
+    resolve_top(&mut game);
+    game.apply(Seat(0), &Action::ChooseMode { mode: 0 }).unwrap();
+    assert!(
+        matches!(
+            game.pending,
+            Some(PendingChoice::Choose {
+                seat: Seat(0),
+                min: 1,
+                max: 1,
+                ..
+            })
+        ),
+        "{:?}",
+        game.pending
+    );
+    let text = engine::text::describe_action(
+        &game,
+        &Action::ChooseTargets {
+            targets: vec![Target::Object(giant)],
+        },
+    );
+    assert!(text.starts_with("Sacrifice Hill Giant"), "{text}");
+    game.apply(
+        Seat(0),
+        &Action::ChooseTargets {
+            targets: vec![Target::Object(giant)],
+        },
+    )
+    .unwrap();
+    assert_eq!(game.objects[giant].zone, Zone::Graveyard);
+    assert_eq!(game.players[0].hand.len(), 2, "drew two");
+    assert_eq!(game.players[0].life, 20);
+}
+
+#[test]
+fn up_to_n_offers_every_size_including_none() {
+    let mut t = TestGame::new(db_with_extras(), 2)
+        .battlefield(Seat(0), "Plains")
+        .hand(Seat(0), "Test Cull");
+    for _ in 0..3 {
+        t = t.battlefield(Seat(0), "Grizzly Bears");
+    }
+    let mut game = t.build();
+    let bears = bfs(&game, Seat(0), "Grizzly Bears");
+    cast(&mut game, Seat(0), "Test Cull", &[]);
+    resolve_top(&mut game);
+    assert!(
+        matches!(game.pending, Some(PendingChoice::Choose { min: 0, max: 2, .. })),
+        "{:?}",
+        game.pending
+    );
+    let picks: Vec<Action> = game
+        .legal_actions(Seat(0))
+        .into_iter()
+        .filter(|a| matches!(a, Action::ChooseTargets { .. }))
+        .collect();
+    assert_eq!(picks.len(), 1 + 3 + 3, "none, each single, each pair: {picks:?}");
+    assert_eq!(
+        engine::text::describe_action(&game, &Action::ChooseTargets { targets: vec![] }),
+        "Exile nothing"
+    );
+    game.apply(
+        Seat(0),
+        &Action::ChooseTargets {
+            targets: vec![Target::Object(bears[0]), Target::Object(bears[2])],
+        },
+    )
+    .unwrap();
+    assert_eq!(game.objects[bears[0]].zone, Zone::Exile);
+    assert_eq!(game.objects[bears[1]].zone, Zone::Battlefield);
+    assert_eq!(game.objects[bears[2]].zone, Zone::Exile);
+}
+
+#[test]
+fn a_bound_choice_can_be_referred_to_later() {
+    let mut game = TestGame::new(db_with_extras(), 2)
+        .battlefield(Seat(0), "Forest")
+        .battlefield(Seat(0), "Grizzly Bears")
+        .battlefield(Seat(0), "Hill Giant")
+        .hand(Seat(0), "Test Rouse")
+        .build();
+    let giant = bf(&game, Seat(0), "Hill Giant");
+    cast(&mut game, Seat(0), "Test Rouse", &[]);
+    resolve_top(&mut game);
+    game.apply(
+        Seat(0),
+        &Action::ChooseTargets {
+            targets: vec![Target::Object(giant)],
+        },
+    )
+    .unwrap();
+    assert!(game.objects[giant].tapped);
+    assert_eq!(game.effective_stats(giant), Some((5, 5)), "\"it\" is the tapped creature");
 }
 
 // ----- triggers -----

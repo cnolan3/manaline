@@ -7,9 +7,15 @@ use crate::action::{ManaPayment, Target, EQUIP_ABILITY};
 use crate::error::RulesError;
 use crate::event::Event;
 use crate::filter::Ctx;
-use crate::game::{Game, PendingChoice, StackKind, StackObject};
+use crate::game::{ActReason, Game, PendingChoice, StackKind, StackObject};
 use crate::types::{ObjectId, Seat, Zone};
 use cardir::{Cost, Effect, Filter};
+
+/// Binding names the evaluator uses for its own choices; card-written names
+/// never start with `$`.
+const SACRIFICE_BIND: &str = "$sacrifice";
+const DISCARD_BIND: &str = "$discard";
+pub(crate) const MAY_BIND: &str = "$may";
 
 /// One step of work the evaluator still has to do. Frames are pushed as an
 /// effect unfolds (a `Sequence` becomes an `Effects` frame, "each player
@@ -19,10 +25,30 @@ use cardir::{Cost, Effect, Filter};
 pub enum Frame {
     /// Run `effects` in order; `next` is the index of the one to run next.
     Effects { effects: Vec<Effect>, next: usize },
+    /// Ask `seat` to pick between `min` and `max` of `options`; what they
+    /// pick is bound to `bind`. Decided on the spot when there is no choice.
+    Choose {
+        seat: Seat,
+        options: Vec<Target>,
+        min: usize,
+        max: usize,
+        /// The verb, for menus: "Sacrifice", "Discard", "Return".
+        prompt: String,
+        reason: ActReason,
+        bind: String,
+    },
+    /// Ask `seat` to pick one of `labels`; the index is stored under `bind`.
+    ChooseOption { seat: Seat, labels: Vec<String>, bind: String },
+    /// Continue with the branch whose index is stored under `bind`.
+    Branch { bind: String, branches: Vec<Vec<Effect>> },
     /// Each of `seats`, in order, discards `count` cards (at random, or by choice).
     Discard { seats: Vec<Seat>, count: i32, random: bool },
     /// Each of `seats`, in order, sacrifices `count` permanents matching `filter`.
     Sacrifice { seats: Vec<Seat>, filter: Filter, count: i32 },
+    /// Sacrifice what `bind` holds (the answer to a `Choose`).
+    SacrificeBound { seat: Seat, bind: String },
+    /// Discard what `bind` holds.
+    DiscardBound { seat: Seat, bind: String },
 }
 
 /// A resolution in progress: what it is evaluating relative to, and the
@@ -31,14 +57,18 @@ pub enum Frame {
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Continuation {
     pub ctx: Ctx,
+    /// The target filters the effects were written against, for rendering
+    /// "target creature" in option labels.
+    pub specs: Vec<Filter>,
     pub frames: Vec<Frame>,
 }
 
 impl Continuation {
     /// Run `effects` in order under `ctx`.
-    pub fn new(ctx: Ctx, effects: Vec<Effect>) -> Continuation {
+    pub fn new(ctx: Ctx, specs: Vec<Filter>, effects: Vec<Effect>) -> Continuation {
         Continuation {
             ctx,
+            specs,
             frames: vec![Frame::Effects { effects, next: 0 }],
         }
     }
@@ -206,12 +236,7 @@ impl Game {
             StackKind::Spell => {
                 let def = self.card_def(object).clone();
                 let specs = self.cast_target_specs(object);
-                let ctx = Ctx {
-                    you: controller,
-                    this: Some(object),
-                    targets: targets.clone(),
-                    triggering: None,
-                };
+                let ctx = Ctx::new(controller, Some(object), targets.clone(), None);
                 if self.all_targets_illegal(&specs, &ctx) {
                     // Fizzle: the spell does nothing and goes to the graveyard.
                     self.move_object(object, Zone::Graveyard);
@@ -237,21 +262,16 @@ impl Game {
                 let effects = def.ir.spell.as_ref().map(|s| s.effects.clone()).unwrap_or_default();
                 self.move_object(object, Zone::Graveyard);
                 self.emit(Event::Resolved { object });
-                self.run(Continuation::new(ctx, effects))
+                self.run(Continuation::new(ctx, specs, effects))
             }
             StackKind::Ability { source, index } => {
                 let def = self.card_def(source).clone();
                 let ability = def.ir.activated[index as usize].clone();
-                let ctx = Ctx {
-                    you: controller,
-                    this: Some(source),
-                    targets: targets.clone(),
-                    triggering: None,
-                };
+                let ctx = Ctx::new(controller, Some(source), targets.clone(), None);
                 if self.all_targets_illegal(&ability.targets, &ctx) {
                     return true;
                 }
-                self.run(Continuation::new(ctx, ability.effects))
+                self.run(Continuation::new(ctx, ability.targets, ability.effects))
             }
             StackKind::Equip { source } => {
                 if let Some(Target::Object(t)) = targets.first() {
@@ -272,16 +292,11 @@ impl Game {
             StackKind::Trigger { source, index, triggering } => {
                 let def = self.card_def(source).clone();
                 let trigger = def.ir.triggers[index as usize].clone();
-                let ctx = Ctx {
-                    you: controller,
-                    this: Some(source),
-                    targets: targets.clone(),
-                    triggering,
-                };
+                let ctx = Ctx::new(controller, Some(source), targets.clone(), triggering);
                 if self.all_targets_illegal(trigger.targets(), &ctx) {
                     return true;
                 }
-                self.run(Continuation::new(ctx, trigger.effects().to_vec()))
+                self.run(Continuation::new(ctx, trigger.targets().to_vec(), trigger.effects().to_vec()))
             }
             StackKind::Prowess { source } => {
                 if self.objects[source].zone == Zone::Battlefield {
@@ -331,12 +346,71 @@ impl Game {
         while let Some(frame) = k.frames.pop() {
             match frame {
                 Frame::Effects { effects, next } => {
-                    let Some(effect) = effects.get(next).cloned() else { continue };
+                    let Some(effect) = effects.get(next).cloned() else {
+                        continue;
+                    };
                     if next + 1 < effects.len() {
                         k.frames.push(Frame::Effects { effects, next: next + 1 });
                     }
-                    if let Some(pushed) = self.step(&k.ctx, &effect) {
+                    for pushed in self.step(&k.ctx, &k.specs, &effect) {
                         k.frames.push(pushed);
+                    }
+                }
+                Frame::Choose {
+                    seat,
+                    options,
+                    min,
+                    max,
+                    prompt,
+                    reason,
+                    bind,
+                } => {
+                    let max = max.min(options.len());
+                    let min = min.min(max);
+                    if options.is_empty() || max == 0 {
+                        k.ctx.bindings.insert(bind, Vec::new());
+                        continue;
+                    }
+                    if options.len() <= min {
+                        // Everything must be taken: no decision to make.
+                        k.ctx.bindings.insert(bind, options);
+                        continue;
+                    }
+                    self.pending = Some(PendingChoice::Choose {
+                        seat,
+                        options,
+                        min,
+                        max,
+                        prompt,
+                        reason,
+                        bind,
+                        resume: k,
+                    });
+                    self.priority = None;
+                    return false;
+                }
+                Frame::ChooseOption { seat, labels, bind } => {
+                    if labels.len() <= 1 {
+                        k.ctx.options.insert(bind, 0);
+                        continue;
+                    }
+                    self.pending = Some(PendingChoice::ChooseOption {
+                        seat,
+                        labels,
+                        bind,
+                        resume: k,
+                    });
+                    self.priority = None;
+                    return false;
+                }
+                Frame::Branch { bind, branches } => {
+                    if let Some(effects) = k.ctx.options.get(&bind).and_then(|&i| branches.get(i as usize)) {
+                        if !effects.is_empty() {
+                            k.frames.push(Frame::Effects {
+                                effects: effects.clone(),
+                                next: 0,
+                            });
+                        }
                     }
                 }
                 Frame::Discard { mut seats, count, random } => {
@@ -349,23 +423,33 @@ impl Game {
                     if !seats.is_empty() {
                         k.frames.push(Frame::Discard { seats, count, random });
                     }
-                    let hand = self.players[seat.index()].hand.len() as i32;
-                    if hand == 0 {
+                    let hand: Vec<ObjectId> = self.players[seat.index()].hand.clone();
+                    if hand.is_empty() {
                         continue;
                     }
-                    if random || hand <= count {
-                        let mut hand: Vec<ObjectId> = self.players[seat.index()].hand.clone();
-                        if random {
-                            use rand::seq::SliceRandom;
-                            hand.shuffle(&mut self.rng);
-                        }
+                    if random {
+                        let mut hand = hand;
+                        use rand::seq::SliceRandom;
+                        hand.shuffle(&mut self.rng);
                         let chosen: Vec<ObjectId> = hand.into_iter().take(count as usize).collect();
                         self.discard(seat, &chosen);
                         continue;
                     }
-                    self.pending = Some(PendingChoice::EffectDiscard { seat, count, resume: k });
-                    self.priority = None;
-                    return false;
+                    let mut hand = hand;
+                    hand.sort();
+                    k.frames.push(Frame::DiscardBound {
+                        seat,
+                        bind: DISCARD_BIND.into(),
+                    });
+                    k.frames.push(Frame::Choose {
+                        seat,
+                        options: hand.into_iter().map(Target::Object).collect(),
+                        min: count as usize,
+                        max: count as usize,
+                        prompt: "Discard".into(),
+                        reason: ActReason::Discard,
+                        bind: DISCARD_BIND.into(),
+                    });
                 }
                 Frame::Sacrifice { mut seats, filter, count } => {
                     if count <= 0 {
@@ -386,32 +470,65 @@ impl Game {
                         you: seat,
                         ..k.ctx.clone()
                     };
-                    let candidates: Vec<ObjectId> = self.players[seat.index()]
+                    let mut candidates: Vec<ObjectId> = self.players[seat.index()]
                         .battlefield
                         .clone()
                         .into_iter()
                         .filter(|id| self.object_matches(*id, &filter, &sub))
                         .collect();
+                    candidates.sort();
                     if candidates.is_empty() {
                         continue;
                     }
-                    if candidates.len() as i32 <= count {
-                        for id in candidates {
+                    k.frames.push(Frame::SacrificeBound {
+                        seat,
+                        bind: SACRIFICE_BIND.into(),
+                    });
+                    k.frames.push(Frame::Choose {
+                        seat,
+                        options: candidates.into_iter().map(Target::Object).collect(),
+                        min: count as usize,
+                        max: count as usize,
+                        prompt: "Sacrifice".into(),
+                        reason: ActReason::Choice,
+                        bind: SACRIFICE_BIND.into(),
+                    });
+                }
+                Frame::SacrificeBound { seat, bind } => {
+                    for id in bound_objects(&k.ctx, &bind) {
+                        if self
+                            .objects
+                            .get(id)
+                            .map(|o| o.zone == Zone::Battlefield && o.controller == seat)
+                            .unwrap_or(false)
+                        {
                             self.sacrifice(seat, id);
                         }
-                        continue;
                     }
-                    self.pending = Some(PendingChoice::Sacrifice {
-                        seat,
-                        filter,
-                        count,
-                        resume: k,
-                    });
-                    self.priority = None;
-                    return false;
+                }
+                Frame::DiscardBound { seat, bind } => {
+                    let ids = bound_objects(&k.ctx, &bind);
+                    if !ids.is_empty() {
+                        self.discard(seat, &ids);
+                    }
                 }
             }
         }
         true
     }
+}
+
+/// The objects a binding holds.
+fn bound_objects(ctx: &Ctx, bind: &str) -> Vec<ObjectId> {
+    ctx.bindings
+        .get(bind)
+        .map(|ts| {
+            ts.iter()
+                .filter_map(|t| match t {
+                    Target::Object(id) => Some(*id),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }

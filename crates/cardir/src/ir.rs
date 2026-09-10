@@ -178,6 +178,15 @@ pub enum Effect {
         #[serde(default)]
         else_: Option<Box<Effect>>,
     },
+    /// "You may [effect]. If you do, [then]. If you don't, [otherwise]."
+    /// The controller decides at resolution.
+    May {
+        effect: Box<Effect>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        then: Vec<Effect>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        otherwise: Vec<Effect>,
+    },
     /// Emitted by the ingestion tool for text the vocabulary cannot express.
     /// Never valid on a committed card.
     Unsupported {
@@ -217,6 +226,27 @@ pub enum Ref {
     Player(PlayerRef),
     /// The permanent this aura or equipment is attached to.
     Attached,
+    /// Objects a player picks as the effect resolves, without targeting:
+    /// "a creature you control", "up to two permanents you control". Allowed
+    /// only as the direct target of an effect. With `bind`, later effects may
+    /// refer to what was picked as `Named`.
+    Chosen {
+        who: PlayerRef,
+        filter: Filter,
+        count: Quantity,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bind: Option<String>,
+    },
+    /// What an earlier `Chosen` with this `bind` picked ("it", "that creature").
+    Named(String),
+}
+
+/// How many things a `Chosen` picks.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum Quantity {
+    Exactly(i32),
+    UpTo(i32),
+    AnyNumber,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

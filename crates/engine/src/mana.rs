@@ -59,12 +59,7 @@ impl Game {
                 None => {
                     // Evaluate the IR amount (e.g. "for each Elf you control") right now.
                     let ability = &def.ir.activated[abilities[0].2];
-                    let ctx = crate::filter::Ctx {
-                        you: seat,
-                        this: Some(id),
-                        targets: Vec::new(),
-                        triggering: None,
-                    };
+                    let ctx = crate::filter::Ctx::simple(seat, Some(id));
                     ability
                         .effects
                         .iter()

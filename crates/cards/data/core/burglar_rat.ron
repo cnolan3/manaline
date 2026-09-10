@@ -1,0 +1,9 @@
+Card(
+    name: "Burglar Rat",
+    cost: "{1}{B}",
+    types: [Creature],
+    subtypes: ["Rat"],
+    pt: (1, 1),
+    text: "When this creature enters, each opponent discards a card.",
+    triggers: [Etb(effects: [Discard(player: EachOpponent, count: Const(1))])],
+)
