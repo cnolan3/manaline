@@ -104,6 +104,9 @@ pub struct StackObjectView {
     pub name: String,
     pub controller: Seat,
     pub targets: Vec<Target>,
+    /// A modal spell's chosen modes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modes: Vec<u8>,
     /// "spell", "ability", "trigger", "equip"
     #[serde(default)]
     pub kind: String,

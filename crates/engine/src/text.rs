@@ -70,11 +70,29 @@ pub fn render_ability(def: &crate::card::CardDef, a: &cardir::Ability) -> String
 }
 
 impl Game {
+    /// What an entry on the stack will do, as text: a modal spell's chosen
+    /// modes, an ability's or trigger's text; empty for an ordinary spell.
+    pub fn describe_stack_object(&self, so: &crate::game::StackObject) -> String {
+        if so.kind == crate::game::StackKind::Spell && !so.modes.is_empty() {
+            let def = self.card_def(so.object);
+            if let Some(spell) = &def.ir.spell {
+                let parts: Vec<String> = so
+                    .modes
+                    .iter()
+                    .filter_map(|&m| spell.modes.get(m as usize))
+                    .map(|m| cardir::render_mode(&def.ir, m))
+                    .collect();
+                return parts.join(" ");
+            }
+        }
+        self.describe_stack_kind(&so.kind)
+    }
+
     /// What an entry on the stack will do, as text.
     pub fn describe_stack_kind(&self, kind: &crate::game::StackKind) -> String {
         use crate::game::StackKind;
         match kind {
-            StackKind::Spell => "spell".into(),
+            StackKind::Spell => String::new(),
             StackKind::Ability { source, index } => {
                 let def = self.card_def(*source);
                 def.ir
@@ -355,6 +373,7 @@ pub fn describe_action(game: &Game, a: &Action) -> String {
         Action::ChooseTargets { targets } => {
             let verb = match &game.pending {
                 Some(crate::game::PendingChoice::Choose { prompt, .. }) => prompt.as_str(),
+                Some(crate::game::PendingChoice::Casting { .. }) => "Target",
                 _ => "Choose",
             };
             if targets.is_empty() {
@@ -373,6 +392,12 @@ pub fn describe_action(game: &Game, a: &Action) -> String {
             Some(crate::game::PendingChoice::ChooseOption { labels, .. }) if (*mode as usize) < labels.len() => {
                 labels[*mode as usize].clone()
             }
+            Some(crate::game::PendingChoice::Casting { seat, object, modes, .. }) => game
+                .mode_options(*seat, *object, modes)
+                .into_iter()
+                .find(|(m, _)| m == mode)
+                .map(|(_, text)| text)
+                .unwrap_or_else(|| format!("Choose option {mode}")),
             _ => format!("Choose option {mode}"),
         },
         Action::Discard { objects } => {
@@ -420,7 +445,7 @@ pub fn render_view(v: &GameView) -> String {
     } else {
         writeln!(s, "Stack (top last):").unwrap();
         for so in &v.stack {
-            let what = if so.kind == "spell" {
+            let what = if so.description.is_empty() {
                 String::new()
             } else {
                 format!(" [{}: {}]", so.kind, so.description)

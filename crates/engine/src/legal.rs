@@ -51,15 +51,40 @@ impl Game {
                         }
                     }
                 }
+                PendingChoice::ChooseTargets { specs, trigger, .. } => {
+                    let ctx = Ctx::new(seat, Some(trigger.source), Vec::new(), trigger.triggering);
+                    for targets in self.target_combos(specs, &ctx).unwrap_or_default() {
+                        acts.push(Action::ChooseTargets { targets });
+                    }
+                }
                 PendingChoice::ChooseOption { labels, .. } => {
                     for mode in 0..labels.len() {
                         acts.push(Action::ChooseMode { mode: mode as u8 });
                     }
                 }
-                PendingChoice::ChooseTargets { specs, trigger, .. } => {
-                    let ctx = Ctx::new(seat, Some(trigger.source), Vec::new(), trigger.triggering);
-                    for targets in self.target_combos(specs, &ctx).unwrap_or_default() {
-                        acts.push(Action::ChooseTargets { targets });
+                PendingChoice::Casting {
+                    object,
+                    modes,
+                    modes_done,
+                    spec,
+                    ..
+                } => {
+                    let def = self.card_def(*object).clone();
+                    if !Game::modes_complete(&def, modes, *modes_done) {
+                        for (mode, _) in self.mode_options(seat, *object, modes) {
+                            acts.push(Action::ChooseMode { mode });
+                        }
+                    } else {
+                        let specs = Game::cast_specs(&def, modes);
+                        if let Some(current) = specs.get(*spec) {
+                            let ctx = Ctx::simple(seat, Some(*object));
+                            for targets in self.spec_choices(current, &ctx) {
+                                acts.push(Action::ChooseTargets { targets });
+                                if acts.len() >= ENUMERATION_CAP {
+                                    break;
+                                }
+                            }
+                        }
                     }
                 }
             },
@@ -89,6 +114,19 @@ impl Game {
                     if payments.is_empty() {
                         continue;
                     }
+                    if Game::is_two_step(&def) {
+                        // Modes and targets are chosen after paying: one action per payment.
+                        if self.two_step_castable(seat, id) {
+                            for payment in &payments {
+                                acts.push(Action::CastSpell {
+                                    object: id,
+                                    targets: Vec::new(),
+                                    payment: payment.clone(),
+                                });
+                            }
+                        }
+                        continue;
+                    }
                     let specs = self.cast_target_specs(id);
                     let ctx = Ctx::simple(seat, Some(id));
                     let Some(combos) = self.target_combos(&specs, &ctx) else {
@@ -111,26 +149,46 @@ impl Game {
         acts
     }
 
-    /// Every legal combination of targets for the specs, or `None` if some
-    /// spec has no legal target. Capped at `ENUMERATION_CAP` combinations.
+    /// Every legal way to fill one target spec: each candidate for a single
+    /// target, every subset of an allowed size for "up to N" / "any number".
+    pub(crate) fn spec_choices(&self, spec: &cardir::Filter, ctx: &Ctx) -> Vec<Vec<crate::action::Target>> {
+        let (inner, min, max) = spec.spec_bounds();
+        let candidates = self.targets_for(inner, ctx);
+        let max = max.unwrap_or(candidates.len()).min(candidates.len());
+        if candidates.len() < min {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        for k in min..=max {
+            out.extend(combinations(&candidates, k));
+            if out.len() >= ENUMERATION_CAP {
+                break;
+            }
+        }
+        out
+    }
+
+    /// Every legal combination of targets for the specs (flat, in spec
+    /// order), or `None` if some spec cannot be satisfied. Capped at
+    /// `ENUMERATION_CAP` combinations.
     pub(crate) fn target_combos(&self, specs: &[cardir::Filter], ctx: &Ctx) -> Option<Vec<Vec<crate::action::Target>>> {
         if specs.is_empty() {
             return Some(vec![Vec::new()]);
         }
-        let per_spec: Vec<Vec<crate::action::Target>> = specs.iter().map(|s| self.targets_for(s, ctx)).collect();
-        if per_spec.iter().any(|c| c.is_empty()) {
-            return None;
-        }
         let mut combos: Vec<Vec<crate::action::Target>> = vec![Vec::new()];
-        for candidates in &per_spec {
+        for spec in specs {
+            let choices = self.spec_choices(spec, ctx);
+            if choices.is_empty() {
+                return None;
+            }
             let mut next = Vec::new();
             for combo in &combos {
-                for &c in candidates {
-                    if combo.contains(&c) {
-                        continue; // one object can't be chosen twice for the same "target" word
+                for choice in &choices {
+                    if choice.iter().any(|c| combo.contains(c)) {
+                        continue; // one object can't be chosen twice across the spell's targets
                     }
                     let mut n = combo.clone();
-                    n.push(c);
+                    n.extend(choice.iter().copied());
                     next.push(n);
                     if next.len() >= ENUMERATION_CAP {
                         break;

@@ -180,6 +180,8 @@ impl Game {
                 }
                 // The chooser left: the resolution continues with nothing picked.
                 Some(PendingChoice::Choose { resume, .. }) | Some(PendingChoice::ChooseOption { resume, .. }) => self.resume(resume),
+                // A spell being cast by a player who left never reaches the stack.
+                Some(PendingChoice::Casting { .. }) => self.give_priority_to_active(),
                 _ => {}
             }
         }

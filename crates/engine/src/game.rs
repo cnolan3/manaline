@@ -134,6 +134,21 @@ pub enum PendingChoice {
         bind: String,
         resume: crate::stack::Continuation,
     },
+    /// `seat` is casting `object` in steps: mana is paid; modes (answered
+    /// with `ChooseMode`) and then each target spec (answered with
+    /// `ChooseTargets`) are still being chosen. The card is still in hand.
+    Casting {
+        seat: Seat,
+        object: ObjectId,
+        /// Modes chosen so far, in order.
+        modes: Vec<u8>,
+        /// "One or both": the caster said they are done choosing modes.
+        modes_done: bool,
+        /// Targets chosen so far, flat, in spec order.
+        targets: Vec<Target>,
+        /// Index of the next spec to choose for.
+        spec: usize,
+    },
 }
 
 impl PendingChoice {
@@ -147,7 +162,8 @@ impl PendingChoice {
             | PendingChoice::Discard { seat, .. }
             | PendingChoice::ChooseTargets { seat, .. }
             | PendingChoice::Choose { seat, .. }
-            | PendingChoice::ChooseOption { seat, .. } => *seat,
+            | PendingChoice::ChooseOption { seat, .. }
+            | PendingChoice::Casting { seat, .. } => *seat,
         }
     }
 
@@ -160,7 +176,7 @@ impl PendingChoice {
             PendingChoice::AssignDamage { .. } => ActReason::AssignDamage,
             PendingChoice::Discard { .. } => ActReason::Discard,
             PendingChoice::Choose { reason, .. } => *reason,
-            PendingChoice::ChooseTargets { .. } | PendingChoice::ChooseOption { .. } => ActReason::Choice,
+            PendingChoice::ChooseTargets { .. } | PendingChoice::ChooseOption { .. } | PendingChoice::Casting { .. } => ActReason::Choice,
         }
     }
 }
@@ -196,8 +212,12 @@ pub struct StackObject {
     /// The spell card, or the source of an ability or trigger.
     pub object: ObjectId,
     pub controller: Seat,
+    /// Flat, in spec order; grouped per spec at resolution.
     pub targets: Vec<Target>,
     pub kind: StackKind,
+    /// A modal spell's chosen modes, in order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modes: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -599,10 +619,12 @@ impl Game {
             Action::ChooseTargets { targets } => match &self.pending {
                 Some(PendingChoice::ChooseTargets { .. }) => self.choose_trigger_targets(targets),
                 Some(PendingChoice::Choose { .. }) => self.answer_choice(targets),
+                Some(PendingChoice::Casting { .. }) => self.answer_cast_targets(targets)?,
                 _ => return Err(RulesError::illegal("nothing to choose")),
             },
             Action::ChooseMode { mode } => match &self.pending {
                 Some(PendingChoice::ChooseOption { .. }) => self.answer_option(*mode),
+                Some(PendingChoice::Casting { .. }) => self.answer_cast_mode(*mode)?,
                 _ => return Err(RulesError::illegal("no option to choose")),
             },
             Action::DeclareAttackers { attackers } => self.declare_attackers(seat, attackers),
@@ -741,6 +763,7 @@ impl Game {
                 name: self.object_name(s.object).to_string(),
                 controller: s.controller,
                 targets: s.targets.clone(),
+                modes: s.modes.clone(),
                 kind: match s.kind {
                     StackKind::Spell => "spell",
                     StackKind::Ability { .. } => "ability",
@@ -748,7 +771,7 @@ impl Game {
                     StackKind::Trigger { .. } | StackKind::Prowess { .. } | StackKind::Delayed { .. } => "trigger",
                 }
                 .into(),
-                description: self.describe_stack_kind(&s.kind),
+                description: self.describe_stack_object(s),
             })
             .collect();
 

@@ -16,6 +16,7 @@ pub mod text;
 pub mod types;
 pub mod view;
 
+mod casting;
 mod combat;
 pub mod filter;
 pub mod interp;

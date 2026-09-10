@@ -75,8 +75,7 @@ pub fn render(card: &Card) -> String {
         }
     }
     if let Some(spell) = &card.spell {
-        let mut r = R::new(card, &spell.targets, false);
-        lines.push(r.sentences(&spell.effects));
+        lines.extend(spell_lines(card, spell));
     }
     if let Some(cost) = &card.equip {
         lines.push(format!("Equip {cost}"));
@@ -106,12 +105,27 @@ pub fn render_trigger(card: &Card, t: &Trigger) -> String {
 /// A spell's effects as Oracle text.
 pub fn render_spell(card: &Card) -> String {
     match &card.spell {
-        Some(spell) => {
-            let mut r = R::new(card, &spell.targets, false);
-            r.sentences(&spell.effects)
-        }
+        Some(spell) => spell_lines(card, spell).join("\n"),
         None => String::new(),
     }
+}
+
+/// One mode of a modal spell as Oracle text, without its bullet.
+pub fn render_mode(card: &Card, mode: &Mode) -> String {
+    let mut r = R::new(card, &mode.targets, false);
+    r.sentences(&mode.effects)
+}
+
+fn spell_lines(card: &Card, spell: &Spell) -> Vec<String> {
+    if spell.modes.is_empty() {
+        let mut r = R::new(card, &spell.targets, false);
+        return vec![r.sentences(&spell.effects)];
+    }
+    let mut lines = vec![format!("Choose {} \u{2014}", spell.choose.word())];
+    for mode in &spell.modes {
+        lines.push(format!("\u{2022} {}", render_mode(card, mode)));
+    }
+    lines
 }
 
 fn capitalize(s: &str) -> String {
@@ -244,6 +258,7 @@ impl R<'_> {
 
     fn collect(&self, f: &Filter, adjectives: &mut Vec<String>, heads: &mut Vec<String>, postfixes: &mut Vec<String>) {
         match f {
+            Filter::Targets(_, inner) => self.collect(inner, adjectives, heads, postfixes),
             Filter::Any => heads.push("any target".into()),
             Filter::Creature => heads.push("creature".into()),
             Filter::Land => heads.push("land".into()),
@@ -327,11 +342,37 @@ impl R<'_> {
     }
 
     fn target_phrase(&self, i: u8) -> String {
-        match self.targets.get(i as usize) {
-            Some(Filter::Any) => "any target".into(),
-            Some(f) if has_other(f) => format!("another target {}", self.noun(&without_other(f), Number::Singular)),
-            Some(f) => format!("target {}", self.noun(f, Number::Singular)),
-            None => format!("target #{i}"),
+        let Some(spec) = self.targets.get(i as usize) else {
+            return format!("target #{i}");
+        };
+        let (f, _, _) = spec.spec_bounds();
+        let one = match f {
+            Filter::Any => "any target".to_string(),
+            f if has_other(f) => format!("another target {}", self.noun(&without_other(f), Number::Singular)),
+            f => format!("target {}", self.noun(f, Number::Singular)),
+        };
+        let many = |r: &Self| match f {
+            Filter::Any => "any targets".to_string(),
+            f => format!("target {}", r.noun(f, Number::Plural)),
+        };
+        match spec {
+            Filter::Targets(Quantity::Exactly(1), _) | Filter::Targets(Quantity::UpTo(1), _)
+                if matches!(spec, Filter::Targets(Quantity::UpTo(1), _)) =>
+            {
+                format!("up to one {one}")
+            }
+            Filter::Targets(Quantity::Exactly(n), _) if *n > 1 => format!("{} {}", number_word(*n), many(self)),
+            Filter::Targets(Quantity::UpTo(n), _) if *n > 1 => format!("up to {} {}", number_word(*n), many(self)),
+            Filter::Targets(Quantity::AnyNumber, _) => format!("any number of {}", many(self)),
+            _ => one,
+        }
+    }
+
+    /// Whether target `i` may be several things, so verbs take "each".
+    fn multi_target(&self, r: &Ref) -> bool {
+        match r {
+            Ref::Target(i) => self.targets.get(*i as usize).map(Filter::is_multi).unwrap_or(false),
+            _ => false,
         }
     }
 
@@ -395,6 +436,7 @@ impl R<'_> {
         match r {
             Ref::Each(f) => (self.noun(f, Number::Plural), Number::Plural),
             Ref::Chosen { count, .. } if !matches!(count, Quantity::Exactly(1)) => (self.object(r), Number::Plural),
+            Ref::Target(_) if self.multi_target(r) => (format!("{} each", self.object(r)), Number::Plural),
             other => (self.object(other), Number::Singular),
         }
     }
@@ -485,7 +527,11 @@ impl R<'_> {
         match e {
             Effect::DealDamage { amount, to } => {
                 let src = self.this();
-                let to_s = self.object(to);
+                let to_s = if self.multi_target(to) {
+                    format!("each of {}", self.object(to))
+                } else {
+                    self.object(to)
+                };
                 match amount {
                     Amount::PowerOf(Ref::This) => {
                         format!("{src} deals damage equal to its power to {to_s}")

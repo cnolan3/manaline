@@ -45,6 +45,11 @@ like Elvish Archdruid, counts for all of it). If you would rather tap a
 different set of sources, pass the action with `payment.tap` edited to any of
 your untapped sources that covers the cost; `act` accepts it as long as it pays.
 
+Modal spells ("Choose one —") and spells with "up to N targets" are cast in
+steps: take the Cast action (it pays the mana), then you are asked for each
+mode and then for each target in turn; the spell goes on the stack once every
+choice is made.
+
 ## Combat
 
 During your declare attackers step you choose which untapped creatures attack

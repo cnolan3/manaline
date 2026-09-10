@@ -47,7 +47,54 @@ pub struct Card {
 pub struct Spell {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub targets: Vec<Filter>,
+    /// Empty for a modal spell, whose effects live in its modes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub effects: Vec<Effect>,
+    /// "Choose one —": the caster picks modes as they cast.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modes: Vec<Mode>,
+    #[serde(default, skip_serializing_if = "ModeChoice::is_default")]
+    pub choose: ModeChoice,
+}
+
+/// One bullet of a modal spell, with its own targets.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct Mode {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub targets: Vec<Filter>,
+    pub effects: Vec<Effect>,
+}
+
+/// How many modes a modal spell's caster picks.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum ModeChoice {
+    #[default]
+    One,
+    Two,
+    OneOrBoth,
+}
+
+impl ModeChoice {
+    fn is_default(&self) -> bool {
+        *self == ModeChoice::One
+    }
+
+    pub fn word(self) -> &'static str {
+        match self {
+            ModeChoice::One => "one",
+            ModeChoice::Two => "two",
+            ModeChoice::OneOrBoth => "one or both",
+        }
+    }
+
+    /// The fewest and most modes the caster may pick.
+    pub fn bounds(self) -> (usize, usize) {
+        match self {
+            ModeChoice::One => (1, 1),
+            ModeChoice::Two => (2, 2),
+            ModeChoice::OneOrBoth => (1, 2),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -297,6 +344,10 @@ pub enum PlayerRef {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum Filter {
+    /// How many things one "target" word picks: "up to two target
+    /// creatures", "any number of target Elves". Only at the top of a
+    /// target spec; a bare filter means exactly one.
+    Targets(Quantity, Box<Filter>),
     /// "any target": a creature, player, or planeswalker.
     Any,
     Creature,
@@ -483,6 +534,12 @@ impl Card {
         self.types.contains(&CardType::Instant) || self.keywords.contains(&Keyword::Flash)
     }
 
+    /// Whether the spell is cast in steps (modes and each target spec chosen
+    /// after paying) rather than with every target enumerated up front.
+    pub fn is_modal(&self) -> bool {
+        self.spell.as_ref().map(|s| !s.modes.is_empty()).unwrap_or(false)
+    }
+
     pub fn mana_abilities(&self) -> impl Iterator<Item = &Ability> {
         self.activated.iter().filter(|a| a.is_mana_ability())
     }
@@ -490,5 +547,28 @@ impl Card {
     /// The colours of the card's mana cost.
     pub fn colors(&self) -> Vec<Color> {
         self.cost.colors()
+    }
+}
+
+impl Filter {
+    /// A target spec's filter and how many it picks: `(filter, min, max)`,
+    /// `max` `None` for any number.
+    pub fn spec_bounds(&self) -> (&Filter, usize, Option<usize>) {
+        match self {
+            Filter::Targets(Quantity::Exactly(n), f) => (f, (*n).max(0) as usize, Some((*n).max(0) as usize)),
+            Filter::Targets(Quantity::UpTo(n), f) => (f, 0, Some((*n).max(0) as usize)),
+            Filter::Targets(Quantity::AnyNumber, f) => (f, 0, None),
+            f => (f, 1, Some(1)),
+        }
+    }
+
+    /// Whether the spec picks a caster-chosen number of targets.
+    pub fn is_variable(&self) -> bool {
+        matches!(self, Filter::Targets(Quantity::UpTo(_) | Quantity::AnyNumber, _))
+    }
+
+    /// Whether the spec may pick more than one target.
+    pub fn is_multi(&self) -> bool {
+        !matches!(self.spec_bounds(), (_, _, Some(1)))
     }
 }

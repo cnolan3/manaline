@@ -1,0 +1,7 @@
+Card(
+    name: "Dual Shot",
+    cost: "{R}",
+    types: [Instant],
+    text: "Dual Shot deals 1 damage to each of up to two target creatures.",
+    spell: Spell(targets: [Targets(UpTo(2), Creature)], effects: [DealDamage(amount: Const(1), to: Target(0))]),
+)

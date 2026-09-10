@@ -1,0 +1,11 @@
+Card(
+    name: "Selesnya Charm",
+    cost: "{G}{W}",
+    types: [Instant],
+    text: "Choose one —\n• Target creature gets +2/+2 and gains trample until end of turn.\n• Exile target creature with power 5 or greater.\n• Create a 2/2 white Knight creature token with vigilance.",
+    spell: Spell(modes: [
+        Mode(targets: [Creature], effects: [ModifyPt(target: Target(0), power: Const(2), toughness: Const(2), keywords: [Trample], until: EndOfTurn)]),
+        Mode(targets: [And([Creature, PowerAtLeast(5)])], effects: [Exile(target: Target(0))]),
+        Mode(effects: [CreateToken(spec: TokenSpec(name: "Knight", colors: [White], types: [Creature], subtypes: ["Knight"], pt: (2, 2), keywords: [Vigilance]), count: Const(1))]),
+    ]),
+)

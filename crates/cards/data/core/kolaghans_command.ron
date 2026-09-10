@@ -1,0 +1,12 @@
+Card(
+    name: "Kolaghan's Command",
+    cost: "{1}{B}{R}",
+    types: [Instant],
+    text: "Choose two —\n• Target player discards a card.\n• Return target creature card from your graveyard to your hand.\n• Destroy target artifact.\n• Kolaghan's Command deals 2 damage to any target.",
+    spell: Spell(choose: Two, modes: [
+        Mode(targets: [Player], effects: [Discard(player: TargetPlayer(0), count: Const(1))]),
+        Mode(targets: [And([Creature, InGraveyard(You)])], effects: [ReturnFromGraveyard(target: Target(0), to: Hand)]),
+        Mode(targets: [Artifact], effects: [Destroy(target: Target(0))]),
+        Mode(targets: [Any], effects: [DealDamage(amount: Const(2), to: Target(0))]),
+    ]),
+)

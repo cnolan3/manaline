@@ -1,0 +1,10 @@
+Card(
+    name: "Tandem Tactics",
+    cost: "{1}{W}",
+    types: [Instant],
+    text: "Up to two target creatures each get +1/+2 until end of turn. You gain 2 life.",
+    spell: Spell(
+        targets: [Targets(UpTo(2), Creature)],
+        effects: [ModifyPt(target: Target(0), power: Const(1), toughness: Const(2), until: EndOfTurn), GainLife(player: You, amount: Const(2))],
+    ),
+)

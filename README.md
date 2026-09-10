@@ -25,7 +25,7 @@ Also in this milestone: colour themes (`default`, `mono`, `high-contrast`)
 chosen in the settings menu or with `--theme`; an 80×24 layout that wraps the
 footer and uses spare rows for recent log lines; `manaline replay --step`,
 which steps through a recorded game in the client; and an ASCII card render
-for `cards show`. The core set is 295 cards with a behaviour test each, and
+for `cards show`. The core set is 299 cards with a behaviour test each, and
 twelve starter decks ship, including a blue-black graveyard deck: the engine
 now mills, returns cards from graveyards to hand or battlefield, activates
 abilities from the graveyard, and triggers on other creatures dying.

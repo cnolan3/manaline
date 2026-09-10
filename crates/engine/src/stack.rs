@@ -25,6 +25,9 @@ pub(crate) const MAY_BIND: &str = "$may";
 pub enum Frame {
     /// Run `effects` in order; `next` is the index of the one to run next.
     Effects { effects: Vec<Effect>, next: usize },
+    /// Switch what the frames above evaluate relative to (one mode of a
+    /// modal spell after another, each with its own targets).
+    SetCtx(Ctx),
     /// Ask `seat` to pick between `min` and `max` of `options`; what they
     /// pick is bound to `bind`. Decided on the spot when there is no choice.
     Choose {
@@ -86,6 +89,14 @@ impl Game {
 
     pub(crate) fn cast_spell(&mut self, seat: Seat, object: ObjectId, targets: &[Target], payment: &ManaPayment) -> Result<(), RulesError> {
         let cost = self.cast_cost(seat, object);
+        if Game::is_two_step(self.card_def(object)) {
+            if !targets.is_empty() {
+                return Err(RulesError::illegal("this spell's modes and targets are chosen after casting it"));
+            }
+            self.pay_mana(seat, payment, &cost)?;
+            self.begin_two_step_cast(seat, object);
+            return Ok(());
+        }
         self.pay_mana(seat, payment, &cost)?;
         self.objects[object].controller = seat;
         self.move_object(object, Zone::Stack);
@@ -94,6 +105,7 @@ impl Game {
             controller: seat,
             targets: targets.to_vec(),
             kind: StackKind::Spell,
+            modes: Vec::new(),
         });
         self.emit(Event::Cast {
             seat,
@@ -126,6 +138,7 @@ impl Game {
                 controller: seat,
                 targets: targets.to_vec(),
                 kind: StackKind::Equip { source: object },
+                modes: Vec::new(),
             });
             self.emit(Event::Activated {
                 seat,
@@ -208,6 +221,7 @@ impl Game {
             controller: seat,
             targets: targets.to_vec(),
             kind: StackKind::Ability { source: object, index },
+            modes: Vec::new(),
         });
         self.emit(Event::Activated {
             seat,
@@ -231,24 +245,24 @@ impl Game {
             controller,
             targets,
             kind,
+            modes,
         } = so;
         match kind {
             StackKind::Spell => {
                 let def = self.card_def(object).clone();
-                let specs = self.cast_target_specs(object);
-                let ctx = Ctx::new(controller, Some(object), targets.clone(), None);
-                if self.all_targets_illegal(&specs, &ctx) {
+                let specs = Game::cast_specs(&def, &modes);
+                let Some(groups) = self.legal_target_groups(controller, object, &specs, &targets, None) else {
                     // Fizzle: the spell does nothing and goes to the graveyard.
                     self.move_object(object, Zone::Graveyard);
                     self.emit(Event::Resolved { object });
                     return true;
-                }
+                };
                 if def.is_permanent() {
                     self.objects[object].controller = controller;
                     self.move_object(object, Zone::Battlefield);
                     self.objects[object].summoning_sick = true;
                     if def.is_aura() {
-                        if let Some(Target::Object(t)) = targets.first() {
+                        if let Some(Target::Object(t)) = groups.first().and_then(|g| g.first()) {
                             self.objects[object].attached_to = Some(*t);
                             self.emit(Event::Attached { object, to: *t });
                         }
@@ -259,18 +273,47 @@ impl Game {
                 // An instant or sorcery leaves the stack as it resolves; nothing in
                 // v1 can observe the difference, and it keeps every object in exactly
                 // one zone list while a resolution is paused on a choice.
-                let effects = def.ir.spell.as_ref().map(|s| s.effects.clone()).unwrap_or_default();
                 self.move_object(object, Zone::Graveyard);
                 self.emit(Event::Resolved { object });
-                self.run(Continuation::new(ctx, specs, effects))
+                let spell = def.ir.spell.clone().unwrap_or_else(|| cardir::Spell {
+                    targets: Vec::new(),
+                    effects: Vec::new(),
+                    modes: Vec::new(),
+                    choose: cardir::ModeChoice::One,
+                });
+                if !def.is_modal() {
+                    let ctx = Ctx::new(controller, Some(object), groups, None);
+                    return self.run(Continuation::new(ctx, specs, spell.effects));
+                }
+                // Each chosen mode runs in order with its own targets: frames go
+                // on in reverse so the first mode's context is on top.
+                let mut k = Continuation {
+                    ctx: Ctx::simple(controller, Some(object)),
+                    specs: Vec::new(),
+                    frames: Vec::new(),
+                };
+                let mut at = 0;
+                let mut runs = Vec::new();
+                for &m in &modes {
+                    let Some(mode) = spell.modes.get(m as usize) else { continue };
+                    let n = mode.targets.len();
+                    let mode_groups = groups[at..(at + n).min(groups.len())].to_vec();
+                    at += n;
+                    runs.push((Ctx::new(controller, Some(object), mode_groups, None), mode.effects.clone()));
+                }
+                for (ctx, effects) in runs.into_iter().rev() {
+                    k.frames.push(Frame::Effects { effects, next: 0 });
+                    k.frames.push(Frame::SetCtx(ctx));
+                }
+                self.run(k)
             }
             StackKind::Ability { source, index } => {
                 let def = self.card_def(source).clone();
                 let ability = def.ir.activated[index as usize].clone();
-                let ctx = Ctx::new(controller, Some(source), targets.clone(), None);
-                if self.all_targets_illegal(&ability.targets, &ctx) {
+                let Some(groups) = self.legal_target_groups(controller, source, &ability.targets, &targets, None) else {
                     return true;
-                }
+                };
+                let ctx = Ctx::new(controller, Some(source), groups, None);
                 self.run(Continuation::new(ctx, ability.targets, ability.effects))
             }
             StackKind::Equip { source } => {
@@ -292,10 +335,10 @@ impl Game {
             StackKind::Trigger { source, index, triggering } => {
                 let def = self.card_def(source).clone();
                 let trigger = def.ir.triggers[index as usize].clone();
-                let ctx = Ctx::new(controller, Some(source), targets.clone(), triggering);
-                if self.all_targets_illegal(&trigger.targets, &ctx) {
+                let Some(groups) = self.legal_target_groups(controller, source, &trigger.targets, &targets, triggering) else {
                     return true;
-                }
+                };
+                let ctx = Ctx::new(controller, Some(source), groups, triggering);
                 // An intervening "if" is checked again on resolution (rule 603.4).
                 if let Some(c) = &trigger.condition {
                     if !self.condition_holds(c, &ctx) {
@@ -317,16 +360,23 @@ impl Game {
         }
     }
 
-    /// A spell or ability with targets whose targets are all illegal on
-    /// resolution doesn't resolve (rule 608.2b).
-    fn all_targets_illegal(&self, specs: &[Filter], ctx: &Ctx) -> bool {
-        if specs.is_empty() {
-            return false;
+    /// The chosen targets grouped by spec with illegal ones dropped, or
+    /// `None` when targets were chosen and every one is now illegal, in which
+    /// case the spell or ability doesn't resolve (rule 608.2b).
+    fn legal_target_groups(
+        &self,
+        controller: Seat,
+        this: ObjectId,
+        specs: &[Filter],
+        targets: &[Target],
+        triggering: Option<Target>,
+    ) -> Option<Vec<Vec<Target>>> {
+        let ctx = Ctx::new(controller, Some(this), Vec::new(), triggering);
+        let groups = self.prune_targets(specs, Game::group_targets(specs, targets), &ctx);
+        if !targets.is_empty() && groups.iter().all(|g| g.is_empty()) {
+            return None;
         }
-        !specs
-            .iter()
-            .enumerate()
-            .any(|(i, spec)| ctx.targets.get(i).map(|t| self.target_is_legal(*t, spec, ctx)).unwrap_or(false))
+        Some(groups)
     }
 
     /// Counter a spell: it leaves the stack for its owner's graveyard.
@@ -352,6 +402,7 @@ impl Game {
     pub(crate) fn run(&mut self, mut k: Continuation) -> bool {
         while let Some(frame) = k.frames.pop() {
             match frame {
+                Frame::SetCtx(ctx) => k.ctx = ctx,
                 Frame::Effects { effects, next } => {
                     let Some(effect) = effects.get(next).cloned() else {
                         continue;

@@ -13,8 +13,10 @@ pub struct Ctx {
     pub you: Seat,
     /// The source object, if any ("~", "this").
     pub this: Option<ObjectId>,
-    /// Chosen targets, by index.
-    pub targets: Vec<Target>,
+    /// Chosen targets, grouped by target spec: `Target(i)` is everything
+    /// picked for the i-th "target" word (several things for "up to two
+    /// target creatures"), with illegal ones already pruned at resolution.
+    pub targets: Vec<Vec<Target>>,
     /// The object or player that caused a trigger.
     pub triggering: Option<Target>,
     /// What each `Chosen ... bind` picked as the effect resolved, by name.
@@ -30,7 +32,7 @@ impl Ctx {
         Ctx::new(you, this, Vec::new(), None)
     }
 
-    pub fn new(you: Seat, this: Option<ObjectId>, targets: Vec<Target>, triggering: Option<Target>) -> Ctx {
+    pub fn new(you: Seat, this: Option<ObjectId>, targets: Vec<Vec<Target>>, triggering: Option<Target>) -> Ctx {
         Ctx {
             you,
             this,
@@ -50,6 +52,7 @@ impl Game {
         };
         let def = self.card_def(id);
         match filter {
+            Filter::Targets(_, f) => self.object_matches(id, f, ctx),
             Filter::Any => obj.zone == Zone::Battlefield && (def.is_creature() || def.types.contains(&CardType::Planeswalker)),
             Filter::Creature => def.is_creature(),
             Filter::Land => def.is_land(),
@@ -84,6 +87,7 @@ impl Game {
     /// `object_matches`, but `Spell` is true for it wherever it is.
     pub fn spell_matches(&self, id: ObjectId, filter: &Filter, ctx: &Ctx) -> bool {
         match filter {
+            Filter::Targets(_, f) => self.spell_matches(id, f, ctx),
             Filter::Spell => true,
             Filter::And(fs) => fs.iter().all(|f| self.spell_matches(id, f, ctx)),
             Filter::Or(fs) => fs.iter().any(|f| self.spell_matches(id, f, ctx)),
@@ -98,6 +102,7 @@ impl Game {
             return false;
         }
         match filter {
+            Filter::Targets(_, f) => self.player_matches(seat, f, ctx),
             Filter::Any | Filter::Player => true,
             Filter::Opponent => seat != ctx.you,
             Filter::ControlledBy(p) => self.players_of(p, ctx).contains(&seat),
@@ -111,6 +116,7 @@ impl Game {
     /// Whether a filter can match players at all (it names players somewhere).
     pub fn filter_admits_players(filter: &Filter) -> bool {
         match filter {
+            Filter::Targets(_, f) => Self::filter_admits_players(f),
             Filter::Any | Filter::Player | Filter::Opponent => true,
             Filter::And(fs) => fs.iter().all(Self::filter_admits_players),
             Filter::Or(fs) => fs.iter().any(Self::filter_admits_players),
@@ -121,6 +127,7 @@ impl Game {
     /// Whether a filter can match objects (as opposed to only players).
     pub fn filter_admits_objects(filter: &Filter) -> bool {
         match filter {
+            Filter::Targets(_, f) => Self::filter_admits_objects(f),
             Filter::Player | Filter::Opponent => false,
             Filter::And(fs) => fs.iter().all(Self::filter_admits_objects),
             Filter::Or(fs) => fs.iter().any(Self::filter_admits_objects),
@@ -131,6 +138,7 @@ impl Game {
     /// The zone a target filter looks in: the stack for spells, else the battlefield.
     pub fn filter_zone(filter: &Filter) -> Zone {
         match filter {
+            Filter::Targets(_, f) => Self::filter_zone(f),
             Filter::Spell => Zone::Stack,
             Filter::InGraveyard(_) => Zone::Graveyard,
             Filter::And(fs) if fs.iter().any(|f| Self::filter_zone(f) == Zone::Stack) => Zone::Stack,
@@ -209,10 +217,19 @@ impl Game {
     pub fn players_of(&self, p: &PlayerRef, ctx: &Ctx) -> Vec<Seat> {
         match p {
             PlayerRef::You => vec![ctx.you],
-            PlayerRef::TargetPlayer(i) | PlayerRef::TargetOpponent(i) => match ctx.targets.get(*i as usize) {
-                Some(Target::Player(s)) => vec![*s],
-                _ => Vec::new(),
-            },
+            PlayerRef::TargetPlayer(i) | PlayerRef::TargetOpponent(i) => ctx
+                .targets
+                .get(*i as usize)
+                .map(|group| {
+                    group
+                        .iter()
+                        .filter_map(|t| match t {
+                            Target::Player(s) => Some(*s),
+                            _ => None,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
             PlayerRef::EachOpponent => self.opponents_of(ctx.you).collect(),
             PlayerRef::EachPlayer => self.turn_order.clone(),
             PlayerRef::Triggering => match ctx.triggering {
@@ -236,10 +253,19 @@ impl Game {
     /// The objects a `Ref` denotes right now (players are handled separately).
     pub fn objects_of(&self, r: &Ref, ctx: &Ctx) -> Vec<ObjectId> {
         match r {
-            Ref::Target(i) => match ctx.targets.get(*i as usize) {
-                Some(Target::Object(id)) => vec![*id],
-                _ => Vec::new(),
-            },
+            Ref::Target(i) => ctx
+                .targets
+                .get(*i as usize)
+                .map(|group| {
+                    group
+                        .iter()
+                        .filter_map(|t| match t {
+                            Target::Object(id) => Some(*id),
+                            _ => None,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
             Ref::This => ctx.this.into_iter().collect(),
             Ref::Triggering => match ctx.triggering {
                 Some(Target::Object(id)) => vec![id],
@@ -281,7 +307,7 @@ impl Game {
     /// Everything a `Ref` denotes: objects and players.
     pub fn refs_of(&self, r: &Ref, ctx: &Ctx) -> Vec<Target> {
         match r {
-            Ref::Target(i) => ctx.targets.get(*i as usize).copied().into_iter().collect(),
+            Ref::Target(i) => ctx.targets.get(*i as usize).cloned().unwrap_or_default(),
             Ref::Player(p) => self.players_of(p, ctx).into_iter().map(Target::Player).collect(),
             Ref::Triggering => ctx.triggering.into_iter().collect(),
             Ref::Named(name) => ctx.bindings.get(name).cloned().unwrap_or_default(),

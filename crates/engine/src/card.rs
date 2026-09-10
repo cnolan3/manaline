@@ -117,6 +117,11 @@ impl CardDef {
         self.ir.is_equipment()
     }
 
+    /// A modal spell ("Choose one —").
+    pub fn is_modal(&self) -> bool {
+        self.ir.is_modal()
+    }
+
     pub fn has_keyword(&self, k: Keyword) -> bool {
         self.keywords.contains(&k)
     }

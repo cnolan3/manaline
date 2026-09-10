@@ -9,7 +9,7 @@ pub mod types;
 pub mod validate;
 
 pub use ir::*;
-pub use render::{normalise, render, render_ability, render_clause, render_spell, render_trigger, round_trips};
+pub use render::{normalise, render, render_ability, render_clause, render_mode, render_spell, render_trigger, round_trips};
 pub use types::{CardType, Color, Keyword, ManaCost, Supertype};
 pub use validate::{validate, ValidationError};
 
@@ -136,6 +136,30 @@ Card(
                 panic!("{}:\n  oracle:   {want}\n  rendered: {got}", card.name);
             }
         }
+    }
+
+    #[test]
+    fn modal_spells_and_multiple_targets_render_like_oracle() {
+        let cases = [
+            r#"Card(name: "Dual Shot", cost: "{R}", types: [Instant], text: "Dual Shot deals 1 damage to each of up to two target creatures.", spell: Spell(targets: [Targets(UpTo(2), Creature)], effects: [DealDamage(amount: Const(1), to: Target(0))]))"#,
+            r#"Card(name: "Tandem Tactics", cost: "{1}{W}", types: [Instant], text: "Up to two target creatures each get +1/+2 until end of turn. You gain 2 life.", spell: Spell(targets: [Targets(UpTo(2), Creature)], effects: [ModifyPt(target: Target(0), power: Const(1), toughness: Const(2), until: EndOfTurn), GainLife(player: You, amount: Const(2))]))"#,
+            r#"Card(name: "Sweep", cost: "{W}", types: [Sorcery], text: "Destroy any number of target artifacts.", spell: Spell(targets: [Targets(AnyNumber, Artifact)], effects: [Destroy(target: Target(0))]))"#,
+            r#"Card(name: "Pair", cost: "{G}", types: [Instant], text: "Two target creatures each gain trample until end of turn.", spell: Spell(targets: [Targets(Exactly(2), Creature)], effects: [GrantKeyword(target: Target(0), keyword: Trample, until: EndOfTurn)]))"#,
+            r#"Card(name: "Selesnya Charm", cost: "{G}{W}", types: [Instant], text: "Choose one —\n• Target creature gets +2/+2 and gains trample until end of turn.\n• Exile target creature with power 5 or greater.\n• Create a 2/2 white Knight creature token with vigilance.", spell: Spell(modes: [Mode(targets: [Creature], effects: [ModifyPt(target: Target(0), power: Const(2), toughness: Const(2), keywords: [Trample], until: EndOfTurn)]), Mode(targets: [And([Creature, PowerAtLeast(5)])], effects: [Exile(target: Target(0))]), Mode(effects: [CreateToken(spec: TokenSpec(name: "Knight", colors: [White], types: [Creature], subtypes: ["Knight"], pt: (2, 2), keywords: [Vigilance]), count: Const(1))])]))"#,
+            r#"Card(name: "Kolaghan's Command", cost: "{1}{B}{R}", types: [Instant], text: "Choose two —\n• Target player discards a card.\n• Return target creature card from your graveyard to your hand.\n• Destroy target artifact.\n• Kolaghan's Command deals 2 damage to any target.", spell: Spell(choose: Two, modes: [Mode(targets: [Player], effects: [Discard(player: TargetPlayer(0), count: Const(1))]), Mode(targets: [And([Creature, InGraveyard(You)])], effects: [ReturnFromGraveyard(target: Target(0), to: Hand)]), Mode(targets: [Artifact], effects: [Destroy(target: Target(0))]), Mode(targets: [Any], effects: [DealDamage(amount: Const(2), to: Target(0))])]))"#,
+        ];
+        for text in cases {
+            let card = load(text).unwrap_or_else(|e| panic!("{e}"));
+            if let Err((want, got)) = round_trips(&card) {
+                panic!("{}:\n  oracle:   {want}\n  rendered: {got}", card.name);
+            }
+        }
+        let bad = r#"Card(name: "X", cost: "{R}", types: [Instant], text: "", spell: Spell(targets: [Targets(UpTo(2), Creature), Targets(AnyNumber, Artifact)], effects: [Destroy(target: Target(0))]))"#;
+        assert!(load(bad).unwrap_err().contains("at most one"));
+        let bad = r#"Card(name: "Y", cost: "{R}", types: [Instant], text: "", spell: Spell(targets: [And([Targets(UpTo(2), Creature), Tapped])], effects: [Destroy(target: Target(0))]))"#;
+        assert!(load(bad).unwrap_err().contains("whole of one target spec"));
+        let bad = r#"Card(name: "Z", cost: "{R}", types: [Instant], text: "", spell: Spell(modes: [Mode(effects: [Draw(player: You, count: Const(1))])]))"#;
+        assert!(load(bad).unwrap_err().contains("at least two modes"));
     }
 
     #[test]

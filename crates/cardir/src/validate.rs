@@ -117,7 +117,36 @@ impl Ctx<'_> {
                 self.err("Filter::Attached on a card that is neither an aura nor equipment")
             }
             Filter::Subtype(s) if s.trim().is_empty() => self.err("empty subtype"),
+            Filter::Targets(..) => self.err("Targets(count, ...) may only be the whole of one target spec"),
             _ => {}
+        }
+    }
+
+    /// One entry of a `targets` list: a filter, or `Targets(count, filter)`.
+    fn target_spec(&mut self, f: &Filter) {
+        match f {
+            Filter::Targets(count, inner) => {
+                match count {
+                    Quantity::Exactly(n) | Quantity::UpTo(n) if *n < 1 => self.err("a target count must be at least one"),
+                    _ => {}
+                }
+                if matches!(**inner, Filter::Targets(..)) {
+                    self.err("nested Targets");
+                }
+                self.filter(inner);
+            }
+            other => self.filter(other),
+        }
+    }
+
+    fn targets(&mut self, specs: &[Filter]) {
+        self.targets = specs.len();
+        self.bound.clear();
+        for f in specs {
+            self.target_spec(f);
+        }
+        if specs.iter().filter(|f| f.is_variable()).count() > 1 {
+            self.err("at most one target spec may take a variable number of targets");
         }
     }
 
@@ -310,16 +339,33 @@ pub fn validate(card: &Card) -> Result<(), ValidationError> {
     }
 
     if let Some(spell) = &card.spell {
-        ctx.targets = spell.targets.len();
-        ctx.bound.clear();
-        for f in &spell.targets {
-            ctx.filter(f);
-        }
-        if spell.effects.is_empty() {
-            ctx.err("a spell needs at least one effect");
-        }
-        for e in &spell.effects {
-            ctx.effect(e);
+        if spell.modes.is_empty() {
+            ctx.targets(&spell.targets);
+            if spell.effects.is_empty() {
+                ctx.err("a spell needs at least one effect");
+            }
+            for e in &spell.effects {
+                ctx.effect(e);
+            }
+        } else {
+            if !spell.effects.is_empty() || !spell.targets.is_empty() {
+                ctx.err("a modal spell keeps its targets and effects in its modes");
+            }
+            if spell.modes.len() < 2 {
+                ctx.err("a modal spell needs at least two modes");
+            }
+            if spell.modes.len() < spell.choose.bounds().0 {
+                ctx.err("not enough modes to choose that many");
+            }
+            for mode in &spell.modes {
+                ctx.targets(&mode.targets);
+                if mode.effects.is_empty() {
+                    ctx.err("a mode needs at least one effect");
+                }
+                for e in &mode.effects {
+                    ctx.effect(e);
+                }
+            }
         }
     }
     if let Some(f) = &card.enchant {
@@ -345,11 +391,7 @@ pub fn validate(card: &Card) -> Result<(), ValidationError> {
     }
     for t in &card.triggers {
         ctx.in_trigger = true;
-        ctx.targets = t.targets.len();
-        ctx.bound.clear();
-        for f in &t.targets {
-            ctx.filter(f);
-        }
+        ctx.targets(&t.targets);
         ctx.event(&t.event);
         if let Some(c) = &t.condition {
             ctx.condition(c);
@@ -363,11 +405,7 @@ pub fn validate(card: &Card) -> Result<(), ValidationError> {
         ctx.in_trigger = false;
     }
     for a in &card.activated {
-        ctx.targets = a.targets.len();
-        ctx.bound.clear();
-        for f in &a.targets {
-            ctx.filter(f);
-        }
+        ctx.targets(&a.targets);
         if a.cost.is_empty() {
             ctx.err("an activated ability needs a cost");
         }

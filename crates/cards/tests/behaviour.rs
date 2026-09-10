@@ -119,6 +119,30 @@ fn cast_raw(game: &mut Game, seat: Seat, name: &str, targets: &[Target]) {
     game.apply(seat, &a).unwrap();
 }
 
+/// Cast a spell whose modes and targets are chosen after paying: pay, pick
+/// each mode in turn (by index), then each target spec's targets in turn.
+fn cast_steps(game: &mut Game, name: &str, modes: &[u8], targets: &[&[Target]]) {
+    cast_raw(game, ME, name, &[]);
+    for &m in modes {
+        assert!(
+            matches!(game.pending, Some(PendingChoice::Casting { .. })),
+            "expected to be choosing modes, got {:?}",
+            game.pending
+        );
+        game.apply(ME, &Action::ChooseMode { mode: m }).unwrap();
+    }
+    for t in targets {
+        assert!(
+            matches!(game.pending, Some(PendingChoice::Casting { .. })),
+            "expected to be choosing targets, got {:?}",
+            game.pending
+        );
+        game.apply(ME, &Action::ChooseTargets { targets: t.to_vec() }).unwrap();
+    }
+    assert_eq!(game.stack.len(), 1, "the spell is on the stack: {:?}", game.pending);
+    settle(game);
+}
+
 /// Answer a resolving effect's pick ("sacrifice a creature", "a permanent you control").
 fn pick(game: &mut Game, seat: Seat, targets: &[Target]) {
     assert!(
@@ -854,6 +878,64 @@ fn registry() -> BTreeMap<&'static str, Check> {
         assert_eq!(game.objects[bear].controller, OPP, "under its owner's control");
         assert!(game.players[1].battlefield.contains(&bear));
     });
+    check!("Tandem Tactics", || {
+        let mut game = base()
+            .battlefield(ME, "Grizzly Bears")
+            .battlefield(ME, "Hill Giant")
+            .hand(ME, "Tandem Tactics")
+            .build();
+        let bear = bf(&game, ME, "Grizzly Bears");
+        let giant = bf(&game, ME, "Hill Giant");
+        cast_steps(&mut game, "Tandem Tactics", &[], &[&[Target::Object(bear), Target::Object(giant)]]);
+        assert_eq!(stats(&game, bear), (3, 4));
+        assert_eq!(stats(&game, giant), (4, 5));
+        assert_eq!(life(&game, ME), 22);
+        // Zero targets is a legal cast too, and the life still comes.
+        let mut game = base().hand(ME, "Tandem Tactics").build();
+        cast_steps(&mut game, "Tandem Tactics", &[], &[&[]]);
+        assert_eq!(life(&game, ME), 22);
+    });
+    check!("Selesnya Charm", || {
+        let mut game = base().battlefield(ME, "Grizzly Bears").hand(ME, "Selesnya Charm").build();
+        let bear = bf(&game, ME, "Grizzly Bears");
+        cast_steps(&mut game, "Selesnya Charm", &[0], &[&[Target::Object(bear)]]);
+        assert_eq!(stats(&game, bear), (4, 4));
+        assert!(kws(&game, bear).contains(&Keyword::Trample));
+        let mut game = base().battlefield(OPP, "Craw Wurm").hand(ME, "Selesnya Charm").build();
+        let wurm = bf(&game, OPP, "Craw Wurm");
+        let bear = bf(&game, OPP, "Grizzly Bears");
+        cast_raw(&mut game, ME, "Selesnya Charm", &[]);
+        let mode_texts: Vec<String> = game
+            .legal_actions(ME)
+            .iter()
+            .filter(|a| matches!(a, Action::ChooseMode { .. }))
+            .map(|a| engine::text::describe_action(&game, a))
+            .collect();
+        assert_eq!(mode_texts.len(), 3, "{mode_texts:?}");
+        assert!(mode_texts[1].starts_with("Exile target creature with power 5"), "{mode_texts:?}");
+        game.apply(ME, &Action::ChooseMode { mode: 1 }).unwrap();
+        let picks: Vec<Action> = game
+            .legal_actions(ME)
+            .into_iter()
+            .filter(|a| matches!(a, Action::ChooseTargets { .. }))
+            .collect();
+        assert_eq!(
+            picks,
+            vec![Action::ChooseTargets {
+                targets: vec![Target::Object(wurm)]
+            }],
+            "only the 6/4 qualifies"
+        );
+        game.apply(ME, &picks[0]).unwrap();
+        settle(&mut game);
+        assert_eq!(game.objects[wurm].zone, Zone::Exile);
+        assert_eq!(game.objects[bear].zone, Zone::Battlefield);
+        let mut game = base().hand(ME, "Selesnya Charm").build();
+        cast_steps(&mut game, "Selesnya Charm", &[2], &[]);
+        let knight = bf(&game, ME, "Knight");
+        assert_eq!(stats(&game, knight), (2, 2));
+        assert!(kws(&game, knight).contains(&Keyword::Vigilance));
+    });
     check!("Kor Skyfisher", || {
         let mut game = base().battlefield(ME, "Grizzly Bears").hand(ME, "Kor Skyfisher").build();
         let bear = bf(&game, ME, "Grizzly Bears");
@@ -1196,6 +1278,63 @@ fn registry() -> BTreeMap<&'static str, Check> {
         attack(&mut game, &[bear]);
         advance_until(&mut game, |g| matches!(g.pending, Some(PendingChoice::DeclareBlockers { .. }))).unwrap();
         assert_eq!(game.block_candidates(OPP), vec![drake], "only the flyer may block");
+    });
+    check!("Dual Shot", || {
+        let mut game = base().battlefield(OPP, "Hill Giant").hand(ME, "Dual Shot").build();
+        let bear = bf(&game, OPP, "Grizzly Bears");
+        let giant = bf(&game, OPP, "Hill Giant");
+        cast_raw(&mut game, ME, "Dual Shot", &[]);
+        let picks = game
+            .legal_actions(ME)
+            .iter()
+            .filter(|a| matches!(a, Action::ChooseTargets { .. }))
+            .count();
+        assert_eq!(picks, 1 + 2 + 1, "none, each, both");
+        game.apply(
+            ME,
+            &Action::ChooseTargets {
+                targets: vec![Target::Object(bear), Target::Object(giant)],
+            },
+        )
+        .unwrap();
+        settle(&mut game);
+        assert_eq!(game.objects[bear].damage, 1);
+        assert_eq!(game.objects[giant].damage, 1);
+    });
+    check!("Kolaghan's Command", || {
+        let mut game = base()
+            .graveyard(ME, "Hill Giant")
+            .battlefield(OPP, "Bonesplitter")
+            .hand(OPP, "Forest")
+            .hand(ME, "Kolaghan's Command")
+            .build();
+        let axe = bf(&game, OPP, "Bonesplitter");
+        let bear = bf(&game, OPP, "Grizzly Bears");
+        // Destroy the axe and shock the bear: two modes, each with its own target.
+        cast_steps(
+            &mut game,
+            "Kolaghan's Command",
+            &[2, 3],
+            &[&[Target::Object(axe)], &[Target::Object(bear)]],
+        );
+        assert!(in_graveyard(&game, axe));
+        assert!(in_graveyard(&game, bear));
+        assert_eq!(hand_size(&game, OPP), 1, "the discard mode was not chosen");
+        // Discard and regrow, in that order.
+        let mut game = base()
+            .graveyard(ME, "Hill Giant")
+            .hand(OPP, "Forest")
+            .hand(ME, "Kolaghan's Command")
+            .build();
+        let giant = gy(&game, ME, "Hill Giant");
+        cast_steps(
+            &mut game,
+            "Kolaghan's Command",
+            &[0, 1],
+            &[&[Target::Player(OPP)], &[Target::Object(giant)]],
+        );
+        assert_eq!(hand_size(&game, OPP), 0);
+        assert_eq!(game.objects[giant].zone, Zone::Hand);
     });
     check!("Prodigal Pyromancer", || pinger("Prodigal Pyromancer"));
     check!("Goblin Chieftain", || {

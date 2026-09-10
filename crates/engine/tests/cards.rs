@@ -35,6 +35,8 @@ fn db_with_extras() -> Arc<engine::CardDb> {
         r#"Card(name: "Test Cull", cost: "{W}", types: [Sorcery], text: "Exile up to two creatures you control.", spell: Spell(effects: [Exile(target: Chosen(who: You, filter: And([Creature, ControlledBy(You)]), count: UpTo(2)))]))"#,
         r#"Card(name: "Test Elf Captain", cost: "{1}{G}", types: [Creature], subtypes: ["Elf"], pt: (2, 2), text: "Whenever this creature attacks, if you control another Elf, it gets +2/+2 until end of turn.", triggers: [Trigger(event: ThisAttacks, condition: Controls(player: You, filter: And([Other, Subtype("Elf")]), at_least: 1), effects: [ModifyPt(target: This, power: Const(2), toughness: Const(2), until: EndOfTurn)])])"#,
         r#"Card(name: "Test Brawler", cost: "{1}{R}", types: [Creature], subtypes: ["Bear"], pt: (2, 2), text: "Whenever this creature attacks or blocks, it gets +1/+1 until end of turn.", triggers: [Trigger(event: Any([ThisAttacks, ThisBlocks]), effects: [ModifyPt(target: This, power: Const(1), toughness: Const(1), until: EndOfTurn)])])"#,
+        r#"Card(name: "Test Charm", cost: "{G}", types: [Instant], text: "Choose one or both —\n• Target creature gets +2/+2 until end of turn.\n• Draw a card.", spell: Spell(choose: OneOrBoth, modes: [Mode(targets: [Creature], effects: [ModifyPt(target: Target(0), power: Const(2), toughness: Const(2), until: EndOfTurn)]), Mode(effects: [Draw(player: You, count: Const(1))])]))"#,
+        r#"Card(name: "Test Volley", cost: "{R}", types: [Instant], text: "Test Volley deals 2 damage to each of up to two target creatures.", spell: Spell(targets: [Targets(UpTo(2), Creature)], effects: [DealDamage(amount: Const(2), to: Target(0))]))"#,
         r#"Card(name: "Test Rouse", cost: "{G}", types: [Instant], text: "Tap a creature you control, then it gets +2/+2 until end of turn.", spell: Spell(effects: [Sequence([Tap(target: Chosen(who: You, filter: And([Creature, ControlledBy(You)]), count: Exactly(1), bind: "c")), ModifyPt(target: Named("c"), power: Const(2), toughness: Const(2), until: EndOfTurn)])]))"#,
     ];
     let mut all = cards::core_ir();
@@ -538,6 +540,121 @@ fn up_to_n_offers_every_size_including_none() {
     assert_eq!(game.objects[bears[0]].zone, Zone::Exile);
     assert_eq!(game.objects[bears[1]].zone, Zone::Battlefield);
     assert_eq!(game.objects[bears[2]].zone, Zone::Exile);
+}
+
+#[test]
+fn a_two_step_cast_pays_first_then_asks_for_modes_and_targets() {
+    let mut game = TestGame::new(db_with_extras(), 2)
+        .battlefield(Seat(0), "Forest")
+        .battlefield(Seat(0), "Grizzly Bears")
+        .hand(Seat(0), "Test Charm")
+        .library(Seat(0), &["Forest"; 3])
+        .build();
+    let bears = bf(&game, Seat(0), "Grizzly Bears");
+    let forest = bf(&game, Seat(0), "Forest");
+    let charm = hand_card(&game, Seat(0), "Test Charm");
+    let casts: Vec<Action> = game
+        .legal_actions(Seat(0))
+        .into_iter()
+        .filter(|a| matches!(a, Action::CastSpell { object, .. } if *object == charm))
+        .collect();
+    assert_eq!(casts.len(), 1, "one action per payment, no targets yet: {casts:?}");
+    game.apply(Seat(0), &casts[0]).unwrap();
+    assert!(game.objects[forest].tapped, "mana is paid up front");
+    assert_eq!(game.objects[charm].zone, Zone::Hand, "not on the stack until the choices are made");
+    assert!(game.stack.is_empty());
+    assert_eq!(game.must_act().get(&Seat(0)), Some(&ActReason::Choice));
+    assert_eq!(game.priority, None);
+
+    // Modes: both offered, plus nothing to stop with until one is chosen.
+    let modes: Vec<String> = game
+        .legal_actions(Seat(0))
+        .iter()
+        .filter(|a| matches!(a, Action::ChooseMode { .. }))
+        .map(|a| engine::text::describe_action(&game, a))
+        .collect();
+    assert_eq!(
+        modes,
+        vec![
+            "Target creature gets +2/+2 until end of turn.".to_string(),
+            "Draw a card.".to_string()
+        ]
+    );
+    game.apply(Seat(0), &Action::ChooseMode { mode: 1 }).unwrap();
+    let modes: Vec<String> = game
+        .legal_actions(Seat(0))
+        .iter()
+        .filter(|a| matches!(a, Action::ChooseMode { .. }))
+        .map(|a| engine::text::describe_action(&game, a))
+        .collect();
+    assert_eq!(
+        modes,
+        vec![
+            "Target creature gets +2/+2 until end of turn.".to_string(),
+            "No more modes".to_string()
+        ]
+    );
+    game.apply(Seat(0), &Action::ChooseMode { mode: 0 }).unwrap();
+    // Two modes chosen: now the first mode's target.
+    let picks: Vec<Action> = game
+        .legal_actions(Seat(0))
+        .into_iter()
+        .filter(|a| matches!(a, Action::ChooseTargets { .. }))
+        .collect();
+    assert_eq!(
+        picks,
+        vec![Action::ChooseTargets {
+            targets: vec![Target::Object(bears)]
+        }]
+    );
+    assert_eq!(
+        engine::text::describe_action(&game, &picks[0]),
+        format!("Target Grizzly Bears {bears}")
+    );
+    game.apply(Seat(0), &picks[0]).unwrap();
+    assert_eq!(game.stack.len(), 1);
+    assert_eq!(game.stack[0].modes, vec![1, 0]);
+    assert_eq!(game.priority, Some(Seat(0)), "the caster gets priority back");
+    let view = game.view(Seat(1));
+    assert_eq!(view.stack[0].modes, vec![1, 0]);
+    assert!(
+        view.stack[0].description.contains("Draw a card") && view.stack[0].description.contains("+2/+2"),
+        "{}",
+        view.stack[0].description
+    );
+    let before = game.players[0].hand.len();
+    resolve_top(&mut game);
+    assert_eq!(game.players[0].hand.len(), before + 1, "modes resolve in the order chosen");
+    assert_eq!(game.effective_stats(bears), Some((4, 4)));
+}
+
+#[test]
+fn illegal_targets_are_pruned_one_by_one_and_only_a_total_loss_fizzles() {
+    let mut game = TestGame::new(db_with_extras(), 2)
+        .battlefield(Seat(0), "Mountain")
+        .hand(Seat(0), "Test Volley")
+        .battlefield(Seat(1), "Grizzly Bears")
+        .battlefield(Seat(1), "Hill Giant")
+        .battlefield(Seat(1), "Island")
+        .hand(Seat(1), "Unsummon")
+        .build();
+    let bears = bf(&game, Seat(1), "Grizzly Bears");
+    let giant = bf(&game, Seat(1), "Hill Giant");
+    cast(&mut game, Seat(0), "Test Volley", &[]);
+    game.apply(
+        Seat(0),
+        &Action::ChooseTargets {
+            targets: vec![Target::Object(bears), Target::Object(giant)],
+        },
+    )
+    .unwrap();
+    // In response the opponent bounces one target; the other is still hit.
+    game.apply(Seat(0), &Action::PassPriority).unwrap();
+    cast(&mut game, Seat(1), "Unsummon", &[Target::Object(bears)]);
+    resolve_top(&mut game);
+    assert_eq!(game.objects[bears].zone, Zone::Hand);
+    resolve_top(&mut game);
+    assert_eq!(game.objects[giant].damage, 2, "the remaining target is still dealt damage");
 }
 
 #[test]
