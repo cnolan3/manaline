@@ -394,7 +394,7 @@ async fn editor_loop(ed: &std::sync::Arc<std::sync::Mutex<editor::Editor>>, term
             },
             _ = tick.tick() => {
                 ticks += 1;
-                if ticks % 4 == 0 {
+                if ticks.is_multiple_of(4) {
                     ed.lock().unwrap().check_disk();
                 }
             }

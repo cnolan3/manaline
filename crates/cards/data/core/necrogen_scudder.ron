@@ -6,5 +6,5 @@ Card(
     pt: (3, 3),
     text: "Flying\nWhen this creature enters, you lose 3 life.",
     keywords: [Flying],
-    triggers: [Etb(effects: [LoseLife(player: You, amount: Const(3))])],
+    triggers: [Trigger(event: ThisEnters, effects: [LoseLife(player: You, amount: Const(3))])],
 )

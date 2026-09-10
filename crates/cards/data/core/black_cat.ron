@@ -5,5 +5,5 @@ Card(
     subtypes: ["Zombie", "Cat"],
     pt: (1, 1),
     text: "When this creature dies, target opponent discards a card at random.",
-    triggers: [Dies(targets: [Opponent], effects: [Discard(player: TargetOpponent(0), count: Const(1), random: true)])],
+    triggers: [Trigger(event: ThisDies, targets: [Opponent], effects: [Discard(player: TargetOpponent(0), count: Const(1), random: true)])],
 )

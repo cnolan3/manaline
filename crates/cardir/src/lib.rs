@@ -103,7 +103,7 @@ Card(
 
     #[test]
     fn chosen_named_and_may_render_like_oracle() {
-        let skyfisher = r#"Card(name: "Kor Skyfisher", cost: "{1}{W}", types: [Creature], subtypes: ["Kor", "Soldier"], pt: (2, 3), text: "Flying\nWhen this creature enters, return a permanent you control to its owner's hand.", keywords: [Flying], triggers: [Etb(effects: [ReturnToHand(target: Chosen(who: You, filter: And([Permanent, ControlledBy(You)]), count: Exactly(1)))])])"#;
+        let skyfisher = r#"Card(name: "Kor Skyfisher", cost: "{1}{W}", types: [Creature], subtypes: ["Kor", "Soldier"], pt: (2, 3), text: "Flying\nWhen this creature enters, return a permanent you control to its owner's hand.", keywords: [Flying], triggers: [Trigger(event: ThisEnters, effects: [ReturnToHand(target: Chosen(who: You, filter: And([Permanent, ControlledBy(You)]), count: Exactly(1)))])])"#;
         round_trips(&load(skyfisher).unwrap()).unwrap();
         let cull = r#"Card(name: "Cull", cost: "{W}", types: [Sorcery], text: "Exile up to two creatures you control.", spell: Spell(effects: [Exile(target: Chosen(who: You, filter: And([Creature, ControlledBy(You)]), count: UpTo(2)))]))"#;
         round_trips(&load(cull).unwrap()).unwrap();
@@ -113,8 +113,29 @@ Card(
         round_trips(&load(it).unwrap()).unwrap();
         let may = r#"Card(name: "Reap", cost: "{B}", types: [Sorcery], text: "You may sacrifice a creature. If you do, draw two cards. If you don't, you lose 2 life.", spell: Spell(effects: [May(effect: Sacrifice(player: You, filter: Creature, count: Const(1)), then: [Draw(player: You, count: Const(2))], otherwise: [LoseLife(player: You, amount: Const(2))])]))"#;
         round_trips(&load(may).unwrap()).unwrap();
-        let digger = r#"Card(name: "Gravedigger", cost: "{3}{B}", types: [Creature], subtypes: ["Zombie"], pt: (2, 2), text: "When this creature enters, you may return target creature card from your graveyard to your hand.", triggers: [Etb(targets: [And([Creature, InGraveyard(You)])], effects: [May(effect: ReturnFromGraveyard(target: Target(0), to: Hand))])])"#;
+        let digger = r#"Card(name: "Gravedigger", cost: "{3}{B}", types: [Creature], subtypes: ["Zombie"], pt: (2, 2), text: "When this creature enters, you may return target creature card from your graveyard to your hand.", triggers: [Trigger(event: ThisEnters, targets: [And([Creature, InGraveyard(You)])], effects: [May(effect: ReturnFromGraveyard(target: Target(0), to: Hand))])])"#;
         round_trips(&load(digger).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn event_patterns_and_intervening_ifs_render_like_oracle() {
+        let cases = [
+            r#"Card(name: "A", cost: "{G}", types: [Creature], pt: (2, 2), text: "Whenever this creature attacks, if you control an Elf, it gets +2/+2 until end of turn.", triggers: [Trigger(event: ThisAttacks, condition: Controls(player: You, filter: Subtype("Elf"), at_least: 1), effects: [ModifyPt(target: This, power: Const(2), toughness: Const(2), until: EndOfTurn)])])"#,
+            r#"Card(name: "B", cost: "{R}", types: [Creature], pt: (2, 2), text: "Whenever this creature attacks or blocks, it gets +1/+1 until end of turn.", triggers: [Trigger(event: Any([ThisAttacks, ThisBlocks]), effects: [ModifyPt(target: This, power: Const(1), toughness: Const(1), until: EndOfTurn)])])"#,
+            r#"Card(name: "C", cost: "{R}", types: [Enchantment], text: "At the beginning of combat on your turn, target creature gets +1/+0 until end of turn.", triggers: [Trigger(event: BeginCombat(You), targets: [Creature], effects: [ModifyPt(target: Target(0), power: Const(1), toughness: Const(0), until: EndOfTurn)])])"#,
+            r#"Card(name: "D", cost: "{B}", types: [Enchantment], text: "At the beginning of your upkeep, you lose 1 life.", triggers: [Trigger(event: Upkeep(You), effects: [LoseLife(player: You, amount: Const(1))])])"#,
+            r#"Card(name: "E", cost: "{W}", types: [Creature], pt: (1, 1), text: "Whenever another creature you control enters, you gain 1 life.", triggers: [Trigger(event: Enters(And([Other, Creature, ControlledBy(You)])), effects: [GainLife(player: You, amount: Const(1))])])"#,
+            r#"Card(name: "F", cost: "{U}", types: [Creature], pt: (1, 1), text: "Whenever you cast a noncreature spell, draw a card.", triggers: [Trigger(event: Cast(who: You, filter: And([Spell, Not(Creature)])), effects: [Draw(player: You, count: Const(1))])])"#,
+            r#"Card(name: "G", cost: "{B}", types: [Enchantment], text: "Whenever a player discards a card, you gain 1 life.", triggers: [Trigger(event: Discards(EachPlayer), effects: [GainLife(player: You, amount: Const(1))])])"#,
+            r#"Card(name: "H", cost: "{W}", types: [Instant], text: "Exile target creature. Return that card to its owner's hand at the beginning of the next end step.", spell: Spell(targets: [Creature], effects: [Exile(target: Target(0)), Delayed(at: NextEndStep, effects: [ReturnExiled(target: Target(0), to: Hand)])]))"#,
+            r#"Card(name: "I", cost: "{R}", types: [Instant], text: "Target creature can't attack or block this turn.", spell: Spell(targets: [Creature], effects: [Restrict(target: Target(0), restriction: CantAttackOrBlock, until: EndOfTurn)]))"#,
+        ];
+        for text in cases {
+            let card = load(text).unwrap_or_else(|e| panic!("{e}"));
+            if let Err((want, got)) = round_trips(&card) {
+                panic!("{}:\n  oracle:   {want}\n  rendered: {got}", card.name);
+            }
+        }
     }
 
     #[test]

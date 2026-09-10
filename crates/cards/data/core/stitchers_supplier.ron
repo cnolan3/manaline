@@ -5,5 +5,5 @@ Card(
     subtypes: ["Zombie"],
     pt: (1, 1),
     text: "When this creature enters or dies, mill three cards. (Put the top three cards of your library into your graveyard.)",
-    triggers: [EtbOrDies(effects: [Mill(player: You, count: Const(3))])],
+    triggers: [Trigger(event: Any([ThisEnters, ThisDies]), effects: [Mill(player: You, count: Const(3))])],
 )

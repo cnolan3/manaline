@@ -182,6 +182,13 @@ pub enum StackKind {
     },
     /// The prowess trigger.
     Prowess { source: ObjectId },
+    /// A delayed trigger set up by an effect of `source`, run under the
+    /// context (targets, bindings) that effect resolved with.
+    Delayed {
+        source: ObjectId,
+        effects: Vec<cardir::Effect>,
+        ctx: crate::filter::Ctx,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -201,8 +208,13 @@ pub struct Counters {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ModifierKind {
-    Pt { power: i32, toughness: i32 },
+    Pt {
+        power: i32,
+        toughness: i32,
+    },
     Keyword(Keyword),
+    /// "can't block this turn"
+    Restriction(cardir::Restriction),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -341,6 +353,8 @@ pub struct Game {
     pub(crate) tokens: Vec<CardDef>,
     /// Triggers that fired but are not yet on the stack.
     pub(crate) fired: Vec<crate::triggers::FiredTrigger>,
+    /// Delayed triggers waiting for their moment.
+    pub(crate) delayed: Vec<crate::triggers::DelayedTrigger>,
     /// Events before this index have been scanned for triggers.
     pub(crate) trigger_cursor: usize,
     /// Which combat damage round is next / done.
@@ -456,6 +470,7 @@ impl Game {
             damage_assignments: BTreeMap::new(),
             tokens: Vec::new(),
             fired: Vec::new(),
+            delayed: Vec::new(),
             trigger_cursor: 0,
             combat_round: CombatRound::None,
         };
@@ -730,7 +745,7 @@ impl Game {
                     StackKind::Spell => "spell",
                     StackKind::Ability { .. } => "ability",
                     StackKind::Equip { .. } => "equip",
-                    StackKind::Trigger { .. } | StackKind::Prowess { .. } => "trigger",
+                    StackKind::Trigger { .. } | StackKind::Prowess { .. } | StackKind::Delayed { .. } => "trigger",
                 }
                 .into(),
                 description: self.describe_stack_kind(&s.kind),

@@ -1,0 +1,9 @@
+Card(
+    name: "Ajani's Pridemate",
+    cost: "{1}{W}",
+    types: [Creature],
+    subtypes: ["Cat", "Soldier"],
+    pt: (2, 2),
+    text: "Whenever you gain life, put a +1/+1 counter on this creature.",
+    triggers: [Trigger(event: GainsLife(You), effects: [AddCounters(target: This, kind: Plus1Plus1, count: Const(1))])],
+)

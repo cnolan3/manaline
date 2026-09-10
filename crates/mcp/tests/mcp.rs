@@ -737,7 +737,7 @@ async fn a_standalone_server_serves_card_data_without_a_game() {
     let res = server
         .search_cards(Parameters(SearchParams {
             query: "t:creature kw:flying c:w mv<=3".into(),
-            limit: Some(5),
+            limit: Some(20),
             include_unimplemented: None,
         }))
         .await

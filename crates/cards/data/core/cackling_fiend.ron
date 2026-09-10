@@ -5,5 +5,5 @@ Card(
     subtypes: ["Zombie"],
     pt: (2, 1),
     text: "When this creature enters, each opponent discards a card.",
-    triggers: [Etb(effects: [Discard(player: EachOpponent, count: Const(1))])],
+    triggers: [Trigger(event: ThisEnters, effects: [Discard(player: EachOpponent, count: Const(1))])],
 )

@@ -5,5 +5,5 @@ Card(
     subtypes: ["Rat"],
     pt: (1, 1),
     text: "When this creature enters, target opponent discards a card.",
-    triggers: [Etb(targets: [Opponent], effects: [Discard(player: TargetOpponent(0), count: Const(1))])],
+    triggers: [Trigger(event: ThisEnters, targets: [Opponent], effects: [Discard(player: TargetOpponent(0), count: Const(1))])],
 )

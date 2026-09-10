@@ -6,5 +6,5 @@ Card(
     pt: (3, 3),
     text: "Flash (You may cast this spell any time you could cast an instant.)\nWhen this creature enters, target creature gets +2/+2 until end of turn.",
     keywords: [Flash],
-    triggers: [Etb(targets: [Creature], effects: [ModifyPt(target: Target(0), power: Const(2), toughness: Const(2), until: EndOfTurn)])],
+    triggers: [Trigger(event: ThisEnters, targets: [Creature], effects: [ModifyPt(target: Target(0), power: Const(2), toughness: Const(2), until: EndOfTurn)])],
 )

@@ -95,7 +95,7 @@ fn is_interaction(card: &cardir::Card) -> bool {
             out.extend(a.effects.iter());
         }
         for t in &card.triggers {
-            out.extend(t.effects().iter());
+            out.extend(t.effects.iter());
         }
         out
     }

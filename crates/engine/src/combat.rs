@@ -20,10 +20,19 @@ impl Game {
                     && !o.tapped
                     && (!o.summoning_sick || self.has_keyword(id, Keyword::Haste))
                     && !self.has_keyword(id, Keyword::Defender)
+                    && !self.restricted(id, cardir::Restriction::CantAttack)
             })
             .collect();
         out.sort();
         out
+    }
+
+    /// Whether an "until end of turn" restriction stops the creature from doing this.
+    pub fn restricted(&self, id: ObjectId, what: cardir::Restriction) -> bool {
+        self.objects[id].modifiers.iter().any(|m| match m.kind {
+            crate::game::ModifierKind::Restriction(r) => r == what || r == cardir::Restriction::CantAttackOrBlock,
+            _ => false,
+        })
     }
 
     /// Creatures `seat` controls that could block right now.
@@ -32,7 +41,7 @@ impl Game {
             .battlefield
             .iter()
             .copied()
-            .filter(|&id| self.is_creature(id) && !self.objects[id].tapped)
+            .filter(|&id| self.is_creature(id) && !self.objects[id].tapped && !self.restricted(id, cardir::Restriction::CantBlock))
             .collect();
         out.sort();
         out

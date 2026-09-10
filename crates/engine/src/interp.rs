@@ -14,7 +14,7 @@ use crate::game::ActReason;
 use crate::game::{Expiry, Game, Modifier, ModifierKind};
 use crate::stack::{Frame, MAY_BIND};
 use crate::types::{Keyword, Mana, ObjectId, Seat, Zone};
-use cardir::{Condition, CounterKind, Effect, Filter, Quantity, Ref};
+use cardir::{CounterKind, Effect, Filter, Quantity, Ref};
 
 /// The `Ref` positions where a `Chosen` may sit: an effect's own target.
 fn direct_refs_mut(e: &mut Effect) -> Vec<&mut Ref> {
@@ -29,7 +29,9 @@ fn direct_refs_mut(e: &mut Effect) -> Vec<&mut Ref> {
         | Effect::ModifyPt { target, .. }
         | Effect::GrantKeyword { target, .. }
         | Effect::AddCounters { target, .. }
-        | Effect::ReturnFromGraveyard { target, .. } => vec![target],
+        | Effect::ReturnFromGraveyard { target, .. }
+        | Effect::ReturnExiled { target, .. }
+        | Effect::Restrict { target, .. } => vec![target],
         _ => Vec::new(),
     }
 }
@@ -42,7 +44,7 @@ fn verb_of(e: &Effect) -> &'static str {
         Effect::Exile { .. } => "Exile",
         Effect::Tap { .. } => "Tap",
         Effect::Untap { .. } => "Untap",
-        Effect::ReturnToHand { .. } | Effect::ReturnFromGraveyard { .. } => "Return",
+        Effect::ReturnToHand { .. } | Effect::ReturnFromGraveyard { .. } | Effect::ReturnExiled { .. } => "Return",
         Effect::CounterSpell { .. } => "Counter",
         Effect::AddCounters { .. } => "Put counters on",
         _ => "Choose",
@@ -281,21 +283,49 @@ impl Game {
                     next: 0,
                 }];
             }
-            Effect::Conditional { if_, then, else_ } => {
-                let holds = match if_ {
-                    Condition::Controls { player, filter, at_least } => {
-                        let seats = self.players_of(player, ctx);
-                        seats.iter().any(|&s| {
-                            let sub = Ctx { you: s, ..ctx.clone() };
-                            let n = self.players[s.index()]
-                                .battlefield
-                                .iter()
-                                .filter(|id| self.object_matches(**id, filter, &sub))
-                                .count();
-                            n as i32 >= *at_least
-                        })
+            Effect::ReturnExiled { target, to } => {
+                for id in self.objects_of(target, ctx) {
+                    if self.objects[id].zone != Zone::Exile {
+                        continue;
                     }
-                };
+                    match to {
+                        cardir::ReturnZone::Hand => self.move_object(id, Zone::Hand),
+                        cardir::ReturnZone::Battlefield => {
+                            let owner = self.objects[id].owner;
+                            self.objects[id].controller = owner;
+                            self.move_object(id, Zone::Battlefield);
+                            self.objects[id].summoning_sick = true;
+                        }
+                    }
+                }
+            }
+            Effect::Restrict {
+                target,
+                restriction,
+                until: _,
+            } => {
+                for id in self.objects_of(target, ctx) {
+                    if self.objects[id].zone == Zone::Battlefield {
+                        self.objects[id].modifiers.push(Modifier {
+                            kind: ModifierKind::Restriction(*restriction),
+                            expires: Expiry::EndOfTurn,
+                        });
+                    }
+                }
+            }
+            Effect::Delayed { at, effects } => {
+                if let Some(source) = ctx.this {
+                    self.delayed.push(crate::triggers::DelayedTrigger {
+                        at: *at,
+                        source,
+                        controller: ctx.you,
+                        ctx: ctx.clone(),
+                        effects: effects.clone(),
+                    });
+                }
+            }
+            Effect::Conditional { if_, then, else_ } => {
+                let holds = self.condition_holds(if_, ctx);
                 let branch = if holds { Some(then) } else { else_.as_ref() };
                 return branch
                     .map(|e| Frame::Effects {

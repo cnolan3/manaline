@@ -6,5 +6,5 @@ Card(
     pt: (2, 2),
     text: "Flying (This creature can't be blocked except by creatures with flying or reach.)\nWhenever this creature attacks, it gets +1/+1 until end of turn.",
     keywords: [Flying],
-    triggers: [Attacks(effects: [ModifyPt(target: This, power: Const(1), toughness: Const(1), until: EndOfTurn)])],
+    triggers: [Trigger(event: ThisAttacks, effects: [ModifyPt(target: This, power: Const(1), toughness: Const(1), until: EndOfTurn)])],
 )

@@ -33,6 +33,8 @@ fn db_with_extras() -> Arc<engine::CardDb> {
         r#"Card(name: "Test Wheel", cost: "{2}{B}", types: [Sorcery], text: "Each player discards a card. You gain 1 life.", spell: Spell(effects: [Discard(player: EachPlayer, count: Const(1)), GainLife(player: You, amount: Const(1))]))"#,
         r#"Card(name: "Test Reap", cost: "{B}", types: [Sorcery], text: "You may sacrifice a creature. If you do, draw two cards. If you don't, you lose 2 life.", spell: Spell(effects: [May(effect: Sacrifice(player: You, filter: Creature, count: Const(1)), then: [Draw(player: You, count: Const(2))], otherwise: [LoseLife(player: You, amount: Const(2))])]))"#,
         r#"Card(name: "Test Cull", cost: "{W}", types: [Sorcery], text: "Exile up to two creatures you control.", spell: Spell(effects: [Exile(target: Chosen(who: You, filter: And([Creature, ControlledBy(You)]), count: UpTo(2)))]))"#,
+        r#"Card(name: "Test Elf Captain", cost: "{1}{G}", types: [Creature], subtypes: ["Elf"], pt: (2, 2), text: "Whenever this creature attacks, if you control another Elf, it gets +2/+2 until end of turn.", triggers: [Trigger(event: ThisAttacks, condition: Controls(player: You, filter: And([Other, Subtype("Elf")]), at_least: 1), effects: [ModifyPt(target: This, power: Const(2), toughness: Const(2), until: EndOfTurn)])])"#,
+        r#"Card(name: "Test Brawler", cost: "{1}{R}", types: [Creature], subtypes: ["Bear"], pt: (2, 2), text: "Whenever this creature attacks or blocks, it gets +1/+1 until end of turn.", triggers: [Trigger(event: Any([ThisAttacks, ThisBlocks]), effects: [ModifyPt(target: This, power: Const(1), toughness: Const(1), until: EndOfTurn)])])"#,
         r#"Card(name: "Test Rouse", cost: "{G}", types: [Instant], text: "Tap a creature you control, then it gets +2/+2 until end of turn.", spell: Spell(effects: [Sequence([Tap(target: Chosen(who: You, filter: And([Creature, ControlledBy(You)]), count: Exactly(1), bind: "c")), ModifyPt(target: Named("c"), power: Const(2), toughness: Const(2), until: EndOfTurn)])]))"#,
     ];
     let mut all = cards::core_ir();
@@ -561,6 +563,73 @@ fn a_bound_choice_can_be_referred_to_later() {
 }
 
 // ----- triggers -----
+
+#[test]
+fn an_intervening_if_gates_the_trigger() {
+    // Without another Elf the trigger never fires.
+    let mut game = TestGame::new(db_with_extras(), 2).battlefield(Seat(0), "Test Elf Captain").build();
+    let captain = bf(&game, Seat(0), "Test Elf Captain");
+    attack_with(&mut game, Seat(0), &[captain], Seat(1));
+    assert!(game.stack.is_empty(), "no trigger: {:?}", game.stack);
+    assert_eq!(game.effective_stats(captain), Some((2, 2)));
+
+    // With one it fires and resolves.
+    let mut game = TestGame::new(db_with_extras(), 2)
+        .battlefield(Seat(0), "Test Elf Captain")
+        .battlefield(Seat(0), "Llanowar Elves")
+        .build();
+    let captain = bf(&game, Seat(0), "Test Elf Captain");
+    to_attackers(&mut game);
+    game.apply(
+        Seat(0),
+        &Action::DeclareAttackers {
+            attackers: vec![(captain, AttackTarget::Player(Seat(1)))],
+        },
+    )
+    .unwrap();
+    assert_eq!(game.stack.len(), 1, "the trigger is on the stack");
+    resolve_top(&mut game);
+    assert_eq!(game.effective_stats(captain), Some((4, 4)));
+}
+
+#[test]
+fn an_event_union_fires_on_either_event() {
+    // Blocking: the opponent attacks and the brawler blocks.
+    let mut game = TestGame::new(db_with_extras(), 2)
+        .battlefield(Seat(0), "Hill Giant")
+        .battlefield(Seat(1), "Test Brawler")
+        .build();
+    let giant = bf(&game, Seat(0), "Hill Giant");
+    let brawler = bf(&game, Seat(1), "Test Brawler");
+    attack_with(&mut game, Seat(0), &[giant], Seat(1));
+    game.apply(
+        Seat(1),
+        &Action::DeclareBlockers {
+            blocks: vec![(brawler, giant)],
+        },
+    )
+    .unwrap();
+    assert_eq!(game.stack.len(), 1, "blocking fired it");
+    resolve_top(&mut game);
+    assert_eq!(game.effective_stats(brawler), Some((3, 3)));
+    pass_both(&mut game);
+    assert_eq!(game.objects[giant].zone, Zone::Graveyard, "a 3/3 blocker kills the 3/3 attacker");
+    assert_eq!(game.objects[brawler].zone, Zone::Graveyard);
+
+    // Attacking fires it too.
+    let mut game = TestGame::new(db_with_extras(), 2).battlefield(Seat(0), "Test Brawler").build();
+    let brawler = bf(&game, Seat(0), "Test Brawler");
+    to_attackers(&mut game);
+    game.apply(
+        Seat(0),
+        &Action::DeclareAttackers {
+            attackers: vec![(brawler, AttackTarget::Player(Seat(1)))],
+        },
+    )
+    .unwrap();
+    resolve_top(&mut game);
+    assert_eq!(game.effective_stats(brawler), Some((3, 3)));
+}
 
 #[test]
 fn elvish_visionary_draws_on_entering() {

@@ -1,0 +1,9 @@
+Card(
+    name: "Kiln Fiend",
+    cost: "{1}{R}",
+    types: [Creature],
+    subtypes: ["Elemental", "Beast"],
+    pt: (1, 2),
+    text: "Whenever you cast an instant or sorcery spell, this creature gets +3/+0 until end of turn.",
+    triggers: [Trigger(event: Cast(who: You, filter: And([Spell, Or([Instant, Sorcery])])), effects: [ModifyPt(target: This, power: Const(3), toughness: Const(0), until: EndOfTurn)])],
+)

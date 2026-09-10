@@ -96,6 +96,11 @@ impl Game {
                     .unwrap_or_default()
             }
             StackKind::Prowess { .. } => "Prowess: gets +1/+1 until end of turn".into(),
+            StackKind::Delayed { source, effects, .. } => {
+                let def = self.card_def(*source);
+                let parts: Vec<String> = effects.iter().map(|e| cardir::render_clause(&def.ir, &[], e)).collect();
+                format!("Delayed: {}", parts.join(", then "))
+            }
         }
     }
 }

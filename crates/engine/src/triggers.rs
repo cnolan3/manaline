@@ -1,21 +1,84 @@
-//! Triggered abilities (§3.5): collected from emitted events, then put on
-//! the stack in APNAP order, asking for targets where a trigger has them.
+//! Triggered abilities (§3.5): collected from emitted events, matched against
+//! each card's event patterns, then put on the stack in APNAP order, asking
+//! for targets where a trigger has them. Delayed triggers that effects set
+//! up ("at the beginning of the next end step") wait in `Game::delayed`.
 
 use crate::action::{DamageTarget, Target};
 use crate::event::{Event, EventBase};
 use crate::filter::Ctx;
 use crate::game::{Game, PendingChoice, StackKind, StackObject};
 use crate::types::{Keyword, ObjectId, Phase, Seat, Zone};
-use cardir::{Filter, Trigger};
+use cardir::{DelayedAt, Effect, EventPattern, Filter};
+
+/// Which ability of the source fired.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum FiredKind {
+    /// Index into the source's `triggers`.
+    Card(u8),
+    Prowess,
+    /// A delayed trigger: effects to run under the context they were created in.
+    Delayed {
+        effects: Vec<Effect>,
+        ctx: Ctx,
+    },
+}
 
 /// A trigger that has fired but is not yet on the stack.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FiredTrigger {
     pub source: ObjectId,
     pub controller: Seat,
-    /// Index into the source's `triggers`, or `None` for prowess.
-    pub index: Option<u8>,
+    pub kind: FiredKind,
     pub triggering: Option<Target>,
+}
+
+/// A trigger an effect set up for later.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DelayedTrigger {
+    pub at: DelayedAt,
+    pub source: ObjectId,
+    pub controller: Seat,
+    pub ctx: Ctx,
+    pub effects: Vec<Effect>,
+}
+
+/// One thing that just happened, in the terms event patterns are written in.
+enum Occurred {
+    Enters(ObjectId),
+    Dies(ObjectId),
+    Attacks(ObjectId),
+    Blocks { blocker: ObjectId, attacker: ObjectId },
+    BecomesBlocked { attacker: ObjectId, blocker: ObjectId },
+    CombatDamageToPlayer { source: ObjectId, player: Seat },
+    Tapped(ObjectId),
+    Step { phase: Phase, active: Seat },
+    Cast { seat: Seat, spell: ObjectId },
+    GainsLife(Seat),
+    Discards(Seat),
+}
+
+impl Occurred {
+    /// What `Triggering` refers to for this occurrence.
+    fn triggering(&self) -> Target {
+        match self {
+            Occurred::Enters(id) | Occurred::Dies(id) | Occurred::Attacks(id) | Occurred::Tapped(id) => Target::Object(*id),
+            Occurred::Blocks { attacker, .. } => Target::Object(*attacker),
+            Occurred::BecomesBlocked { blocker, .. } => Target::Object(*blocker),
+            Occurred::CombatDamageToPlayer { player, .. } => Target::Player(*player),
+            Occurred::Step { active, .. } => Target::Player(*active),
+            Occurred::Cast { spell, .. } => Target::Object(*spell),
+            Occurred::GainsLife(s) | Occurred::Discards(s) => Target::Player(*s),
+        }
+    }
+
+    /// An object that watches this occurrence even though it has left the
+    /// battlefield (a dying creature's own "when ~ dies").
+    fn extra_watcher(&self) -> Option<ObjectId> {
+        match self {
+            Occurred::Dies(id) => Some(*id),
+            _ => None,
+        }
+    }
 }
 
 impl Game {
@@ -35,30 +98,31 @@ impl Game {
                 object,
                 to: Zone::Battlefield,
                 ..
-            } => {
-                self.fire_matching(
-                    *object,
-                    |t| matches!(t, Trigger::Etb { .. } | Trigger::EtbOrDies { .. }),
-                    Some(Target::Object(*object)),
-                );
-            }
+            } => self.fire(Occurred::Enters(*object)),
             EventBase::ZoneChange {
                 object,
                 from: Zone::Battlefield,
                 to: Zone::Graveyard,
-            } => {
-                self.fire_matching(
-                    *object,
-                    |t| matches!(t, Trigger::Dies { .. } | Trigger::EtbOrDies { .. }),
-                    Some(Target::Object(*object)),
-                );
-                if self.is_creature(*object) {
-                    self.fire_creature_dies(*object);
-                }
-            }
+            } => self.fire(Occurred::Dies(*object)),
             EventBase::Attacked { attackers, .. } => {
                 for (a, _) in attackers {
-                    self.fire_matching(*a, |t| matches!(t, Trigger::Attacks { .. }), Some(Target::Object(*a)));
+                    self.fire(Occurred::Attacks(*a));
+                }
+            }
+            EventBase::Blocked { blocks, .. } => {
+                let mut blocked_attackers: Vec<ObjectId> = Vec::new();
+                for (blocker, attacker) in blocks {
+                    self.fire(Occurred::Blocks {
+                        blocker: *blocker,
+                        attacker: *attacker,
+                    });
+                    if !blocked_attackers.contains(attacker) {
+                        blocked_attackers.push(*attacker);
+                        self.fire(Occurred::BecomesBlocked {
+                            attacker: *attacker,
+                            blocker: *blocker,
+                        });
+                    }
                 }
             }
             EventBase::Damage {
@@ -66,103 +130,137 @@ impl Game {
                 to: DamageTarget::Player(s),
                 amount,
                 combat: true,
-            } if *amount > 0 => {
-                self.fire_matching(
-                    *source,
-                    |t| matches!(t, Trigger::CombatDamageToPlayer { .. }),
-                    Some(Target::Player(*s)),
-                );
+            } if *amount > 0 => self.fire(Occurred::CombatDamageToPlayer {
+                source: *source,
+                player: *s,
+            }),
+            EventBase::Tapped { object } => self.fire(Occurred::Tapped(*object)),
+            EventBase::PhaseChanged { phase } if matches!(phase, Phase::Upkeep | Phase::End | Phase::BeginCombat) => {
+                self.fire(Occurred::Step {
+                    phase: *phase,
+                    active: self.active_player,
+                });
+                if *phase == Phase::End {
+                    self.fire_delayed(DelayedAt::NextEndStep);
+                }
             }
-            EventBase::Tapped { object } => {
-                self.fire_matching(
-                    *object,
-                    |t| matches!(t, Trigger::BecomesTapped { .. }),
-                    Some(Target::Object(*object)),
-                );
-            }
-            EventBase::PhaseChanged { phase: Phase::Upkeep } => self.fire_step_triggers(true),
-            EventBase::PhaseChanged { phase: Phase::End } => self.fire_step_triggers(false),
-            EventBase::Cast { seat, object, .. } if !self.card_def(*object).is_creature() => {
-                // Prowess on each creature the caster controls.
-                for id in self.players[seat.index()].battlefield.clone() {
-                    if self.is_creature(id) && self.has_keyword(id, Keyword::Prowess) {
-                        self.fired.push(FiredTrigger {
-                            source: id,
-                            controller: *seat,
-                            index: None,
-                            triggering: Some(Target::Object(*object)),
-                        });
+            EventBase::Cast { seat, object, .. } => {
+                if !self.card_def(*object).is_creature() {
+                    // Prowess on each creature the caster controls.
+                    for id in self.players[seat.index()].battlefield.clone() {
+                        if self.is_creature(id) && self.has_keyword(id, Keyword::Prowess) {
+                            self.fired.push(FiredTrigger {
+                                source: id,
+                                controller: *seat,
+                                kind: FiredKind::Prowess,
+                                triggering: Some(Target::Object(*object)),
+                            });
+                        }
                     }
+                }
+                self.fire(Occurred::Cast {
+                    seat: *seat,
+                    spell: *object,
+                });
+            }
+            EventBase::LifeChanged { seat, from, to } if to > from => self.fire(Occurred::GainsLife(*seat)),
+            EventBase::Discarded { seat, objects } => {
+                for _ in objects {
+                    self.fire(Occurred::Discards(*seat));
                 }
             }
             _ => {}
         }
     }
 
-    fn fire_matching(&mut self, source: ObjectId, pred: impl Fn(&Trigger) -> bool, triggering: Option<Target>) {
-        let Some(obj) = self.objects.get(source) else {
-            return;
-        };
-        let controller = obj.controller;
-        let def = self.card_def(source).clone();
-        for (i, t) in def.ir.triggers.iter().enumerate() {
-            if pred(t) {
+    /// Queue every trigger on the battlefield (plus the occurrence's own
+    /// extra watcher) whose event pattern matches, if its intervening "if" holds.
+    fn fire(&mut self, o: Occurred) {
+        let mut watchers = self.battlefield_objects();
+        if let Some(extra) = o.extra_watcher() {
+            if !watchers.contains(&extra) {
+                watchers.push(extra);
+            }
+        }
+        let triggering = o.triggering();
+        for id in watchers {
+            let controller = self.objects[id].controller;
+            let def = self.card_def(id).clone();
+            for (i, t) in def.ir.triggers.iter().enumerate() {
+                let ctx = Ctx::new(controller, Some(id), Vec::new(), Some(triggering));
+                if !self.event_matches(&t.event, &o, id, &ctx) {
+                    continue;
+                }
+                if let Some(c) = &t.condition {
+                    if !self.condition_holds(c, &ctx) {
+                        continue;
+                    }
+                }
                 self.fired.push(FiredTrigger {
-                    source,
+                    source: id,
                     controller,
-                    index: Some(i as u8),
-                    triggering,
+                    kind: FiredKind::Card(i as u8),
+                    triggering: Some(triggering),
                 });
             }
         }
     }
 
-    /// "Whenever a creature dies" triggers on everything watching, including
-    /// the dying creature's own (leaves-the-battlefield abilities look back).
-    fn fire_creature_dies(&mut self, dying: ObjectId) {
-        let mut watchers = self.battlefield_objects();
-        if !watchers.contains(&dying) {
-            watchers.push(dying);
-        }
-        for id in watchers {
-            let controller = self.objects[id].controller;
-            let def = self.card_def(id).clone();
-            for (i, t) in def.ir.triggers.iter().enumerate() {
-                let Trigger::CreatureDies { filter, .. } = t else { continue };
-                let ctx = Ctx::simple(controller, Some(id));
-                if self.object_matches(dying, filter, &ctx) {
-                    self.fired.push(FiredTrigger {
-                        source: id,
-                        controller,
-                        index: Some(i as u8),
-                        triggering: Some(Target::Object(dying)),
-                    });
-                }
+    fn event_matches(&self, pattern: &EventPattern, o: &Occurred, watcher: ObjectId, ctx: &Ctx) -> bool {
+        match (pattern, o) {
+            (EventPattern::ThisEnters, Occurred::Enters(id))
+            | (EventPattern::ThisDies, Occurred::Dies(id))
+            | (EventPattern::ThisAttacks, Occurred::Attacks(id))
+            | (EventPattern::ThisBecomesTapped, Occurred::Tapped(id)) => *id == watcher,
+            (EventPattern::ThisBlocks, Occurred::Blocks { blocker, .. }) => *blocker == watcher,
+            (EventPattern::ThisBecomesBlocked, Occurred::BecomesBlocked { attacker, .. }) => *attacker == watcher,
+            (EventPattern::ThisDealsCombatDamageToPlayer, Occurred::CombatDamageToPlayer { source, .. }) => *source == watcher,
+            (EventPattern::Enters(f), Occurred::Enters(id)) | (EventPattern::Dies(f), Occurred::Dies(id)) => {
+                self.object_matches(*id, f, ctx)
             }
+            (
+                EventPattern::Upkeep(whose),
+                Occurred::Step {
+                    phase: Phase::Upkeep,
+                    active,
+                },
+            )
+            | (EventPattern::EndStep(whose), Occurred::Step { phase: Phase::End, active })
+            | (
+                EventPattern::BeginCombat(whose),
+                Occurred::Step {
+                    phase: Phase::BeginCombat,
+                    active,
+                },
+            ) => self.players_of(whose, ctx).contains(active),
+            (EventPattern::Cast { who, filter }, Occurred::Cast { seat, spell }) => {
+                self.players_of(who, ctx).contains(seat) && self.spell_matches(*spell, filter, ctx)
+            }
+            (EventPattern::GainsLife(whose), Occurred::GainsLife(seat)) | (EventPattern::Discards(whose), Occurred::Discards(seat)) => {
+                self.players_of(whose, ctx).contains(seat)
+            }
+            (EventPattern::Any(es), _) => es.iter().any(|e| self.event_matches(e, o, watcher, ctx)),
+            _ => false,
         }
     }
 
-    /// Upkeep and end-step triggers whose "whose" includes the active player.
-    fn fire_step_triggers(&mut self, upkeep: bool) {
-        let active = self.active_player;
-        for id in self.battlefield_objects() {
-            let controller = self.objects[id].controller;
-            let def = self.card_def(id).clone();
-            for (i, t) in def.ir.triggers.iter().enumerate() {
-                let whose = match (t, upkeep) {
-                    (Trigger::Upkeep { whose, .. }, true) | (Trigger::EndStep { whose, .. }, false) => whose,
-                    _ => continue,
-                };
-                let ctx = Ctx::simple(controller, Some(id));
-                if self.players_of(whose, &ctx).contains(&active) {
-                    self.fired.push(FiredTrigger {
-                        source: id,
-                        controller,
-                        index: Some(i as u8),
-                        triggering: Some(Target::Player(active)),
-                    });
-                }
-            }
+    /// Fire every delayed trigger whose moment this is.
+    fn fire_delayed(&mut self, at: DelayedAt) {
+        let due: Vec<DelayedTrigger> = {
+            let (due, rest): (Vec<_>, Vec<_>) = self.delayed.drain(..).partition(|d| d.at == at);
+            self.delayed = rest;
+            due
+        };
+        for d in due {
+            self.fired.push(FiredTrigger {
+                source: d.source,
+                controller: d.controller,
+                kind: FiredKind::Delayed {
+                    effects: d.effects,
+                    ctx: d.ctx,
+                },
+                triggering: None,
+            });
         }
     }
 
@@ -177,14 +275,11 @@ impl Game {
         let mut fired = std::mem::take(&mut self.fired);
         fired.retain(|f| self.objects.get(f.source).is_some() && self.turn_order.contains(&f.controller));
         fired.sort_by_key(|f| order.iter().position(|s| *s == f.controller).unwrap_or(usize::MAX));
-        // Objects that left the battlefield before their non-dies trigger was
-        // placed still trigger (the ability exists independently), except ETB
-        // triggers of things that left again — rare; keep it simple.
         let mut queue: std::collections::VecDeque<FiredTrigger> = fired.into();
         while let Some(f) = queue.pop_front() {
-            let specs: Vec<Filter> = match f.index {
-                Some(i) => self.card_def(f.source).ir.triggers[i as usize].targets().to_vec(),
-                None => Vec::new(),
+            let specs: Vec<Filter> = match &f.kind {
+                FiredKind::Card(i) => self.card_def(f.source).ir.triggers[*i as usize].targets.clone(),
+                _ => Vec::new(),
             };
             if specs.is_empty() {
                 self.push_trigger(&f, Vec::new());
@@ -208,13 +303,18 @@ impl Game {
     }
 
     fn push_trigger(&mut self, f: &FiredTrigger, targets: Vec<Target>) {
-        let kind = match f.index {
-            Some(i) => StackKind::Trigger {
+        let kind = match &f.kind {
+            FiredKind::Card(i) => StackKind::Trigger {
                 source: f.source,
-                index: i,
+                index: *i,
                 triggering: f.triggering,
             },
-            None => StackKind::Prowess { source: f.source },
+            FiredKind::Prowess => StackKind::Prowess { source: f.source },
+            FiredKind::Delayed { effects, ctx } => StackKind::Delayed {
+                source: f.source,
+                effects: effects.clone(),
+                ctx: ctx.clone(),
+            },
         };
         let description = self.describe_stack_kind(&kind);
         self.stack.push(StackObject {

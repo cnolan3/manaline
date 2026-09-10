@@ -61,7 +61,7 @@ pub fn render(card: &Card) -> String {
         lines.push(r.static_(s));
     }
     for t in &card.triggers {
-        let mut r = R::new(card, t.targets(), trigger_names_self(t));
+        let mut r = R::new(card, &t.targets, t.event.names_this());
         lines.push(r.trigger(t));
     }
     for a in &card.activated {
@@ -99,14 +99,8 @@ pub fn render_clause(card: &Card, targets: &[Filter], effect: &Effect) -> String
 
 /// One triggered ability as a line of Oracle text.
 pub fn render_trigger(card: &Card, t: &Trigger) -> String {
-    let mut r = R::new(card, t.targets(), trigger_names_self(t));
+    let mut r = R::new(card, &t.targets, t.event.names_this());
     r.trigger(t)
-}
-
-/// Whether the trigger's head already names the card ("When ~ enters"), so
-/// its effects say "it"; heads like "Whenever another creature dies" do not.
-fn trigger_names_self(t: &Trigger) -> bool {
-    !matches!(t, Trigger::CreatureDies { .. } | Trigger::Upkeep { .. } | Trigger::EndStep { .. })
 }
 
 /// A spell's effects as Oracle text.
@@ -224,10 +218,11 @@ impl R<'_> {
                 heads.push(adjectives.remove(i));
             }
         }
-        // "creature spell": card types qualify a spell rather than alternating with it.
+        // "creature spell", "instant or sorcery spell": card types qualify a
+        // spell rather than alternating with it.
         if heads.len() > 1 && heads.iter().any(|h| h == "spell") {
             let others: Vec<String> = heads.iter().filter(|h| *h != "spell").cloned().collect();
-            adjectives.extend(others);
+            adjectives.push(others.join(" or "));
             heads = vec!["spell".into()];
         }
         let mut head = match heads.len() {
@@ -254,6 +249,8 @@ impl R<'_> {
             Filter::Land => heads.push("land".into()),
             Filter::Artifact => heads.push("artifact".into()),
             Filter::Enchantment => heads.push("enchantment".into()),
+            Filter::Instant => heads.push("instant".into()),
+            Filter::Sorcery => heads.push("sorcery".into()),
             Filter::Permanent => heads.push("permanent".into()),
             Filter::Player => heads.push("player".into()),
             Filter::Opponent => heads.push("opponent".into()),
@@ -292,6 +289,7 @@ impl R<'_> {
             Filter::PowerAtMost(n) => postfixes.push(format!("with power {n} or less")),
             Filter::HasKeyword(k) => postfixes.push(format!("with {}", k.word())),
             Filter::Not(inner) => match &**inner {
+                Filter::HasKeyword(k) => postfixes.push(format!("without {}", k.word())),
                 Filter::Color(c) => adjectives.push(format!("non{}", c.word())),
                 Filter::Creature => adjectives.push("noncreature".into()),
                 Filter::Land => adjectives.push("nonland".into()),
@@ -331,6 +329,7 @@ impl R<'_> {
     fn target_phrase(&self, i: u8) -> String {
         match self.targets.get(i as usize) {
             Some(Filter::Any) => "any target".into(),
+            Some(f) if has_other(f) => format!("another target {}", self.noun(&without_other(f), Number::Singular)),
             Some(f) => format!("target {}", self.noun(f, Number::Singular)),
             None => format!("target #{i}"),
         }
@@ -447,24 +446,7 @@ impl R<'_> {
                 format!("{}.", capitalize(&c))
             }
             Effect::Conditional { if_, then, else_ } => {
-                let cond = match if_ {
-                    Condition::Controls { player, filter, at_least } => {
-                        let (subj, _) = self.player_subject(player);
-                        if *at_least <= 1 {
-                            format!(
-                                "{subj} control {} {}",
-                                article(&self.noun(filter, Number::Singular)),
-                                self.noun(filter, Number::Singular)
-                            )
-                        } else {
-                            format!(
-                                "{subj} control {} or more {}",
-                                number_word(*at_least),
-                                self.noun(filter, Number::Plural)
-                            )
-                        }
-                    }
-                };
+                let cond = self.condition(if_);
                 let then_s = self.clause(then);
                 match else_ {
                     Some(e) => format!("If {cond}, {then_s}. Otherwise, {}.", self.clause(e)),
@@ -474,6 +456,26 @@ impl R<'_> {
             other => {
                 let c = self.clause(other);
                 format!("{}.", capitalize(&c))
+            }
+        }
+    }
+
+    /// "you control an Elf", "you control two or more creatures".
+    fn condition(&mut self, c: &Condition) -> String {
+        match c {
+            Condition::Controls { player, filter, at_least } => {
+                let (subj, second) = self.player_subject(player);
+                let control = if second { "control" } else { "controls" };
+                if *at_least <= 1 {
+                    let n = self.noun(filter, Number::Singular);
+                    format!("{subj} {control} {} {n}", article(&n))
+                } else {
+                    format!(
+                        "{subj} {control} {} or more {}",
+                        number_word(*at_least),
+                        self.noun(filter, Number::Plural)
+                    )
+                }
             }
         }
     }
@@ -648,6 +650,39 @@ impl R<'_> {
                     ReturnZone::Battlefield => format!("return {obj} to the battlefield"),
                 }
             }
+            Effect::ReturnExiled { target, to } => {
+                let obj = match target {
+                    Ref::Target(_) | Ref::Named(_) | Ref::Triggering => "that card".to_string(),
+                    other => self.object(other),
+                };
+                match to {
+                    ReturnZone::Hand => format!("return {obj} to its owner's hand"),
+                    ReturnZone::Battlefield => format!("return {obj} to the battlefield under its owner's control"),
+                }
+            }
+            Effect::Restrict {
+                target,
+                restriction,
+                until,
+            } => {
+                let (subj, _) = self.subject(target);
+                let what = match restriction {
+                    Restriction::CantAttack => "can't attack",
+                    Restriction::CantBlock => "can't block",
+                    Restriction::CantAttackOrBlock => "can't attack or block",
+                };
+                let when = match until {
+                    Duration::EndOfTurn => " this turn",
+                };
+                format!("{subj} {what}{when}")
+            }
+            Effect::Delayed { at, effects } => {
+                let parts: Vec<String> = effects.iter().map(|e| self.clause(e)).collect();
+                let when = match at {
+                    DelayedAt::NextEndStep => "at the beginning of the next end step",
+                };
+                format!("{} {when}", parts.join(", then "))
+            }
             Effect::Sequence(es) => {
                 let parts: Vec<String> = es.iter().map(|e| self.clause(e)).collect();
                 parts.join(", then ")
@@ -725,27 +760,73 @@ impl R<'_> {
     }
 
     fn trigger(&mut self, t: &Trigger) -> String {
-        let (head, effects) = match t {
-            Trigger::Etb { effects, .. } => ("When ~ enters".to_string(), effects),
-            Trigger::Dies { effects, .. } => ("When ~ dies".to_string(), effects),
-            Trigger::Attacks { effects, .. } => ("Whenever ~ attacks".to_string(), effects),
-            Trigger::CombatDamageToPlayer { effects, .. } => ("Whenever ~ deals combat damage to a player".to_string(), effects),
-            Trigger::Upkeep { whose, effects, .. } => (format!("At the beginning of {}", self.step_owner(whose, "upkeep")), effects),
-            Trigger::EndStep { whose, effects, .. } => (format!("At the beginning of {}", self.step_owner(whose, "end step")), effects),
-            Trigger::BecomesTapped { effects, .. } => ("Whenever ~ becomes tapped".to_string(), effects),
-            Trigger::EtbOrDies { effects, .. } => ("When ~ enters or dies".to_string(), effects),
-            Trigger::CreatureDies { filter, effects, .. } => {
-                let head = if has_other(filter) {
-                    format!("Whenever another {} dies", self.noun(&without_other(filter), Number::Singular))
-                } else {
-                    let n = self.noun(filter, Number::Singular);
-                    format!("Whenever {} {n} dies", article(&n))
-                };
-                (head, effects)
-            }
+        let head = self.event_head(&t.event);
+        let cond = match &t.condition {
+            Some(c) => format!(", if {}", self.condition(c)),
+            None => String::new(),
         };
-        let body = self.trigger_body(effects);
-        format!("{head}, {body}")
+        let body = self.trigger_body(&t.effects);
+        format!("{head}{cond}, {body}")
+    }
+
+    /// "When ~ enters", "Whenever another creature you control dies", ...
+    fn event_head(&self, e: &EventPattern) -> String {
+        if let Some((word, verb)) = this_verb(e) {
+            return format!("{word} ~ {verb}");
+        }
+        match e {
+            EventPattern::Enters(f) => format!("Whenever {} enters", self.some_noun(f)),
+            EventPattern::Dies(f) => format!("Whenever {} dies", self.some_noun(f)),
+            EventPattern::Upkeep(whose) => format!("At the beginning of {}", self.step_owner(whose, "upkeep")),
+            EventPattern::EndStep(whose) => format!("At the beginning of {}", self.step_owner(whose, "end step")),
+            EventPattern::BeginCombat(whose) => match whose {
+                PlayerRef::You => "At the beginning of combat on your turn".into(),
+                PlayerRef::EachPlayer => "At the beginning of each combat".into(),
+                other => format!("At the beginning of combat on {}'s turn", self.player_object(other)),
+            },
+            EventPattern::Cast { who, filter } => {
+                let n = self.noun(filter, Number::Singular);
+                format!("Whenever {} {} {n}", self.event_player(who, "cast", "casts"), article(&n))
+            }
+            EventPattern::GainsLife(whose) => format!("Whenever {} life", self.event_player(whose, "gain", "gains")),
+            EventPattern::Discards(whose) => format!("Whenever {} a card", self.event_player(whose, "discard", "discards")),
+            EventPattern::Any(es) => {
+                let verbs: Vec<(&str, &str)> = es.iter().filter_map(this_verb).collect();
+                if verbs.len() == es.len() && !verbs.is_empty() {
+                    let word = if verbs.iter().any(|(w, _)| *w == "Whenever") {
+                        "Whenever"
+                    } else {
+                        "When"
+                    };
+                    let list: Vec<&str> = verbs.iter().map(|(_, v)| *v).collect();
+                    format!("{word} ~ {}", list.join(" or "))
+                } else {
+                    let heads: Vec<String> = es.iter().map(|e| self.event_head(e)).collect();
+                    heads.join(" or ")
+                }
+            }
+            _ => unreachable!("this_verb covers the This* events"),
+        }
+    }
+
+    /// "another creature you control" / "a creature".
+    fn some_noun(&self, f: &Filter) -> String {
+        if has_other(f) {
+            format!("another {}", self.noun(&without_other(f), Number::Singular))
+        } else {
+            let n = self.noun(f, Number::Singular);
+            format!("{} {n}", article(&n))
+        }
+    }
+
+    /// The subject of an event head: "you cast", "an opponent casts", "a player casts".
+    fn event_player(&self, p: &PlayerRef, second: &str, third: &str) -> String {
+        match p {
+            PlayerRef::You => format!("you {second}"),
+            PlayerRef::EachOpponent => format!("an opponent {third}"),
+            PlayerRef::EachPlayer => format!("a player {third}"),
+            other => format!("{} {third}", self.player_object(other)),
+        }
     }
 
     fn step_owner(&self, whose: &PlayerRef, step: &str) -> String {
@@ -933,4 +1014,18 @@ pub fn round_trips(card: &Card) -> Result<(), (String, String)> {
 
 pub fn card_type_word(t: CardType) -> &'static str {
     t.word()
+}
+
+/// The trigger word and verb phrase of an event about the card itself.
+fn this_verb(e: &EventPattern) -> Option<(&'static str, &'static str)> {
+    Some(match e {
+        EventPattern::ThisEnters => ("When", "enters"),
+        EventPattern::ThisDies => ("When", "dies"),
+        EventPattern::ThisAttacks => ("Whenever", "attacks"),
+        EventPattern::ThisBlocks => ("Whenever", "blocks"),
+        EventPattern::ThisBecomesBlocked => ("Whenever", "becomes blocked"),
+        EventPattern::ThisDealsCombatDamageToPlayer => ("Whenever", "deals combat damage to a player"),
+        EventPattern::ThisBecomesTapped => ("Whenever", "becomes tapped"),
+        _ => return None,
+    })
 }

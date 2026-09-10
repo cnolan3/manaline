@@ -819,6 +819,41 @@ fn registry() -> BTreeMap<&'static str, Check> {
         settle(&mut game);
         assert_eq!(stats(&game, g), (3, 3));
     });
+    check!("Soul Warden", || {
+        let mut game = base()
+            .hand(ME, "Soul Warden")
+            .hand(ME, "Grizzly Bears")
+            .battlefield(OPP, "Forest")
+            .battlefield(OPP, "Forest")
+            .hand(OPP, "Grizzly Bears")
+            .build();
+        cast(&mut game, "Soul Warden", &[]);
+        assert_eq!(life(&game, ME), 20, "not itself");
+        cast(&mut game, "Grizzly Bears", &[]);
+        assert_eq!(life(&game, ME), 21);
+        // An opponent's creature counts too.
+        advance_until(&mut game, |g| g.active_player == OPP && g.phase == engine::Phase::Main1).unwrap();
+        cast_by(&mut game, OPP, "Grizzly Bears", &[]);
+        assert_eq!(life(&game, ME), 22);
+    });
+    check!("Ajani's Pridemate", || {
+        let mut game = base().battlefield(ME, "Ajani's Pridemate").hand(ME, "Chaplain's Blessing").build();
+        let cat = bf(&game, ME, "Ajani's Pridemate");
+        cast(&mut game, "Chaplain's Blessing", &[]);
+        assert_eq!(life(&game, ME), 25);
+        assert_eq!(stats(&game, cat), (3, 3), "one counter per life gain event");
+    });
+    check!("Flickerwisp", || {
+        let mut game = base().hand(ME, "Flickerwisp").build();
+        let bear = bf(&game, OPP, "Grizzly Bears");
+        cast(&mut game, "Flickerwisp", &[]);
+        choose(&mut game, ME, Target::Object(bear));
+        assert_eq!(game.objects[bear].zone, Zone::Exile);
+        advance_until(&mut game, |g| g.turn == 2).unwrap();
+        assert_eq!(game.objects[bear].zone, Zone::Battlefield, "back at the end step");
+        assert_eq!(game.objects[bear].controller, OPP, "under its owner's control");
+        assert!(game.players[1].battlefield.contains(&bear));
+    });
     check!("Kor Skyfisher", || {
         let mut game = base().battlefield(ME, "Grizzly Bears").hand(ME, "Kor Skyfisher").build();
         let bear = bf(&game, ME, "Grizzly Bears");
@@ -1101,6 +1136,17 @@ fn registry() -> BTreeMap<&'static str, Check> {
         assert_eq!(hand_size(&game, OPP), 1);
         assert!(in_graveyard(&game, forest));
     });
+    check!("Liliana's Caress", || {
+        let mut game = base()
+            .battlefield(ME, "Liliana's Caress")
+            .hand(ME, "Mind Rot")
+            .hand(OPP, "Forest")
+            .hand(OPP, "Forest")
+            .build();
+        cast(&mut game, "Mind Rot", &[Target::Player(OPP)]);
+        assert_eq!(hand_size(&game, OPP), 0);
+        assert_eq!(life(&game, OPP), 16, "2 life per card discarded");
+    });
     check!("Vampire Envoy", || {
         let mut game = base().battlefield(ME, "Vampire Envoy").build();
         let envoy = bf(&game, ME, "Vampire Envoy");
@@ -1125,6 +1171,31 @@ fn registry() -> BTreeMap<&'static str, Check> {
         cast(&mut game, "Trumpet Blast", &[]);
         assert_eq!(stats(&game, bear), (4, 2));
         assert_eq!(stats(&game, bf(&game, OPP, "Grizzly Bears")), (2, 2), "only attackers");
+    });
+    check!("Kiln Fiend", || {
+        let mut game = base()
+            .battlefield(ME, "Kiln Fiend")
+            .hand(ME, "Shock")
+            .hand(ME, "Grizzly Bears")
+            .build();
+        let fiend = bf(&game, ME, "Kiln Fiend");
+        cast(&mut game, "Grizzly Bears", &[]);
+        assert_eq!(stats(&game, fiend), (1, 2), "creature spells don't count");
+        cast(&mut game, "Shock", &[Target::Player(OPP)]);
+        assert_eq!(stats(&game, fiend), (4, 2));
+    });
+    check!("Falter", || {
+        let mut game = base()
+            .battlefield(ME, "Grizzly Bears")
+            .battlefield(OPP, "Wind Drake")
+            .hand(ME, "Falter")
+            .build();
+        let bear = bf(&game, ME, "Grizzly Bears");
+        let drake = bf(&game, OPP, "Wind Drake");
+        cast(&mut game, "Falter", &[]);
+        attack(&mut game, &[bear]);
+        advance_until(&mut game, |g| matches!(g.pending, Some(PendingChoice::DeclareBlockers { .. }))).unwrap();
+        assert_eq!(game.block_candidates(OPP), vec![drake], "only the flyer may block");
     });
     check!("Prodigal Pyromancer", || pinger("Prodigal Pyromancer"));
     check!("Goblin Chieftain", || {

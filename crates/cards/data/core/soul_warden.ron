@@ -1,0 +1,9 @@
+Card(
+    name: "Soul Warden",
+    cost: "{W}",
+    types: [Creature],
+    subtypes: ["Human", "Cleric"],
+    pt: (1, 1),
+    text: "Whenever another creature enters, you gain 1 life.",
+    triggers: [Trigger(event: Enters(And([Other, Creature])), effects: [GainLife(player: You, amount: Const(1))])],
+)

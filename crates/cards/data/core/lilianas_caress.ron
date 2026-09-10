@@ -1,0 +1,7 @@
+Card(
+    name: "Liliana's Caress",
+    cost: "{1}{B}",
+    types: [Enchantment],
+    text: "Whenever an opponent discards a card, that player loses 2 life.",
+    triggers: [Trigger(event: Discards(EachOpponent), effects: [LoseLife(player: Triggering, amount: Const(2))])],
+)

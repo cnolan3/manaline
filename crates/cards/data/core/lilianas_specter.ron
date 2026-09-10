@@ -6,5 +6,5 @@ Card(
     pt: (2, 1),
     text: "Flying\nWhen this creature enters, each opponent discards a card.",
     keywords: [Flying],
-    triggers: [Etb(effects: [Discard(player: EachOpponent, count: Const(1))])],
+    triggers: [Trigger(event: ThisEnters, effects: [Discard(player: EachOpponent, count: Const(1))])],
 )

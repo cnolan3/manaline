@@ -5,5 +5,5 @@ Card(
     subtypes: ["Zombie", "Goblin"],
     pt: (1, 1),
     text: "When this creature dies, target creature gets -1/-1 until end of turn.",
-    triggers: [Dies(targets: [Creature], effects: [ModifyPt(target: Target(0), power: Const(-1), toughness: Const(-1), until: EndOfTurn)])],
+    triggers: [Trigger(event: ThisDies, targets: [Creature], effects: [ModifyPt(target: Target(0), power: Const(-1), toughness: Const(-1), until: EndOfTurn)])],
 )

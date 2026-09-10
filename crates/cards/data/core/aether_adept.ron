@@ -5,5 +5,5 @@ Card(
     subtypes: ["Human", "Wizard"],
     pt: (2, 2),
     text: "When this creature enters, return target creature to its owner's hand.",
-    triggers: [Etb(targets: [Creature], effects: [ReturnToHand(target: Target(0))])],
+    triggers: [Trigger(event: ThisEnters, targets: [Creature], effects: [ReturnToHand(target: Target(0))])],
 )

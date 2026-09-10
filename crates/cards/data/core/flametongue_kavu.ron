@@ -5,5 +5,5 @@ Card(
     subtypes: ["Kavu"],
     pt: (4, 2),
     text: "When this creature enters, it deals 4 damage to target creature.",
-    triggers: [Etb(targets: [Creature], effects: [DealDamage(amount: Const(4), to: Target(0))])],
+    triggers: [Trigger(event: ThisEnters, targets: [Creature], effects: [DealDamage(amount: Const(4), to: Target(0))])],
 )

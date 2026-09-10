@@ -148,6 +148,7 @@ impl Game {
         }
         self.stack.retain(|s| s.controller != seat);
         self.fired.retain(|f| f.controller != seat);
+        self.delayed.retain(|d| d.controller != seat);
 
         // Creatures attacking a player who left are removed from combat.
         for (_, o) in self.objects.iter_mut() {

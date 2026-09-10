@@ -1,0 +1,10 @@
+Card(
+    name: "Flickerwisp",
+    cost: "{1}{W}{W}",
+    types: [Creature],
+    subtypes: ["Elemental"],
+    pt: (3, 1),
+    text: "Flying\nWhen this creature enters, exile another target permanent. Return that card to the battlefield under its owner's control at the beginning of the next end step.",
+    keywords: [Flying],
+    triggers: [Trigger(event: ThisEnters, targets: [And([Other, Permanent])], effects: [Exile(target: Target(0)), Delayed(at: NextEndStep, effects: [ReturnExiled(target: Target(0), to: Battlefield)])])],
+)

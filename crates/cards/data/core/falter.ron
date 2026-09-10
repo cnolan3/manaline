@@ -1,0 +1,7 @@
+Card(
+    name: "Falter",
+    cost: "{1}{R}",
+    types: [Instant],
+    text: "Creatures without flying can't block this turn.",
+    spell: Spell(effects: [Restrict(target: Each(And([Creature, Not(HasKeyword(Flying))])), restriction: CantBlock, until: EndOfTurn)]),
+)

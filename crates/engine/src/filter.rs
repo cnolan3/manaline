@@ -55,6 +55,8 @@ impl Game {
             Filter::Land => def.is_land(),
             Filter::Artifact => def.types.contains(&CardType::Artifact),
             Filter::Enchantment => def.types.contains(&CardType::Enchantment),
+            Filter::Instant => def.types.contains(&CardType::Instant),
+            Filter::Sorcery => def.types.contains(&CardType::Sorcery),
             Filter::Permanent => obj.zone == Zone::Battlefield || (obj.zone == Zone::Graveyard && def.is_permanent()),
             Filter::InGraveyard(p) => obj.zone == Zone::Graveyard && self.players_of(p, ctx).contains(&obj.owner),
             Filter::Player | Filter::Opponent => false,
@@ -297,6 +299,21 @@ impl Game {
                 out
             }
             other => self.objects_of(other, ctx).into_iter().map(Target::Object).collect(),
+        }
+    }
+
+    /// Whether a condition ("if you control an Elf") holds right now.
+    pub fn condition_holds(&self, c: &cardir::Condition, ctx: &Ctx) -> bool {
+        match c {
+            cardir::Condition::Controls { player, filter, at_least } => self.players_of(player, ctx).iter().any(|&s| {
+                let sub = Ctx { you: s, ..ctx.clone() };
+                let n = self.players[s.index()]
+                    .battlefield
+                    .iter()
+                    .filter(|id| self.object_matches(**id, filter, &sub))
+                    .count();
+                n as i32 >= *at_least
+            }),
         }
     }
 

@@ -7,5 +7,5 @@ Card(
     text: "Deathtouch\nOther Zombie creatures you control get +1/+1.\nWhenever another Zombie you control dies, target opponent loses 1 life.",
     keywords: [Deathtouch],
     statics: [PtBoost(filter: And([Other, Subtype("Zombie"), Creature, ControlledBy(You)]), power: Const(1), toughness: Const(1))],
-    triggers: [CreatureDies(filter: And([Other, Subtype("Zombie"), ControlledBy(You)]), targets: [Opponent], effects: [LoseLife(player: TargetOpponent(0), amount: Const(1))])],
+    triggers: [Trigger(event: Dies(And([Other, Subtype("Zombie"), ControlledBy(You)])), targets: [Opponent], effects: [LoseLife(player: TargetOpponent(0), amount: Const(1))])],
 )

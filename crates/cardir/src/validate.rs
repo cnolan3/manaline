@@ -181,7 +181,17 @@ impl Ctx<'_> {
                 self.player_ref(player);
                 self.amount(count);
             }
-            Effect::ReturnFromGraveyard { target, .. } => self.direct_ref(target),
+            Effect::ReturnFromGraveyard { target, .. } | Effect::ReturnExiled { target, .. } | Effect::Restrict { target, .. } => {
+                self.direct_ref(target)
+            }
+            Effect::Delayed { effects, .. } => {
+                if effects.is_empty() {
+                    self.err("a delayed trigger needs at least one effect");
+                }
+                for e in effects {
+                    self.effect(e);
+                }
+            }
             Effect::Sequence(es) => {
                 if es.len() < 2 {
                     self.err("Sequence needs at least two effects");
@@ -191,12 +201,7 @@ impl Ctx<'_> {
                 }
             }
             Effect::Conditional { if_, then, else_ } => {
-                match if_ {
-                    Condition::Controls { player, filter, .. } => {
-                        self.player_ref(player);
-                        self.filter(filter);
-                    }
-                }
+                self.condition(if_);
                 self.effect(then);
                 if let Some(e) = else_ {
                     self.effect(e);
@@ -212,6 +217,39 @@ impl Ctx<'_> {
                 }
             }
             Effect::Unsupported { reason } => self.err(format!("unsupported effect: {reason}")),
+        }
+    }
+
+    fn condition(&mut self, c: &Condition) {
+        match c {
+            Condition::Controls { player, filter, .. } => {
+                self.player_ref(player);
+                self.filter(filter);
+            }
+        }
+    }
+
+    fn event(&mut self, e: &EventPattern) {
+        match e {
+            EventPattern::Enters(f) | EventPattern::Dies(f) => self.filter(f),
+            EventPattern::Upkeep(p)
+            | EventPattern::EndStep(p)
+            | EventPattern::BeginCombat(p)
+            | EventPattern::GainsLife(p)
+            | EventPattern::Discards(p) => self.player_ref(p),
+            EventPattern::Cast { who, filter } => {
+                self.player_ref(who);
+                self.filter(filter);
+            }
+            EventPattern::Any(es) => {
+                if es.is_empty() {
+                    self.err("empty Any event");
+                }
+                for e in es {
+                    self.event(e);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -307,21 +345,19 @@ pub fn validate(card: &Card) -> Result<(), ValidationError> {
     }
     for t in &card.triggers {
         ctx.in_trigger = true;
-        ctx.targets = t.targets().len();
+        ctx.targets = t.targets.len();
         ctx.bound.clear();
-        for f in t.targets() {
+        for f in &t.targets {
             ctx.filter(f);
         }
-        if let Trigger::Upkeep { whose, .. } | Trigger::EndStep { whose, .. } = t {
-            ctx.player_ref(whose);
+        ctx.event(&t.event);
+        if let Some(c) = &t.condition {
+            ctx.condition(c);
         }
-        if let Trigger::CreatureDies { filter, .. } = t {
-            ctx.filter(filter);
-        }
-        if t.effects().is_empty() {
+        if t.effects.is_empty() {
             ctx.err("a trigger needs at least one effect");
         }
-        for e in t.effects() {
+        for e in &t.effects {
             ctx.effect(e);
         }
         ctx.in_trigger = false;

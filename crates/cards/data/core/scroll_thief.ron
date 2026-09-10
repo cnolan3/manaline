@@ -5,5 +5,5 @@ Card(
     subtypes: ["Merfolk", "Rogue"],
     pt: (1, 3),
     text: "Whenever this creature deals combat damage to a player, draw a card.",
-    triggers: [CombatDamageToPlayer(effects: [Draw(player: You, count: Const(1))])],
+    triggers: [Trigger(event: ThisDealsCombatDamageToPlayer, effects: [Draw(player: You, count: Const(1))])],
 )

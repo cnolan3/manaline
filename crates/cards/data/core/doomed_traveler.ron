@@ -5,5 +5,5 @@ Card(
     subtypes: ["Human", "Soldier"],
     pt: (1, 1),
     text: "When this creature dies, create a 1/1 white Spirit creature token with flying.",
-    triggers: [Dies(effects: [CreateToken(spec: TokenSpec(name: "Spirit", colors: [White], types: [Creature], subtypes: ["Spirit"], pt: (1, 1), keywords: [Flying]), count: Const(1))])],
+    triggers: [Trigger(event: ThisDies, effects: [CreateToken(spec: TokenSpec(name: "Spirit", colors: [White], types: [Creature], subtypes: ["Spirit"], pt: (1, 1), keywords: [Flying]), count: Const(1))])],
 )

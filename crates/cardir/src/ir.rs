@@ -178,6 +178,24 @@ pub enum Effect {
         #[serde(default)]
         else_: Option<Box<Effect>>,
     },
+    /// "return that card to the battlefield under its owner's control" /
+    /// "to its owner's hand": a card in exile comes back.
+    ReturnExiled {
+        target: Ref,
+        to: ReturnZone,
+    },
+    /// "[target] can't block this turn".
+    Restrict {
+        target: Ref,
+        restriction: Restriction,
+        until: Duration,
+    },
+    /// "[effects] at the beginning of the next end step": a delayed trigger
+    /// that remembers this resolution's targets and bindings.
+    Delayed {
+        at: DelayedAt,
+        effects: Vec<Effect>,
+    },
     /// "You may [effect]. If you do, [then]. If you don't, [otherwise]."
     /// The controller decides at resolution.
     May {
@@ -194,7 +212,22 @@ pub enum Effect {
     },
 }
 
-/// Where a card returned from a graveyard goes.
+/// What a creature is stopped from doing.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub enum Restriction {
+    CantAttack,
+    CantBlock,
+    CantAttackOrBlock,
+}
+
+/// When a delayed trigger fires.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub enum DelayedAt {
+    /// The beginning of the next end step, whoever's turn it is.
+    NextEndStep,
+}
+
+/// Where a card returned from a graveyard or exile goes.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum ReturnZone {
     /// Its owner's hand.
@@ -270,6 +303,8 @@ pub enum Filter {
     Land,
     Artifact,
     Enchantment,
+    Instant,
+    Sorcery,
     Permanent,
     Player,
     Opponent,
@@ -296,87 +331,72 @@ pub enum Filter {
     Not(Box<Filter>),
 }
 
+/// A triggered ability: when `event` happens (and `condition` holds, checked
+/// when it triggers and again as it resolves, rule 603.4), choose `targets`
+/// and run `effects`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub enum Trigger {
-    Etb {
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        targets: Vec<Filter>,
-        effects: Vec<Effect>,
-    },
-    Dies {
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        targets: Vec<Filter>,
-        effects: Vec<Effect>,
-    },
-    Attacks {
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        targets: Vec<Filter>,
-        effects: Vec<Effect>,
-    },
-    CombatDamageToPlayer {
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        targets: Vec<Filter>,
-        effects: Vec<Effect>,
-    },
-    Upkeep {
-        whose: PlayerRef,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        targets: Vec<Filter>,
-        effects: Vec<Effect>,
-    },
-    EndStep {
-        whose: PlayerRef,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        targets: Vec<Filter>,
-        effects: Vec<Effect>,
-    },
-    BecomesTapped {
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        targets: Vec<Filter>,
-        effects: Vec<Effect>,
-    },
-    /// "When ~ enters or dies".
-    EtbOrDies {
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        targets: Vec<Filter>,
-        effects: Vec<Effect>,
-    },
-    /// "Whenever a creature dies" / "Whenever another Zombie you control dies":
-    /// some creature matching the filter (`Other` excludes this card) dies.
-    CreatureDies {
-        filter: Filter,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        targets: Vec<Filter>,
-        effects: Vec<Effect>,
-    },
+pub struct Trigger {
+    pub event: EventPattern,
+    /// An intervening "if": "Whenever ~ attacks, if you control an Elf, ...".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition: Option<Condition>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub targets: Vec<Filter>,
+    pub effects: Vec<Effect>,
 }
 
-impl Trigger {
-    pub fn targets(&self) -> &[Filter] {
-        match self {
-            Trigger::Etb { targets, .. }
-            | Trigger::Dies { targets, .. }
-            | Trigger::Attacks { targets, .. }
-            | Trigger::CombatDamageToPlayer { targets, .. }
-            | Trigger::Upkeep { targets, .. }
-            | Trigger::EndStep { targets, .. }
-            | Trigger::BecomesTapped { targets, .. }
-            | Trigger::EtbOrDies { targets, .. }
-            | Trigger::CreatureDies { targets, .. } => targets,
-        }
-    }
+/// What a trigger listens for. The `This*` events are about the card
+/// itself; the others watch the whole game.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum EventPattern {
+    /// "When ~ enters"
+    ThisEnters,
+    /// "When ~ dies"
+    ThisDies,
+    /// "Whenever ~ attacks"
+    ThisAttacks,
+    /// "Whenever ~ blocks"
+    ThisBlocks,
+    /// "Whenever ~ becomes blocked"
+    ThisBecomesBlocked,
+    /// "Whenever ~ deals combat damage to a player"
+    ThisDealsCombatDamageToPlayer,
+    /// "Whenever ~ becomes tapped"
+    ThisBecomesTapped,
+    /// "Whenever another creature you control enters": a permanent matching
+    /// the filter (`Other` excludes this card) enters the battlefield.
+    Enters(Filter),
+    /// "Whenever another Zombie you control dies".
+    Dies(Filter),
+    /// "At the beginning of your upkeep"
+    Upkeep(PlayerRef),
+    /// "At the beginning of your end step"
+    EndStep(PlayerRef),
+    /// "At the beginning of combat on your turn"
+    BeginCombat(PlayerRef),
+    /// "Whenever you cast a noncreature spell"
+    Cast { who: PlayerRef, filter: Filter },
+    /// "Whenever you gain life"
+    GainsLife(PlayerRef),
+    /// "Whenever an opponent discards a card" (once per card)
+    Discards(PlayerRef),
+    /// Any of these: "When ~ enters or dies", "Whenever ~ attacks or blocks".
+    Any(Vec<EventPattern>),
+}
 
-    pub fn effects(&self) -> &[Effect] {
+impl EventPattern {
+    /// Whether the head names the card ("When ~ enters"), so the body says "it".
+    pub fn names_this(&self) -> bool {
         match self {
-            Trigger::Etb { effects, .. }
-            | Trigger::Dies { effects, .. }
-            | Trigger::Attacks { effects, .. }
-            | Trigger::CombatDamageToPlayer { effects, .. }
-            | Trigger::Upkeep { effects, .. }
-            | Trigger::EndStep { effects, .. }
-            | Trigger::BecomesTapped { effects, .. }
-            | Trigger::EtbOrDies { effects, .. }
-            | Trigger::CreatureDies { effects, .. } => effects,
+            EventPattern::ThisEnters
+            | EventPattern::ThisDies
+            | EventPattern::ThisAttacks
+            | EventPattern::ThisBlocks
+            | EventPattern::ThisBecomesBlocked
+            | EventPattern::ThisDealsCombatDamageToPlayer
+            | EventPattern::ThisBecomesTapped => true,
+            EventPattern::Any(es) => es.iter().all(EventPattern::names_this),
+            _ => false,
         }
     }
 }

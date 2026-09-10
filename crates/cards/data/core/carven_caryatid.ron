@@ -6,5 +6,5 @@ Card(
     pt: (2, 5),
     text: "Defender (This creature can't attack.)\nWhen this creature enters, draw a card.",
     keywords: [Defender],
-    triggers: [Etb(effects: [Draw(player: You, count: Const(1))])],
+    triggers: [Trigger(event: ThisEnters, effects: [Draw(player: You, count: Const(1))])],
 )

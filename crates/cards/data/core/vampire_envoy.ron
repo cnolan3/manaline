@@ -6,5 +6,5 @@ Card(
     pt: (1, 4),
     text: "Flying\nWhenever this creature becomes tapped, you gain 1 life.",
     keywords: [Flying],
-    triggers: [BecomesTapped(effects: [GainLife(player: You, amount: Const(1))])],
+    triggers: [Trigger(event: ThisBecomesTapped, effects: [GainLife(player: You, amount: Const(1))])],
 )

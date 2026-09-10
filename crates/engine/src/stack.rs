@@ -293,11 +293,18 @@ impl Game {
                 let def = self.card_def(source).clone();
                 let trigger = def.ir.triggers[index as usize].clone();
                 let ctx = Ctx::new(controller, Some(source), targets.clone(), triggering);
-                if self.all_targets_illegal(trigger.targets(), &ctx) {
+                if self.all_targets_illegal(&trigger.targets, &ctx) {
                     return true;
                 }
-                self.run(Continuation::new(ctx, trigger.targets().to_vec(), trigger.effects().to_vec()))
+                // An intervening "if" is checked again on resolution (rule 603.4).
+                if let Some(c) = &trigger.condition {
+                    if !self.condition_holds(c, &ctx) {
+                        return true;
+                    }
+                }
+                self.run(Continuation::new(ctx, trigger.targets, trigger.effects))
             }
+            StackKind::Delayed { effects, ctx, .. } => self.run(Continuation::new(ctx, Vec::new(), effects)),
             StackKind::Prowess { source } => {
                 if self.objects[source].zone == Zone::Battlefield {
                     self.objects[source].modifiers.push(crate::game::Modifier {
