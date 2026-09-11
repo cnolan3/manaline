@@ -7,6 +7,7 @@ use engine::{
     ActReason, Action, AttackTarget, DamageTarget, Game, Keyword, ObjectId, PendingChoice, Phase, RulesError, Seat, Target, Zone,
     EQUIP_ABILITY,
 };
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 fn db() -> Arc<engine::CardDb> {
@@ -1906,4 +1907,250 @@ fn silkwrap_only_hits_small_creatures() {
     assert_eq!(game.objects[bears].exiled_by, Some(wrap));
     assert!(game.objects[bears].until_source_leaves);
     assert_eq!(game.objects[angel].zone, Zone::Battlefield);
+}
+
+// ----- divided damage -----
+
+/// The actions on offer barring the ever-present concede.
+fn offered(game: &Game, seat: Seat) -> Vec<Action> {
+    game.legal_actions(seat).into_iter().filter(|a| *a != Action::Concede).collect()
+}
+
+#[test]
+fn divided_damage_asks_for_targets_then_the_split() {
+    let mut game = TestGame::new(db(), 2)
+        .battlefield(Seat(0), "Mountain")
+        .battlefield(Seat(0), "Mountain")
+        .battlefield(Seat(0), "Mountain")
+        .hand(Seat(0), "Arc Lightning")
+        .battlefield(Seat(1), "Grizzly Bears")
+        .battlefield(Seat(1), "Hill Giant")
+        .build();
+    let bears = bf(&game, Seat(1), "Grizzly Bears");
+    let giant = bf(&game, Seat(1), "Hill Giant");
+    // Paying comes first: the targets are asked for afterwards, like any two-step cast.
+    cast(&mut game, Seat(0), "Arc Lightning", &[]);
+    assert!(game.stack.is_empty());
+    assert!(matches!(game.pending, Some(PendingChoice::Casting { .. })), "{:?}", game.pending);
+
+    let picks: Vec<Vec<Target>> = game
+        .legal_actions(Seat(0))
+        .into_iter()
+        .filter_map(|a| match a {
+            Action::ChooseTargets { targets } => Some(targets),
+            _ => None,
+        })
+        .collect();
+    let sizes: BTreeSet<usize> = picks.iter().map(Vec::len).collect();
+    assert_eq!(sizes, [1, 2, 3].into_iter().collect(), "one, two, or three targets");
+    assert!(!picks.iter().any(|t| t.is_empty()), "divided damage has to go somewhere: {picks:?}");
+
+    let chosen = vec![Target::Object(bears), Target::Object(giant), Target::Player(Seat(1))];
+    game.apply(Seat(0), &Action::ChooseTargets { targets: chosen.clone() }).unwrap();
+    assert_eq!(game.dividing_over(), chosen);
+
+    // Three ways to share three damage among three targets is only one way.
+    let acts = offered(&game, Seat(0));
+    assert_eq!(acts, vec![Action::Divide { amounts: vec![1, 1, 1] }], "{acts:?}");
+    let told = engine::text::describe_action(&game, &acts[0]);
+    assert!(told.contains("1 to Grizzly Bears"), "{told}");
+    game.apply(Seat(0), &acts[0]).unwrap();
+
+    assert!(game.pending.is_none(), "{:?}", game.pending);
+    assert_eq!(game.stack.len(), 1);
+    assert_eq!(game.stack[0].division, vec![1, 1, 1]);
+    resolve_top(&mut game);
+    assert_eq!(game.objects[bears].zone, Zone::Battlefield, "one damage does not kill a 2/2");
+    assert_eq!(game.objects[bears].damage, 1);
+    assert_eq!(game.objects[giant].damage, 1);
+    assert_eq!(game.players[1].life, 19);
+}
+
+#[test]
+fn divided_damage_over_two_targets_offers_every_split() {
+    let mut game = TestGame::new(db(), 2)
+        .battlefield(Seat(0), "Mountain")
+        .battlefield(Seat(0), "Mountain")
+        .battlefield(Seat(0), "Mountain")
+        .hand(Seat(0), "Arc Lightning")
+        .battlefield(Seat(1), "Grizzly Bears")
+        .battlefield(Seat(1), "Hill Giant")
+        .build();
+    let bears = bf(&game, Seat(1), "Grizzly Bears");
+    let giant = bf(&game, Seat(1), "Hill Giant");
+    cast(&mut game, Seat(0), "Arc Lightning", &[]);
+    game.apply(
+        Seat(0),
+        &Action::ChooseTargets {
+            targets: vec![Target::Object(bears), Target::Object(giant)],
+        },
+    )
+    .unwrap();
+    let mut splits: Vec<Vec<i32>> = offered(&game, Seat(0))
+        .into_iter()
+        .map(|a| match a {
+            Action::Divide { amounts } => amounts,
+            other => panic!("only the split is on offer: {other:?}"),
+        })
+        .collect();
+    splits.sort();
+    assert_eq!(splits, vec![vec![1, 2], vec![2, 1]]);
+
+    game.apply(Seat(0), &Action::Divide { amounts: vec![2, 1] }).unwrap();
+    assert_eq!(game.stack[0].division, vec![2, 1]);
+    resolve_top(&mut game);
+    assert_eq!(game.objects[bears].zone, Zone::Graveyard, "two damage kills the 2/2");
+    assert_eq!(game.objects[giant].damage, 1);
+}
+
+#[test]
+fn divided_damage_to_one_target_needs_no_split() {
+    let mut game = TestGame::new(db(), 2)
+        .battlefield(Seat(0), "Mountain")
+        .battlefield(Seat(0), "Mountain")
+        .battlefield(Seat(0), "Mountain")
+        .hand(Seat(0), "Arc Lightning")
+        .battlefield(Seat(1), "Grizzly Bears")
+        .battlefield(Seat(1), "Hill Giant")
+        .build();
+    let giant = bf(&game, Seat(1), "Hill Giant");
+    cast(&mut game, Seat(0), "Arc Lightning", &[]);
+    game.apply(
+        Seat(0),
+        &Action::ChooseTargets {
+            targets: vec![Target::Object(giant)],
+        },
+    )
+    .unwrap();
+    assert!(game.pending.is_none(), "one target takes it all: {:?}", game.pending);
+    assert_eq!(game.stack.len(), 1);
+    assert_eq!(game.stack[0].division, vec![3]);
+    resolve_top(&mut game);
+    assert_eq!(game.objects[giant].zone, Zone::Graveyard, "all three to the 3/3");
+}
+
+#[test]
+fn a_divided_share_for_a_target_that_left_is_not_dealt() {
+    let mut game = TestGame::new(db(), 2)
+        .battlefield(Seat(0), "Mountain")
+        .hand(Seat(0), "Forked Bolt")
+        .battlefield(Seat(1), "Grizzly Bears")
+        .battlefield(Seat(1), "Hill Giant")
+        .battlefield(Seat(1), "Island")
+        .hand(Seat(1), "Unsummon")
+        .build();
+    let bears = bf(&game, Seat(1), "Grizzly Bears");
+    let giant = bf(&game, Seat(1), "Hill Giant");
+    cast(&mut game, Seat(0), "Forked Bolt", &[]);
+    game.apply(
+        Seat(0),
+        &Action::ChooseTargets {
+            targets: vec![Target::Object(bears), Target::Object(giant)],
+        },
+    )
+    .unwrap();
+    game.apply(Seat(0), &Action::Divide { amounts: vec![1, 1] }).unwrap();
+    assert_eq!(game.stack[0].division, vec![1, 1]);
+
+    // In response the bear is bounced: its share is simply not dealt.
+    game.apply(Seat(0), &Action::PassPriority).unwrap();
+    cast(&mut game, Seat(1), "Unsummon", &[Target::Object(bears)]);
+    resolve_top(&mut game);
+    assert_eq!(game.objects[bears].zone, Zone::Hand);
+    let bolt = game.stack[0].object;
+    resolve_top(&mut game);
+    assert_eq!(game.objects[giant].damage, 1, "the remaining target takes its own share, no more");
+    assert_eq!(game.objects[bears].zone, Zone::Hand);
+    assert_eq!(game.objects[bears].damage, 0);
+    assert_eq!(game.players[1].life, 20);
+    assert_eq!(game.objects[bolt].zone, Zone::Graveyard, "one legal target left, so no fizzle");
+}
+
+#[test]
+fn rolling_thunder_divides_x() {
+    let mut game = TestGame::new(db(), 2)
+        .battlefield(Seat(0), "Mountain")
+        .battlefield(Seat(0), "Mountain")
+        .battlefield(Seat(0), "Mountain")
+        .battlefield(Seat(0), "Mountain")
+        .battlefield(Seat(0), "Mountain")
+        .hand(Seat(0), "Rolling Thunder")
+        .battlefield(Seat(1), "Grizzly Bears")
+        .battlefield(Seat(1), "Hill Giant")
+        .build();
+    let thunder = hand_card(&game, Seat(0), "Rolling Thunder");
+    let bears = bf(&game, Seat(1), "Grizzly Bears");
+    let giant = bf(&game, Seat(1), "Hill Giant");
+    let three = game
+        .legal_actions(Seat(0))
+        .into_iter()
+        .find(|a| matches!(a, Action::CastSpell { object, payment, .. } if *object == thunder && payment.x == 3))
+        .expect("X=3 is affordable with five Mountains");
+    game.apply(Seat(0), &three).unwrap();
+    let chosen = vec![Target::Object(bears), Target::Object(giant), Target::Player(Seat(1))];
+    game.apply(Seat(0), &Action::ChooseTargets { targets: chosen }).unwrap();
+    let acts = offered(&game, Seat(0));
+    assert_eq!(acts, vec![Action::Divide { amounts: vec![1, 1, 1] }], "{acts:?}");
+    game.apply(Seat(0), &acts[0]).unwrap();
+    assert_eq!(game.stack[0].x, 3);
+    assert_eq!(game.stack[0].division, vec![1, 1, 1]);
+    resolve_top(&mut game);
+    assert_eq!(game.objects[bears].damage, 1);
+    assert_eq!(game.objects[giant].damage, 1);
+    assert_eq!(game.players[1].life, 19);
+
+    // One point of damage stretches no further than one target.
+    let mut game = TestGame::new(db(), 2)
+        .battlefield(Seat(0), "Mountain")
+        .battlefield(Seat(0), "Mountain")
+        .battlefield(Seat(0), "Mountain")
+        .hand(Seat(0), "Rolling Thunder")
+        .battlefield(Seat(1), "Grizzly Bears")
+        .battlefield(Seat(1), "Hill Giant")
+        .build();
+    let thunder = hand_card(&game, Seat(0), "Rolling Thunder");
+    let one = game
+        .legal_actions(Seat(0))
+        .into_iter()
+        .find(|a| matches!(a, Action::CastSpell { object, payment, .. } if *object == thunder && payment.x == 1))
+        .expect("X=1 is affordable");
+    game.apply(Seat(0), &one).unwrap();
+    let sizes: BTreeSet<usize> = game
+        .legal_actions(Seat(0))
+        .into_iter()
+        .filter_map(|a| match a {
+            Action::ChooseTargets { targets } => Some(targets.len()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(sizes, [1].into_iter().collect(), "at most one target per point of damage");
+}
+
+#[test]
+fn electrolyze_divides_then_draws() {
+    let mut game = TestGame::new(db(), 2)
+        .battlefield(Seat(0), "Island")
+        .battlefield(Seat(0), "Mountain")
+        .battlefield(Seat(0), "Mountain")
+        .hand(Seat(0), "Electrolyze")
+        .library(Seat(0), &["Mountain"; 3])
+        .battlefield(Seat(1), "Grizzly Bears")
+        .battlefield(Seat(1), "Hill Giant")
+        .build();
+    let bears = bf(&game, Seat(1), "Grizzly Bears");
+    let giant = bf(&game, Seat(1), "Hill Giant");
+    cast(&mut game, Seat(0), "Electrolyze", &[]);
+    game.apply(
+        Seat(0),
+        &Action::ChooseTargets {
+            targets: vec![Target::Object(bears), Target::Object(giant)],
+        },
+    )
+    .unwrap();
+    game.apply(Seat(0), &Action::Divide { amounts: vec![1, 1] }).unwrap();
+    let before = game.players[0].hand.len();
+    resolve_top(&mut game);
+    assert_eq!(game.objects[bears].damage, 1);
+    assert_eq!(game.objects[giant].damage, 1);
+    assert_eq!(game.players[0].hand.len(), before + 1, "and it replaces itself");
 }

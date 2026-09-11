@@ -25,6 +25,10 @@ struct Ctx<'a> {
     bound: Vec<String>,
     /// Whether the spell or ability being checked has an `{X}` in its cost.
     has_x: bool,
+    /// Which of the current target specs take a caster-chosen number of targets.
+    variable_specs: Vec<bool>,
+    /// Inside a non-modal spell's own effects, where divided damage may appear.
+    in_spell: bool,
     errors: Vec<String>,
 }
 
@@ -154,6 +158,7 @@ impl Ctx<'_> {
 
     fn targets(&mut self, specs: &[Filter]) {
         self.targets = specs.len();
+        self.variable_specs = specs.iter().map(Filter::is_variable).collect();
         self.bound.clear();
         for f in specs {
             self.target_spec(f);
@@ -180,9 +185,18 @@ impl Ctx<'_> {
 
     fn effect(&mut self, e: &Effect) {
         match e {
-            Effect::DealDamage { amount, to } => {
+            Effect::DealDamage { amount, to, divided } => {
                 self.amount(amount);
                 self.direct_ref(to);
+                if *divided {
+                    match to {
+                        Ref::Target(i) if self.variable_specs.get(*i as usize).copied().unwrap_or(false) => {}
+                        _ => self.err("divided damage goes to a target spec with a caster-chosen count"),
+                    }
+                    if !self.in_spell {
+                        self.err("divided damage only in a non-modal spell's own effects");
+                    }
+                }
             }
             Effect::Exile { target, until } => {
                 self.direct_ref(target);
@@ -397,6 +411,8 @@ pub fn validate(card: &Card) -> Result<(), ValidationError> {
         direct: false,
         bound: Vec::new(),
         has_x: false,
+        variable_specs: Vec::new(),
+        in_spell: false,
         errors: Vec::new(),
     };
 
@@ -444,9 +460,11 @@ pub fn validate(card: &Card) -> Result<(), ValidationError> {
             if spell.effects.is_empty() {
                 ctx.err("a spell needs at least one effect");
             }
+            ctx.in_spell = true;
             for e in &spell.effects {
                 ctx.effect(e);
             }
+            ctx.in_spell = false;
         } else {
             if !spell.effects.is_empty() || !spell.targets.is_empty() {
                 ctx.err("a modal spell keeps its targets and effects in its modes");

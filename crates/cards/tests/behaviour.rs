@@ -155,6 +155,30 @@ fn cast_steps(game: &mut Game, name: &str, modes: &[u8], targets: &[&[Target]]) 
     settle(game);
 }
 
+/// Cast a divided-damage spell: pay (announcing `x`), name its targets, then
+/// split the damage over them in the order they were named.
+fn cast_divided(game: &mut Game, name: &str, x: u32, targets: &[Target], amounts: &[i32]) {
+    assert_eq!(targets.len(), amounts.len(), "one share per target");
+    let id = hand(game, ME, name);
+    let a = game
+        .legal_actions(ME)
+        .into_iter()
+        .find(|a| matches!(a, Action::CastSpell { object, targets: t, payment } if *object == id && t.is_empty() && payment.x == x))
+        .unwrap_or_else(|| panic!("no legal cast of {name} with X={x}"));
+    game.apply(ME, &a).unwrap();
+    assert!(
+        matches!(game.pending, Some(PendingChoice::Casting { .. })),
+        "expected to be choosing targets, got {:?}",
+        game.pending
+    );
+    game.apply(ME, &Action::ChooseTargets { targets: targets.to_vec() }).unwrap();
+    if amounts.len() > 1 {
+        game.apply(ME, &Action::Divide { amounts: amounts.to_vec() }).unwrap();
+    }
+    assert_eq!(game.stack.len(), 1, "the spell is on the stack: {:?}", game.pending);
+    settle(game);
+}
+
 /// Answer a resolving effect's pick ("sacrifice a creature", "a permanent you control").
 fn pick(game: &mut Game, seat: Seat, targets: &[Target]) {
     assert!(
@@ -1530,6 +1554,61 @@ fn registry() -> BTreeMap<&'static str, Check> {
     check!("Flame Slash", || burn("Flame Slash", 4, true, false));
     check!("Searing Spear", || burn("Searing Spear", 3, true, true));
     check!("Fire Ambush", || burn("Fire Ambush", 3, true, true));
+    check!("Arc Lightning", || {
+        let mut game = base().battlefield(OPP, "Hill Giant").hand(ME, "Arc Lightning").build();
+        let bear = bf(&game, OPP, "Grizzly Bears");
+        let giant = bf(&game, OPP, "Hill Giant");
+        cast_divided(
+            &mut game,
+            "Arc Lightning",
+            0,
+            &[Target::Object(bear), Target::Object(giant), Target::Player(OPP)],
+            &[1, 1, 1],
+        );
+        assert_eq!(game.objects[bear].damage, 1, "a 2/2 survives one");
+        assert_eq!(game.objects[giant].damage, 1);
+        assert_eq!(life(&game, OPP), 19);
+    });
+    check!("Forked Bolt", || {
+        let mut game = base().hand(ME, "Forked Bolt").build();
+        let bear = bf(&game, OPP, "Grizzly Bears");
+        // All of it on one target: no split to answer.
+        cast_divided(&mut game, "Forked Bolt", 0, &[Target::Object(bear)], &[2]);
+        assert!(in_graveyard(&game, bear), "two damage kills the 2/2");
+    });
+    check!("Electrolyze", || {
+        let mut game = base()
+            .battlefield(OPP, "Hill Giant")
+            .hand(ME, "Electrolyze")
+            .library(ME, &["Forest"; 4])
+            .build();
+        let bear = bf(&game, OPP, "Grizzly Bears");
+        let giant = bf(&game, OPP, "Hill Giant");
+        cast_divided(&mut game, "Electrolyze", 0, &[Target::Object(bear), Target::Object(giant)], &[1, 1]);
+        assert_eq!(game.objects[bear].damage, 1);
+        assert_eq!(game.objects[giant].damage, 1);
+        assert_eq!(hand_size(&game, ME), 1, "and it replaces itself");
+    });
+    check!("Pyrotechnics", || {
+        let mut game = base().hand(ME, "Pyrotechnics").build();
+        let bear = bf(&game, OPP, "Grizzly Bears");
+        cast_divided(&mut game, "Pyrotechnics", 0, &[Target::Object(bear), Target::Player(OPP)], &[2, 2]);
+        assert!(in_graveyard(&game, bear));
+        assert_eq!(life(&game, OPP), 18);
+    });
+    check!("Rolling Thunder", || {
+        let mut game = base().hand(ME, "Rolling Thunder").build();
+        let bear = bf(&game, OPP, "Grizzly Bears");
+        cast_divided(
+            &mut game,
+            "Rolling Thunder",
+            2,
+            &[Target::Object(bear), Target::Player(OPP)],
+            &[1, 1],
+        );
+        assert_eq!(game.objects[bear].damage, 1, "X damage, split two ways");
+        assert_eq!(life(&game, OPP), 19);
+    });
     check!("Trumpet Blast", || {
         let mut game = base().battlefield(ME, "Grizzly Bears").hand(ME, "Trumpet Blast").build();
         let bear = bf(&game, ME, "Grizzly Bears");

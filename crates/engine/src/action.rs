@@ -92,6 +92,11 @@ pub enum Action {
     ChooseMode {
         mode: u8,
     },
+    /// Split divided damage over the targets just chosen, in their order;
+    /// each gets at least 1 and the parts add up to the amount.
+    Divide {
+        amounts: Vec<i32>,
+    },
     /// Cleanup-step hand size.
     Discard {
         objects: Vec<ObjectId>,

@@ -1,0 +1,10 @@
+Card(
+    name: "Electrolyze",
+    cost: "{1}{U}{R}",
+    types: [Instant],
+    text: "Electrolyze deals 2 damage divided as you choose among one or two targets.\nDraw a card.",
+    spell: Spell(
+        targets: [Targets(UpTo(2), Any)],
+        effects: [DealDamage(amount: Const(2), to: Target(0), divided: true), Draw(player: You, count: Const(1))],
+    ),
+)

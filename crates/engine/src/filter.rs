@@ -36,6 +36,9 @@ pub struct Ctx {
     /// effects run for that player alone.
     #[serde(default)]
     pub chooser: Option<Seat>,
+    /// Divided damage as the caster split it: each target's share.
+    #[serde(default)]
+    pub division: Vec<(Target, i32)>,
 }
 
 impl Ctx {
@@ -53,6 +56,7 @@ impl Ctx {
             options: BTreeMap::new(),
             x: 0,
             chooser: None,
+            division: Vec::new(),
         }
     }
 

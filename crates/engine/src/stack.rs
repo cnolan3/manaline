@@ -117,6 +117,7 @@ impl Game {
             kind: StackKind::Spell,
             modes: Vec::new(),
             x: payment.x,
+            division: Vec::new(),
         });
         self.emit(Event::Cast {
             seat,
@@ -151,6 +152,7 @@ impl Game {
                 kind: StackKind::Equip { source: object },
                 modes: Vec::new(),
                 x: 0,
+                division: Vec::new(),
             });
             self.emit(Event::Activated {
                 seat,
@@ -235,6 +237,7 @@ impl Game {
             kind: StackKind::Ability { source: object, index },
             modes: Vec::new(),
             x: payment.x,
+            division: Vec::new(),
         });
         self.emit(Event::Activated {
             seat,
@@ -260,6 +263,7 @@ impl Game {
             kind,
             modes,
             x,
+            division,
         } = so;
         match kind {
             StackKind::Spell => {
@@ -296,7 +300,15 @@ impl Game {
                     choose: cardir::ModeChoice::One,
                 });
                 if !def.is_modal() {
-                    let ctx = Ctx::new(controller, Some(object), groups, None).with_x(x);
+                    let mut ctx = Ctx::new(controller, Some(object), groups, None).with_x(x);
+                    // Divided damage keeps each target's share, illegal ones included:
+                    // theirs is simply not dealt (rule 608.2b).
+                    if let Some((i, _)) = Game::divided_spec(&def) {
+                        let chosen = Game::group_targets(&specs, &targets);
+                        if let Some(group) = chosen.get(i as usize) {
+                            ctx.division = group.iter().copied().zip(division.iter().copied()).collect();
+                        }
+                    }
                     return self.run(Continuation::new(ctx, specs, spell.effects));
                 }
                 // Each chosen mode runs in order with its own targets: frames go

@@ -150,6 +150,8 @@ pub enum PendingChoice {
         spec: usize,
         /// The value announced for `{X}`.
         x: u32,
+        /// How divided damage was split over its targets, once chosen.
+        division: Option<Vec<i32>>,
     },
 }
 
@@ -226,6 +228,9 @@ pub struct StackObject {
     /// The value announced for `{X}`.
     #[serde(default)]
     pub x: u32,
+    /// Divided damage: one amount per target of the divided spec, in order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub division: Vec<i32>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -668,6 +673,10 @@ impl Game {
                 Some(PendingChoice::ChooseOption { .. }) => self.answer_option(*mode),
                 Some(PendingChoice::Casting { .. }) => self.answer_cast_mode(*mode)?,
                 _ => return Err(RulesError::illegal("no option to choose")),
+            },
+            Action::Divide { amounts } => match &self.pending {
+                Some(PendingChoice::Casting { .. }) => self.answer_cast_division(amounts)?,
+                _ => return Err(RulesError::illegal("nothing to divide")),
             },
             Action::DeclareAttackers { attackers } => self.declare_attackers(seat, attackers),
             Action::DeclareBlockers { blocks } => self.declare_blockers(seat, blocks),

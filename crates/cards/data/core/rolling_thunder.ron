@@ -1,0 +1,10 @@
+Card(
+    name: "Rolling Thunder",
+    cost: "{X}{R}{R}",
+    types: [Sorcery],
+    text: "Rolling Thunder deals X damage divided as you choose among any number of targets.",
+    spell: Spell(
+        targets: [Targets(AnyNumber, Any)],
+        effects: [DealDamage(amount: X, to: Target(0), divided: true)],
+    ),
+)

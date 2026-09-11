@@ -67,6 +67,7 @@ impl Game {
                     modes,
                     modes_done,
                     spec,
+                    x,
                     ..
                 } => {
                     let def = self.card_def(*object).clone();
@@ -78,8 +79,20 @@ impl Game {
                         let specs = Game::cast_specs(&def, modes);
                         if let Some(current) = specs.get(*spec) {
                             let ctx = Ctx::simple(seat, Some(*object));
-                            for targets in self.spec_choices(current, &ctx) {
+                            let bounds = if def.is_modal() {
+                                None
+                            } else {
+                                Some(Game::cast_spec_bounds(&def, *spec, *x))
+                            };
+                            for targets in self.spec_choices_within(current, bounds, &ctx) {
                                 acts.push(Action::ChooseTargets { targets });
+                                if acts.len() >= ENUMERATION_CAP {
+                                    break;
+                                }
+                            }
+                        } else {
+                            for amounts in self.division_options() {
+                                acts.push(Action::Divide { amounts });
                                 if acts.len() >= ENUMERATION_CAP {
                                     break;
                                 }
@@ -152,7 +165,18 @@ impl Game {
     /// Every legal way to fill one target spec: each candidate for a single
     /// target, every subset of an allowed size for "up to N" / "any number".
     pub(crate) fn spec_choices(&self, spec: &cardir::Filter, ctx: &Ctx) -> Vec<Vec<crate::action::Target>> {
+        self.spec_choices_within(spec, None, ctx)
+    }
+
+    /// `spec_choices` with the count bounds overridden (divided damage).
+    pub(crate) fn spec_choices_within(
+        &self,
+        spec: &cardir::Filter,
+        bounds: Option<(usize, Option<usize>)>,
+        ctx: &Ctx,
+    ) -> Vec<Vec<crate::action::Target>> {
         let (inner, min, max) = spec.spec_bounds();
+        let (min, max) = bounds.unwrap_or((min, max));
         let candidates = self.targets_for(inner, ctx);
         let max = max.unwrap_or(candidates.len()).min(candidates.len());
         if candidates.len() < min {

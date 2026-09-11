@@ -373,6 +373,7 @@ impl Game {
             kind,
             modes: Vec::new(),
             x: 0,
+            division: Vec::new(),
         });
         self.emit(Event::Triggered {
             source: f.source,

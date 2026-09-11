@@ -1,0 +1,10 @@
+Card(
+    name: "Arc Lightning",
+    cost: "{2}{R}",
+    types: [Sorcery],
+    text: "Arc Lightning deals 3 damage divided as you choose among one, two, or three targets.",
+    spell: Spell(
+        targets: [Targets(UpTo(3), Any)],
+        effects: [DealDamage(amount: Const(3), to: Target(0), divided: true)],
+    ),
+)

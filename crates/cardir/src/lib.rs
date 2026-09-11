@@ -233,6 +233,28 @@ Card(
     }
 
     #[test]
+    fn divided_damage_renders_like_oracle() {
+        let cases = [
+            r#"Card(name: "Arc", cost: "{2}{R}", types: [Sorcery], text: "Arc deals 3 damage divided as you choose among one, two, or three targets.", spell: Spell(targets: [Targets(UpTo(3), Any)], effects: [DealDamage(amount: Const(3), to: Target(0), divided: true)]))"#,
+            r#"Card(name: "Fork", cost: "{R}", types: [Sorcery], text: "Fork deals 2 damage divided as you choose among one or two targets.", spell: Spell(targets: [Targets(UpTo(2), Any)], effects: [DealDamage(amount: Const(2), to: Target(0), divided: true)]))"#,
+            r#"Card(name: "Thunder", cost: "{X}{R}{R}", types: [Sorcery], text: "Thunder deals X damage divided as you choose among any number of targets.", spell: Spell(targets: [Targets(AnyNumber, Any)], effects: [DealDamage(amount: X, to: Target(0), divided: true)]))"#,
+            r#"Card(name: "Spray", cost: "{1}{R}", types: [Instant], text: "Spray deals 2 damage divided as you choose among one or two target creatures.", spell: Spell(targets: [Targets(UpTo(2), Creature)], effects: [DealDamage(amount: Const(2), to: Target(0), divided: true)]))"#,
+        ];
+        for text in cases {
+            let card = load(text).unwrap_or_else(|e| panic!("{e}"));
+            if let Err((want, got)) = round_trips(&card) {
+                panic!("{}:\n  oracle:   {want}\n  rendered: {got}", card.name);
+            }
+            let spell = card.spell.as_ref().unwrap();
+            assert_eq!(divided_damage(&spell.effects).map(|(i, _)| i), Some(0));
+        }
+        let bad = r#"Card(name: "Bolt", cost: "{R}", types: [Instant], text: "", spell: Spell(targets: [Any], effects: [DealDamage(amount: Const(3), to: Target(0), divided: true)]))"#;
+        assert!(load(bad).unwrap_err().contains("caster-chosen count"));
+        let bad = r#"Card(name: "Bear", cost: "{G}", types: [Creature], pt: (2, 2), text: "", triggers: [Trigger(event: ThisEnters, targets: [Targets(UpTo(2), Any)], effects: [DealDamage(amount: Const(2), to: Target(0), divided: true)])])"#;
+        assert!(load(bad).unwrap_err().contains("non-modal spell"));
+    }
+
+    #[test]
     fn linked_durations_render_like_oracle() {
         let cases = [
             r#"Card(name: "Warden", cost: "{1}{W}", types: [Creature], pt: (1, 3), text: "When this creature enters, exile target creature an opponent controls until this creature leaves the battlefield.", triggers: [Trigger(event: ThisEnters, targets: [And([Creature, ControlledBy(EachOpponent)])], effects: [Exile(target: Target(0), until: Some(UntilThisLeaves))])])"#,

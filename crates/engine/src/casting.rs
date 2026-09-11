@@ -100,11 +100,81 @@ impl Game {
             castable >= spell.choose.bounds().0
         } else {
             let ctx = Ctx::simple(seat, Some(object));
-            Self::spell_specs(def).iter().all(|spec| {
+            let divided = Self::divided_spec(def).map(|(i, _)| i as usize);
+            Self::spell_specs(def).iter().enumerate().all(|(i, spec)| {
                 let (inner, min, _) = spec.spec_bounds();
+                // Divided damage needs somewhere to go.
+                let min = if divided == Some(i) { min.max(1) } else { min };
                 min == 0 || self.targets_for(inner, &ctx).len() >= min
             })
         }
+    }
+
+    /// A non-modal spell's divided-damage spec and amount.
+    pub(crate) fn divided_spec(def: &CardDef) -> Option<(u8, &cardir::Amount)> {
+        def.ir.spell.as_ref().and_then(|s| cardir::divided_damage(&s.effects))
+    }
+
+    /// The bounds on how many targets a cast may pick for spec `index`:
+    /// divided damage goes to at least one target and at most one per point.
+    pub(crate) fn cast_spec_bounds(def: &CardDef, index: usize, x: u32) -> (usize, Option<usize>) {
+        let specs = Self::spell_specs(def);
+        let Some(spec) = specs.get(index) else { return (0, Some(0)) };
+        let (_, min, max) = spec.spec_bounds();
+        match Self::divided_spec(def) {
+            Some((i, amount)) if i as usize == index => {
+                let total = Self::divided_total(amount, x).max(0) as usize;
+                if total == 0 {
+                    (0, Some(0))
+                } else {
+                    (min.max(1), Some(max.map_or(total, |m| m.min(total))))
+                }
+            }
+            _ => (min, max),
+        }
+    }
+
+    /// The amount a divided-damage spell splits, known as it is cast.
+    pub(crate) fn divided_total(amount: &cardir::Amount, x: u32) -> i32 {
+        match amount {
+            cardir::Amount::Const(n) => *n,
+            cardir::Amount::X => x as i32,
+            _ => 0,
+        }
+    }
+
+    /// Every way to split `total` into `parts` positive shares, in order.
+    pub(crate) fn divisions(total: i32, parts: usize) -> Vec<Vec<i32>> {
+        fn go(left: i32, parts: usize, out: &mut Vec<Vec<i32>>, cur: &mut Vec<i32>) {
+            if parts == 1 {
+                if left >= 1 {
+                    cur.push(left);
+                    out.push(cur.clone());
+                    cur.pop();
+                }
+                return;
+            }
+            for n in 1..=(left - parts as i32 + 1).max(0) {
+                cur.push(n);
+                go(left - n, parts - 1, out, cur);
+                cur.pop();
+            }
+        }
+        let mut out = Vec::new();
+        if parts >= 1 && total >= parts as i32 {
+            go(total, parts, &mut out, &mut Vec::new());
+        }
+        out
+    }
+
+    /// The divided-damage targets and amount of a cast in progress, once
+    /// its specs are all chosen and more than one target is to share.
+    fn pending_division(def: &CardDef, modes: &[u8], targets: &[Target], x: u32) -> Option<(Vec<Target>, i32)> {
+        let (i, amount) = Self::divided_spec(def)?;
+        let specs = Self::cast_specs(def, modes);
+        let groups = Self::group_targets(&specs, targets);
+        let group = groups.get(i as usize)?.clone();
+        Some((group, Self::divided_total(amount, x)))
     }
 
     /// The modes still on offer while casting: `(index, text)`, plus
@@ -145,6 +215,7 @@ impl Game {
             targets: Vec::new(),
             spec: 0,
             x,
+            division: None,
         });
         self.priority = None;
         self.advance_casting();
@@ -162,6 +233,7 @@ impl Game {
                 targets,
                 spec,
                 x,
+                division,
             }) = &self.pending
             else {
                 return;
@@ -172,12 +244,21 @@ impl Game {
             }
             let specs = Self::cast_specs(&def, modes);
             if *spec >= specs.len() {
+                // Divided damage over several targets waits for the split;
+                // over one target (or none) it needs no question.
+                let division = match (division, Self::pending_division(&def, modes, targets, *x)) {
+                    (Some(d), _) => d.clone(),
+                    (None, Some((group, _))) if group.len() > 1 => return,
+                    (None, Some((group, total))) => vec![total; group.len()],
+                    (None, None) => Vec::new(),
+                };
                 let (seat, object, modes, targets, x) = (*seat, *object, modes.clone(), targets.clone(), *x);
                 self.pending = None;
-                self.finish_cast(seat, object, modes, targets, x);
+                self.finish_cast(seat, object, modes, targets, x, division);
                 return;
             }
-            let (inner, min, _) = specs[*spec].spec_bounds();
+            let (inner, _, _) = specs[*spec].spec_bounds();
+            let (min, _) = Self::cast_spec_bounds(&def, *spec, *x);
             let ctx = Ctx::simple(*seat, Some(*object));
             if min == 0 && self.targets_for(inner, &ctx).is_empty() {
                 // Nothing to pick: the spec takes no targets.
@@ -217,8 +298,57 @@ impl Game {
         Ok(())
     }
 
+    /// The ways the divided damage of the cast in progress may be split, if
+    /// that is what it is waiting for.
+    pub(crate) fn division_options(&self) -> Vec<Vec<i32>> {
+        let Some(PendingChoice::Casting {
+            object,
+            modes,
+            targets,
+            spec,
+            x,
+            division: None,
+            ..
+        }) = &self.pending
+        else {
+            return Vec::new();
+        };
+        let def = self.card_def(*object);
+        if *spec < Self::cast_specs(def, modes).len() {
+            return Vec::new();
+        }
+        match Self::pending_division(def, modes, targets, *x) {
+            Some((group, total)) if group.len() > 1 => Self::divisions(total, group.len()),
+            _ => Vec::new(),
+        }
+    }
+
+    /// The targets the cast in progress is dividing damage over.
+    pub fn dividing_over(&self) -> Vec<Target> {
+        let Some(PendingChoice::Casting {
+            object, modes, targets, x, ..
+        }) = &self.pending
+        else {
+            return Vec::new();
+        };
+        Self::pending_division(self.card_def(*object), modes, targets, *x)
+            .map(|(g, _)| g)
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn answer_cast_division(&mut self, amounts: &[i32]) -> Result<(), RulesError> {
+        if !self.division_options().iter().any(|d| d == amounts) {
+            return Err(RulesError::illegal("that is not a legal division"));
+        }
+        if let Some(PendingChoice::Casting { division, .. }) = &mut self.pending {
+            *division = Some(amounts.to_vec());
+        }
+        self.advance_casting();
+        Ok(())
+    }
+
     /// The spell goes on the stack with everything chosen; the caster gets priority.
-    fn finish_cast(&mut self, seat: Seat, object: ObjectId, modes: Vec<u8>, targets: Vec<Target>, x: u32) {
+    fn finish_cast(&mut self, seat: Seat, object: ObjectId, modes: Vec<u8>, targets: Vec<Target>, x: u32, division: Vec<i32>) {
         self.objects[object].controller = seat;
         self.move_object(object, Zone::Stack);
         self.stack.push(StackObject {
@@ -228,6 +358,7 @@ impl Game {
             kind: StackKind::Spell,
             modes,
             x,
+            division,
         });
         self.emit(Event::Cast { seat, object, targets });
         self.give_priority(seat);

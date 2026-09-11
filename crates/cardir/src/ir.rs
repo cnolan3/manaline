@@ -135,9 +135,14 @@ pub enum Cost {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum Effect {
+    /// "~ deals 3 damage to any target", or with `divided`, "~ deals 3
+    /// damage divided as you choose among one, two, or three targets": the
+    /// caster splits the amount over the targets of that spec as they cast.
     DealDamage {
         amount: Amount,
         to: Ref,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        divided: bool,
     },
     Destroy {
         target: Ref,
@@ -558,6 +563,20 @@ pub enum Condition {
     LifeAtLeast { player: PlayerRef, amount: i32 },
     /// "you have 10 or less life"
     LifeAtMost { player: PlayerRef, amount: i32 },
+}
+
+/// The target spec a divided-damage effect splits its damage over, and
+/// the amount, if these effects have one.
+pub fn divided_damage(effects: &[Effect]) -> Option<(u8, &Amount)> {
+    effects.iter().find_map(|e| match e {
+        Effect::DealDamage {
+            amount,
+            to: Ref::Target(i),
+            divided: true,
+        } => Some((*i, amount)),
+        Effect::Sequence(es) => divided_damage(es),
+        _ => None,
+    })
 }
 
 impl PlayerRef {

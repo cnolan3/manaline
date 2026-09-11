@@ -412,6 +412,35 @@ impl R<'_> {
         }
     }
 
+    /// "one, two, or three targets" / "any number of target creatures":
+    /// the spec divided damage is spread over.
+    fn divided_among(&mut self, r: &Ref) -> String {
+        let Ref::Target(i) = r else {
+            return self.object(r);
+        };
+        self.mentioned_targets.insert(*i);
+        let Some(spec) = self.targets.get(*i as usize) else {
+            return format!("target #{i}");
+        };
+        let (f, _, _) = spec.spec_bounds();
+        let what = match f {
+            Filter::Any => "targets".to_string(),
+            f => format!("target {}", self.noun(f, Number::Plural)),
+        };
+        match spec {
+            Filter::Targets(Quantity::UpTo(n), _) if *n >= 2 => {
+                let words: Vec<String> = (1..=*n).map(number_word).collect();
+                let (last, init) = words.split_last().unwrap();
+                if init.len() == 1 {
+                    format!("{} or {last} {what}", init[0])
+                } else {
+                    format!("{}, or {last} {what}", init.join(", "))
+                }
+            }
+            _ => format!("any number of {what}"),
+        }
+    }
+
     fn this(&mut self) -> String {
         if self.in_trigger || self.this_mentioned {
             "it".into()
@@ -619,7 +648,12 @@ impl R<'_> {
     /// One effect as a clause without capital or period, e.g. "draw a card".
     fn clause(&mut self, e: &Effect) -> String {
         match e {
-            Effect::DealDamage { amount, to } => {
+            Effect::DealDamage { amount, to, divided: true } => {
+                let src = self.this();
+                let among = self.divided_among(to);
+                format!("{src} deals {} damage divided as you choose among {among}", amount_phrase(amount))
+            }
+            Effect::DealDamage { amount, to, .. } => {
                 let src = self.this();
                 let to_s = if self.multi_target(to) {
                     format!("each of {}", self.object(to))

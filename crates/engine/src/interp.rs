@@ -93,7 +93,7 @@ impl Game {
 
     fn apply_effect(&mut self, ctx: &Ctx, specs: &[Filter], effect: &Effect) -> Vec<Frame> {
         match effect {
-            Effect::DealDamage { amount, to } => {
+            Effect::DealDamage { amount, to, divided } => {
                 let n = self.eval_amount(amount, ctx);
                 let Some(source) = ctx.this else {
                     return Vec::new();
@@ -103,7 +103,12 @@ impl Game {
                         Target::Object(o) => DamageTarget::Object(o),
                         Target::Player(s) => DamageTarget::Player(s),
                     };
-                    self.deal_damage(source, dt, n, false);
+                    let share = if *divided {
+                        ctx.division.iter().find(|(t, _)| *t == target).map(|(_, n)| *n).unwrap_or(n)
+                    } else {
+                        n
+                    };
+                    self.deal_damage(source, dt, share, false);
                 }
             }
             Effect::Destroy { target } => {

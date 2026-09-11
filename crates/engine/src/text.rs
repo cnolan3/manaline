@@ -406,6 +406,19 @@ pub fn describe_action(game: &Game, a: &Action) -> String {
                 .unwrap_or_else(|| format!("Choose option {mode}")),
             _ => format!("Choose option {mode}"),
         },
+        Action::Divide { amounts } => {
+            let over = game.dividing_over();
+            let list: Vec<String> = amounts
+                .iter()
+                .enumerate()
+                .map(|(i, n)| match over.get(i) {
+                    Some(crate::action::Target::Object(o)) => format!("{n} to {}", obj(game, *o)),
+                    Some(crate::action::Target::Player(p)) => format!("{n} to {}", who(game, *p)),
+                    None => n.to_string(),
+                })
+                .collect();
+            format!("Divide: {}", list.join(", "))
+        }
         Action::Discard { objects } => {
             let list: Vec<String> = objects.iter().map(|o| obj(game, *o)).collect();
             format!("Discard {}", list.join(", "))

@@ -348,6 +348,7 @@ pub enum Action {
     AssignCombatDamage { attacker: ObjectId, assignments: Vec<(DamageTarget, i32)> },  // only when a choice exists
     ChooseTargets { targets: Vec<Target> },         // answering a PendingChoice
     ChooseMode { mode: u8 },
+    Divide { amounts: Vec<i32> },                    // split divided damage over the targets just chosen
     Discard { objects: Vec<ObjectId> },             // cleanup step hand-size
     Mulligan { keep: bool },
     BottomCards { objects: Vec<ObjectId> },         // London mulligan: after keeping, put N on the bottom
@@ -361,7 +362,7 @@ Two details worth getting right up front:
 
 **Mana payment is explicit.** `CastSpell` carries a `ManaPayment` naming which permanents to tap and which pool mana to spend. For the TUI this is auto-filled by a solver when unambiguous and prompted otherwise. For the agent, `legal_actions` enumerates one `CastSpell` per distinct legal payment when the cast is actually possible, and the state view shows `castable: true/false` per card. This avoids the agent trying to cast things it can't afford.
 
-**Targets are chosen at cast time, with one exception.** `legal_actions` enumerates `CastSpell` with each legal target combination for spells with ≤ 2 targets, which covers almost the whole v1 cube. This is simpler for agents than a two-step "cast, then choose" flow. The exception is the spells that can't be enumerated that way — modal spells, and spells whose target spec takes a caster-chosen number ("up to two target creatures"): those pay their cost first and then answer a `PendingChoice::Casting` for their modes and each target spec in turn (§4.1.1). Otherwise `PendingChoice` is reserved for choices that happen on resolution (e.g., "choose a creature to sacrifice"), for mulligan bottoming, and for combat damage assignment.
+**Targets are chosen at cast time, with one exception.** `legal_actions` enumerates `CastSpell` with each legal target combination for spells with ≤ 2 targets, which covers almost the whole v1 cube. This is simpler for agents than a two-step "cast, then choose" flow. The exception is the spells that can't be enumerated that way — modal spells, and spells whose target spec takes a caster-chosen number ("up to two target creatures"): those pay their cost first and then answer a `PendingChoice::Casting` for their modes and each target spec in turn, and — for damage "divided as you choose" — a `Divide` naming each chosen target's share (§4.1.1). Otherwise `PendingChoice` is reserved for choices that happen on resolution (e.g., "choose a creature to sacrifice"), for mulligan bottoming, and for combat damage assignment.
 
 **Combat damage assignment follows current rules, not the pre-Foundations ones.** The Foundations rules update (November 2024) removed "damage assignment order": an attacker blocked by several creatures divides its damage among them however its controller likes, with only trample still requiring lethal damage to every blocker before any goes to the player. So there is no `OrderBlockers`. Instead: when an attacker has exactly one blocker and no trample, the engine assigns damage automatically. Otherwise the attacker's controller gets `AssignCombatDamage` in `legal_actions` and the engine enumerates a small set of sensible splits (all to each blocker; lethal to each in the declared order then remainder to the next / to the player) as suggestions, and any other split that satisfies the rule is accepted under the division carve-out at the top of §3. The default the TUI offers on `Enter` is "lethal to each blocker in the order they were declared, remainder to the player if trample".
 
@@ -561,7 +562,7 @@ pub struct Ability {
 pub enum Cost { Mana(ManaCost), Tap, SacrificeThis, Sacrifice(Filter), PayLife(i32), Discard(i32) }
 
 pub enum Effect {
-    DealDamage { amount: Amount, to: Ref },
+    DealDamage { amount: Amount, to: Ref, divided: bool },   // divided: split "as you choose" among the spec's targets
     Destroy { target: Ref },
     Exile { target: Ref, until: Option<Duration> },      // Some(UntilThisLeaves): "until ~ leaves the battlefield"
     Draw { player: PlayerRef, count: Amount },
@@ -668,7 +669,7 @@ At that point the game pauses: the continuation — frame stack and all — is s
 - **`Choose`** — pick between `min` and `max` of a list of objects, with a verb for the menu: the `Chosen` in "return a permanent you control", the permanents a `Sacrifice` takes, the cards a `Discard` takes. Answered with `ChooseTargets`.
 - **`ChooseOption`** — pick one of a few labelled options: the two branches of a `May`, or — for a `May` over `PayMana` — one entry per distinct way to pay, plus "Don't pay". Answered with `ChooseMode`.
 - **`ChooseTargets`** — a fired trigger needs its targets before it goes on the stack (`crates/engine/src/triggers.rs`).
-- **`Casting`** — the two-step cast, for a modal spell or one whose target spec takes a caster-chosen number ("up to two target creatures"). Mana is paid first; then modes, then each spec in turn, while the card is still in hand (`crates/engine/src/casting.rs`). Every other spell has its targets chosen up front (§3.2).
+- **`Casting`** — the two-step cast, for a modal spell or one whose target spec takes a caster-chosen number ("up to two target creatures"). Mana is paid first; then modes, then each spec in turn, while the card is still in hand (`crates/engine/src/casting.rs`). A spell whose damage is "divided as you choose" then asks for the split with a `Divide`: one share per target in the order they were chosen, each at least 1 — so the spec takes at least one target and at most one per point, and a single target gets it all without a question. The split rides on the stack object and, at resolution, `Ctx::division` gives each target its share; a target that has become illegal simply gets none. Every other spell has its targets chosen up front (§3.2).
 
 A frame that turns out to contain no real decision is settled on the spot and never pauses: nothing legal to pick binds the empty list, and exactly as many options as the minimum takes them all.
 
