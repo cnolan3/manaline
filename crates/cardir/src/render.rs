@@ -28,6 +28,11 @@ struct R<'a> {
     bound_this_sentence: BTreeSet<String>,
     /// Targets already named in this ability, which read as "it" / "those creatures" after.
     mentioned_targets: BTreeSet<u8>,
+    /// The player whose optional action is being rendered ("target opponent
+    /// may sacrifice a creature"): their clauses drop the subject.
+    imperative: Option<PlayerRef>,
+    /// The player a "may" just named, who reads as "they" / "that player" after.
+    they: Option<PlayerRef>,
 }
 
 impl<'a> R<'a> {
@@ -40,6 +45,8 @@ impl<'a> R<'a> {
             bound: BTreeMap::new(),
             bound_this_sentence: BTreeSet::new(),
             mentioned_targets: BTreeSet::new(),
+            imperative: None,
+            they: None,
         }
     }
 
@@ -117,6 +124,14 @@ pub fn render_spell(card: &Card) -> String {
 pub fn render_mode(card: &Card, mode: &Mode) -> String {
     let mut r = R::new(card, &mode.targets, false);
     r.sentences(&mode.effects)
+}
+
+/// The optional action of a "may" as its chooser reads it ("Sacrifice a
+/// creature", "Pay 2 life"), for the menu that asks them.
+pub fn render_option(card: &Card, targets: &[Filter], who: &PlayerRef, effect: &Effect) -> String {
+    let mut r = R::new(card, targets, false);
+    r.imperative = Some(who.clone());
+    capitalize(&r.clause(effect))
 }
 
 fn spell_lines(card: &Card, spell: &Spell) -> Vec<String> {
@@ -470,6 +485,9 @@ impl R<'_> {
     }
 
     fn player_object(&self, p: &PlayerRef) -> String {
+        if self.they.as_ref() == Some(p) && !p.is_you() {
+            return "that player".into();
+        }
         match p {
             PlayerRef::You => "you".into(),
             PlayerRef::TargetPlayer(_) => "target player".into(),
@@ -477,16 +495,56 @@ impl R<'_> {
             PlayerRef::EachOpponent => "each opponent".into(),
             PlayerRef::EachPlayer => "each player".into(),
             PlayerRef::Triggering => "that player".into(),
-            PlayerRef::Controller(_) => "that creature's controller".into(),
+            PlayerRef::Controller(r) => {
+                if self.is_spell_ref(r) {
+                    "its controller".into()
+                } else {
+                    "that creature's controller".into()
+                }
+            }
             PlayerRef::Owner(_) => "its owner".into(),
         }
     }
 
-    /// Subject phrase and whether the verb is second person ("you gain") or third ("target player gains").
+    /// Whether a ref points at a spell on the stack, so its controller is "its controller".
+    fn is_spell_ref(&self, r: &Ref) -> bool {
+        fn spell(f: &Filter) -> bool {
+            match f {
+                Filter::Spell => true,
+                Filter::Targets(_, f) | Filter::Not(f) => spell(f),
+                Filter::And(fs) | Filter::Or(fs) => fs.iter().any(spell),
+                _ => false,
+            }
+        }
+        match r {
+            Ref::Target(i) => self.targets.get(*i as usize).map(spell).unwrap_or(false),
+            _ => false,
+        }
+    }
+
+    /// Subject phrase and whether the verb takes its base form ("you gain",
+    /// "they gain", or no subject at all in an imperative clause) rather
+    /// than third person ("target player gains").
     fn player_subject(&self, p: &PlayerRef) -> (String, bool) {
+        if self.imperative.as_ref() == Some(p) {
+            return (String::new(), true);
+        }
+        if self.they.as_ref() == Some(p) && !p.is_you() {
+            return ("they".into(), true);
+        }
         match p {
             PlayerRef::You => ("you".into(), true),
             other => (self.player_object(other), false),
+        }
+    }
+
+    /// "{subject} {verb}" with the subject dropped in imperative clauses.
+    fn subj_verb(subj: &str, second: bool, base: &str, third: &str) -> String {
+        let v = if second { base } else { third };
+        if subj.is_empty() {
+            v.to_string()
+        } else {
+            format!("{subj} {v}")
         }
     }
 
@@ -535,24 +593,20 @@ impl R<'_> {
         match c {
             Condition::LifeAtLeast { player, amount } => {
                 let (subj, second) = self.player_subject(player);
-                format!("{subj} {} {amount} or more life", if second { "have" } else { "has" })
+                format!("{} {amount} or more life", Self::subj_verb(&subj, second, "have", "has"))
             }
             Condition::LifeAtMost { player, amount } => {
                 let (subj, second) = self.player_subject(player);
-                format!("{subj} {} {amount} or less life", if second { "have" } else { "has" })
+                format!("{} {amount} or less life", Self::subj_verb(&subj, second, "have", "has"))
             }
             Condition::Controls { player, filter, at_least } => {
                 let (subj, second) = self.player_subject(player);
-                let control = if second { "control" } else { "controls" };
+                let control = Self::subj_verb(&subj, second, "control", "controls");
                 if *at_least <= 1 {
                     let n = self.some_noun(filter);
-                    format!("{subj} {control} {n}")
+                    format!("{control} {n}")
                 } else {
-                    format!(
-                        "{subj} {control} {} or more {}",
-                        number_word(*at_least),
-                        self.noun(filter, Number::Plural)
-                    )
+                    format!("{control} {} or more {}", number_word(*at_least), self.noun(filter, Number::Plural))
                 }
             }
         }
@@ -600,13 +654,19 @@ impl R<'_> {
             }
             Effect::GainLife { player, amount } => {
                 let (subj, second) = self.player_subject(player);
-                let verb = if second { "gain" } else { "gains" };
-                format!("{subj} {verb} {} life", amount_phrase(amount))
+                format!("{} {} life", Self::subj_verb(&subj, second, "gain", "gains"), amount_phrase(amount))
             }
             Effect::LoseLife { player, amount } => {
                 let (subj, second) = self.player_subject(player);
-                let verb = if second { "lose" } else { "loses" };
-                format!("{subj} {verb} {} life", amount_phrase(amount))
+                format!("{} {} life", Self::subj_verb(&subj, second, "lose", "loses"), amount_phrase(amount))
+            }
+            Effect::PayLife { player, amount } => {
+                let (subj, second) = self.player_subject(player);
+                format!("{} {} life", Self::subj_verb(&subj, second, "pay", "pays"), amount_phrase(amount))
+            }
+            Effect::PayMana { player, cost } => {
+                let (subj, second) = self.player_subject(player);
+                format!("{} {cost}", Self::subj_verb(&subj, second, "pay", "pays"))
             }
             Effect::ModifyPt {
                 target,
@@ -781,9 +841,35 @@ impl R<'_> {
                 parts.join(", then ")
             }
             Effect::Conditional { .. } => self.sentence(e).trim_end_matches('.').to_string(),
-            Effect::May { effect, then, otherwise } => {
-                let mut s = format!("you may {}", self.clause(effect));
-                for (lead, effects) in [("If you do", then), ("If you don't", otherwise)] {
+            Effect::May {
+                who,
+                effect,
+                then,
+                otherwise,
+                unless,
+            } => {
+                if *unless {
+                    // "Counter target spell unless its controller pays {3}."
+                    let body: Vec<String> = otherwise.iter().map(|e| self.clause(e)).collect();
+                    let pays = self.clause(effect);
+                    return format!("{} unless {pays}", body.join(", then "));
+                }
+                let head = if who.is_you() {
+                    "you may".to_string()
+                } else {
+                    format!("{} may", self.player_object(who))
+                };
+                let was = self.imperative.replace(who.clone());
+                let action = self.clause(effect);
+                self.imperative = was;
+                let mut s = format!("{head} {action}");
+                let (did, didnt) = if who.is_you() {
+                    ("If you do", "If you don't")
+                } else {
+                    ("If they do", "If they don't")
+                };
+                let they_was = self.they.replace(who.clone());
+                for (lead, effects) in [(did, then), (didnt, otherwise)] {
                     for (i, e) in effects.iter().enumerate() {
                         let c = self.clause(e);
                         if i == 0 {
@@ -793,6 +879,7 @@ impl R<'_> {
                         }
                     }
                 }
+                self.they = they_was;
                 s
             }
             Effect::Unsupported { reason } => format!("[unsupported: {reason}]"),

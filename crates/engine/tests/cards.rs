@@ -39,6 +39,9 @@ fn db_with_extras() -> Arc<engine::CardDb> {
         r#"Card(name: "Test Volley", cost: "{R}", types: [Instant], text: "Test Volley deals 2 damage to each of up to two target creatures.", spell: Spell(targets: [Targets(UpTo(2), Creature)], effects: [DealDamage(amount: Const(2), to: Target(0))]))"#,
         r#"Card(name: "Test Ward", cost: "{W}", types: [Instant], text: "Target creature gets +2/+2 until your next turn.", spell: Spell(targets: [Creature], effects: [ModifyPt(target: Target(0), power: Const(2), toughness: Const(2), until: UntilYourNextTurn)]))"#,
         r#"Card(name: "Test Breather", cost: "{R}", types: [Creature], subtypes: ["Elemental"], pt: (1, 1), text: "{X}: Test Breather gets +X/+0 until end of turn.", activated: [Ability(cost: [Mana("{X}")], effects: [ModifyPt(target: This, power: X, toughness: Const(0), until: EndOfTurn)])])"#,
+        r#"Card(name: "Test Extortion", cost: "{1}{B}", types: [Sorcery], text: "Target opponent may sacrifice a creature. If they don't, they lose 3 life.", spell: Spell(targets: [Opponent], effects: [May(who: TargetOpponent(0), effect: Sacrifice(player: TargetOpponent(0), filter: Creature, count: Const(1)), otherwise: [LoseLife(player: TargetOpponent(0), amount: Const(3))])]))"#,
+        r#"Card(name: "Test Tribute", cost: "{B}", types: [Sorcery], text: "Each opponent may discard a card. If they don't, they lose 2 life.", spell: Spell(effects: [May(who: EachOpponent, effect: Discard(player: EachOpponent, count: Const(1)), otherwise: [LoseLife(player: EachOpponent, amount: Const(2))])]))"#,
+        r#"Card(name: "Test Tithe", cost: "{B}", types: [Sorcery], text: "You may pay 2 life. If you do, draw a card.", spell: Spell(effects: [May(effect: PayLife(player: You, amount: Const(2)), then: [Draw(player: You, count: Const(1))])]))"#,
         r#"Card(name: "Test Rouse", cost: "{G}", types: [Instant], text: "Tap a creature you control, then it gets +2/+2 until end of turn.", spell: Spell(effects: [Sequence([Tap(target: Chosen(who: You, filter: And([Creature, ControlledBy(You)]), count: Exactly(1), bind: "c")), ModifyPt(target: Named("c"), power: Const(2), toughness: Const(2), until: EndOfTurn)])]))"#,
     ];
     let mut all = cards::core_ir();
@@ -1513,4 +1516,115 @@ fn big_mana_producers_are_offered_and_custom_payments_are_accepted() {
         matches!(game.apply(Seat(0), &short), Err(RulesError::IllegalAction { .. })),
         "tapped source"
     );
+}
+
+#[test]
+fn a_target_opponent_may_decides_and_the_pronouns_follow_them() {
+    let mut game = TestGame::new(db_with_extras(), 2)
+        .battlefield(Seat(0), "Swamp")
+        .battlefield(Seat(0), "Swamp")
+        .battlefield(Seat(1), "Grizzly Bears")
+        .hand(Seat(0), "Test Extortion")
+        .library(Seat(0), &["Forest"; 4])
+        .build();
+    let bear = bf(&game, Seat(1), "Grizzly Bears");
+    cast(&mut game, Seat(0), "Test Extortion", &[Target::Player(Seat(1))]);
+    resolve_top(&mut game);
+    assert!(
+        matches!(game.pending, Some(PendingChoice::ChooseOption { seat: Seat(1), .. })),
+        "the opponent decides: {:?}",
+        game.pending
+    );
+    let labels: Vec<String> = game
+        .legal_actions(Seat(1))
+        .iter()
+        .filter(|a| matches!(a, Action::ChooseMode { .. }))
+        .map(|a| engine::text::describe_action(&game, a))
+        .collect();
+    assert_eq!(labels, vec!["Sacrifice a creature".to_string(), "Don't".to_string()]);
+    game.apply(Seat(1), &Action::ChooseMode { mode: 1 }).unwrap();
+    assert_eq!(game.players[1].life, 17, "they lose 3 life");
+    assert_eq!(game.players[0].life, 20);
+    assert_eq!(game.objects[bear].zone, Zone::Battlefield);
+
+    let mut game = TestGame::new(db_with_extras(), 2)
+        .battlefield(Seat(0), "Swamp")
+        .battlefield(Seat(0), "Swamp")
+        .battlefield(Seat(1), "Grizzly Bears")
+        .hand(Seat(0), "Test Extortion")
+        .library(Seat(0), &["Forest"; 4])
+        .build();
+    let bear = bf(&game, Seat(1), "Grizzly Bears");
+    cast(&mut game, Seat(0), "Test Extortion", &[Target::Player(Seat(1))]);
+    resolve_top(&mut game);
+    game.apply(Seat(1), &Action::ChooseMode { mode: 0 }).unwrap();
+    // Only one creature: the sacrifice needs no pick.
+    assert_eq!(game.objects[bear].zone, Zone::Graveyard);
+    assert_eq!(game.players[1].life, 20);
+    assert!(game.pending.is_none());
+}
+
+#[test]
+fn each_opponent_may_asks_each_in_turn_and_scopes_the_branch_to_them() {
+    let mut game = TestGame::new(db_with_extras(), 3)
+        .battlefield(Seat(0), "Swamp")
+        .hand(Seat(0), "Test Tribute")
+        .hand(Seat(1), "Forest")
+        .hand(Seat(2), "Forest")
+        .library(Seat(0), &["Forest"; 4])
+        .build();
+    cast(&mut game, Seat(0), "Test Tribute", &[]);
+    resolve_top(&mut game);
+    assert!(
+        matches!(game.pending, Some(PendingChoice::ChooseOption { seat: Seat(1), .. })),
+        "{:?}",
+        game.pending
+    );
+    game.apply(Seat(1), &Action::ChooseMode { mode: 0 }).unwrap();
+    assert_eq!(game.players[1].hand.len(), 0, "seat 1 discarded");
+    assert_eq!(game.players[1].life, 20);
+    assert!(
+        matches!(game.pending, Some(PendingChoice::ChooseOption { seat: Seat(2), .. })),
+        "{:?}",
+        game.pending
+    );
+    game.apply(Seat(2), &Action::ChooseMode { mode: 1 }).unwrap();
+    assert_eq!(game.players[2].hand.len(), 1);
+    assert_eq!(game.players[2].life, 18, "only the decliner loses life");
+    assert_eq!(game.players[1].life, 20);
+    assert_eq!(game.players[0].life, 20);
+    assert!(game.pending.is_none());
+}
+
+#[test]
+fn paying_life_is_only_offered_when_affordable() {
+    let mut game = TestGame::new(db_with_extras(), 2)
+        .battlefield(Seat(0), "Swamp")
+        .hand(Seat(0), "Test Tithe")
+        .library(Seat(0), &["Forest"; 4])
+        .build();
+    cast(&mut game, Seat(0), "Test Tithe", &[]);
+    resolve_top(&mut game);
+    let labels: Vec<String> = game
+        .legal_actions(Seat(0))
+        .iter()
+        .filter(|a| matches!(a, Action::ChooseMode { .. }))
+        .map(|a| engine::text::describe_action(&game, a))
+        .collect();
+    assert_eq!(labels, vec!["Pay 2 life".to_string(), "Don't".to_string()]);
+    game.apply(Seat(0), &Action::ChooseMode { mode: 0 }).unwrap();
+    assert_eq!(game.players[0].life, 18);
+    assert_eq!(game.players[0].hand.len(), 1, "paid, so drew");
+
+    let mut game = TestGame::new(db_with_extras(), 2)
+        .battlefield(Seat(0), "Swamp")
+        .hand(Seat(0), "Test Tithe")
+        .library(Seat(0), &["Forest"; 4])
+        .build();
+    game.players[0].life = 1;
+    cast(&mut game, Seat(0), "Test Tithe", &[]);
+    resolve_top(&mut game);
+    assert!(game.pending.is_none(), "can't pay: no question");
+    assert_eq!(game.players[0].life, 1);
+    assert_eq!(game.players[0].hand.len(), 0);
 }

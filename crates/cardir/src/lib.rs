@@ -9,7 +9,7 @@ pub mod types;
 pub mod validate;
 
 pub use ir::*;
-pub use render::{normalise, render, render_ability, render_clause, render_mode, render_spell, render_trigger, round_trips};
+pub use render::{normalise, render, render_ability, render_clause, render_mode, render_option, render_spell, render_trigger, round_trips};
 pub use types::{CardType, Color, Keyword, ManaCost, Supertype};
 pub use validate::{validate, ValidationError};
 
@@ -204,6 +204,32 @@ Card(
             load(bad).unwrap_err().contains("no {X}"),
             "an ability's X is its own cost's, not the card's"
         );
+    }
+
+    #[test]
+    fn other_players_may_and_unless_render_like_oracle() {
+        let cases = [
+            r#"Card(name: "Mana Leak", cost: "{1}{U}", types: [Instant], text: "Counter target spell unless its controller pays {3}.", spell: Spell(targets: [Spell], effects: [May(who: Controller(Target(0)), effect: PayMana(player: Controller(Target(0)), cost: "{3}"), otherwise: [CounterSpell(target: Target(0))], unless: true)]))"#,
+            r#"Card(name: "Spell Pierce", cost: "{U}", types: [Instant], text: "Counter target noncreature spell unless its controller pays {2}.", spell: Spell(targets: [And([Spell, Not(Creature)])], effects: [May(who: Controller(Target(0)), effect: PayMana(player: Controller(Target(0)), cost: "{2}"), otherwise: [CounterSpell(target: Target(0))], unless: true)]))"#,
+            r#"Card(name: "Extortion", cost: "{1}{B}", types: [Sorcery], text: "Target opponent may sacrifice a creature. If they don't, they lose 3 life.", spell: Spell(targets: [Opponent], effects: [May(who: TargetOpponent(0), effect: Sacrifice(player: TargetOpponent(0), filter: Creature, count: Const(1)), otherwise: [LoseLife(player: TargetOpponent(0), amount: Const(3))])]))"#,
+            r#"Card(name: "Tithe", cost: "{B}", types: [Sorcery], text: "You may pay 2 life. If you do, draw a card.", spell: Spell(effects: [May(effect: PayLife(player: You, amount: Const(2)), then: [Draw(player: You, count: Const(1))])]))"#,
+            r#"Card(name: "Boon", cost: "{W}", types: [Sorcery], text: "You may gain 2 life. If you do, you lose 1 life.", spell: Spell(effects: [May(effect: GainLife(player: You, amount: Const(2)), then: [LoseLife(player: You, amount: Const(1))])]))"#,
+            r#"Card(name: "Tribute", cost: "{B}", types: [Sorcery], text: "Each opponent may discard a card. If they don't, they lose 2 life.", spell: Spell(effects: [May(who: EachOpponent, effect: Discard(player: EachOpponent, count: Const(1)), otherwise: [LoseLife(player: EachOpponent, amount: Const(2))])]))"#,
+        ];
+        for text in cases {
+            let card = load(text).unwrap_or_else(|e| panic!("{e}"));
+            if let Err((want, got)) = round_trips(&card) {
+                panic!("{}:\n  oracle:   {want}\n  rendered: {got}", card.name);
+            }
+        }
+        let card = load(r#"Card(name: "Extortion", cost: "{1}{B}", types: [Sorcery], text: "", spell: Spell(targets: [Opponent], effects: [May(who: TargetOpponent(0), effect: Sacrifice(player: TargetOpponent(0), filter: Creature, count: Const(1)))]))"#).unwrap();
+        let spell = card.spell.as_ref().unwrap();
+        let Effect::May { who, effect, .. } = &spell.effects[0] else {
+            panic!()
+        };
+        assert_eq!(render_option(&card, &spell.targets, who, effect), "Sacrifice a creature");
+        let bad = r#"Card(name: "U", cost: "{U}", types: [Instant], text: "", spell: Spell(targets: [Spell], effects: [May(who: Controller(Target(0)), effect: Draw(player: You, count: Const(1)), otherwise: [CounterSpell(target: Target(0))], unless: true)]))"#;
+        assert!(load(bad).unwrap_err().contains("PayMana or PayLife"));
     }
 
     #[test]

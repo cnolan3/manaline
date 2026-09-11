@@ -44,6 +44,16 @@ pub enum Frame {
     ChooseOption { seat: Seat, labels: Vec<String>, bind: String },
     /// Continue with the branch whose index is stored under `bind`.
     Branch { bind: String, branches: Vec<Vec<Effect>> },
+    /// After a "may pay" was answered: pay with the chosen payment and run
+    /// `then`, or run `otherwise` if the last option ("don't") was picked.
+    PayBranch {
+        seat: Seat,
+        cost: crate::types::ManaCost,
+        payments: Vec<crate::action::ManaPayment>,
+        bind: String,
+        then: Vec<Effect>,
+        otherwise: Vec<Effect>,
+    },
     /// Each of `seats`, in order, discards `count` cards (at random, or by choice).
     Discard { seats: Vec<Seat>, count: i32, random: bool },
     /// Each of `seats`, in order, sacrifices `count` permanents matching `filter`.
@@ -476,6 +486,23 @@ impl Game {
                                 next: 0,
                             });
                         }
+                    }
+                }
+                Frame::PayBranch {
+                    seat,
+                    cost,
+                    payments,
+                    bind,
+                    then,
+                    otherwise,
+                } => {
+                    let picked = k.ctx.options.get(&bind).map(|&i| i as usize).unwrap_or(payments.len());
+                    let effects = match payments.get(picked) {
+                        Some(payment) if self.pay_mana(seat, payment, &cost).is_ok() => then,
+                        _ => otherwise,
+                    };
+                    if !effects.is_empty() {
+                        k.frames.push(Frame::Effects { effects, next: 0 });
                     }
                 }
                 Frame::Discard { mut seats, count, random } => {

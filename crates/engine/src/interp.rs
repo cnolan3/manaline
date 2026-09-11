@@ -350,25 +350,99 @@ impl Game {
                     .into_iter()
                     .collect();
             }
-            Effect::May { effect, then, otherwise } => {
-                let label = match ctx.this {
-                    Some(this) => capitalize(&cardir::render_clause(&self.card_def(this).ir, specs, effect)),
-                    None => "Do it".into(),
-                };
-                let mut did = vec![(**effect).clone()];
-                did.extend(then.iter().cloned());
-                // The option is asked first (pushed last); the branch it picked runs after.
-                return vec![
-                    Frame::Branch {
-                        bind: MAY_BIND.into(),
-                        branches: vec![did, otherwise.clone()],
-                    },
-                    Frame::ChooseOption {
-                        seat: ctx.you,
-                        labels: vec![label, "Don't".into()],
-                        bind: MAY_BIND.into(),
-                    },
-                ];
+            Effect::May {
+                who,
+                effect,
+                then,
+                otherwise,
+                ..
+            } => {
+                // Each named player decides in turn; frames go on in reverse so
+                // the first decides first. For "each opponent" the branch runs
+                // for that one player, so its effects name them alone.
+                let seats = self.players_of(who, ctx);
+                let scoped = matches!(who, cardir::PlayerRef::EachOpponent | cardir::PlayerRef::EachPlayer);
+                let mut frames = Vec::new();
+                for &seat in seats.iter().rev() {
+                    if scoped {
+                        frames.push(Frame::SetCtx(ctx.clone()));
+                    }
+                    let mut did = vec![(**effect).clone()];
+                    did.extend(then.iter().cloned());
+                    match &**effect {
+                        Effect::PayMana { cost, .. } => {
+                            let payments = self.enumerate_payments(seat, cost);
+                            if payments.is_empty() {
+                                frames.push(Frame::Effects {
+                                    effects: otherwise.clone(),
+                                    next: 0,
+                                });
+                            } else {
+                                let mut labels: Vec<String> =
+                                    payments.iter().map(|p| format!("Pay {cost}{}", describe_payment(p))).collect();
+                                labels.push("Don't pay".into());
+                                frames.push(Frame::PayBranch {
+                                    seat,
+                                    cost: cost.clone(),
+                                    payments,
+                                    bind: MAY_BIND.into(),
+                                    then: then.clone(),
+                                    otherwise: otherwise.clone(),
+                                });
+                                frames.push(Frame::ChooseOption {
+                                    seat,
+                                    labels,
+                                    bind: MAY_BIND.into(),
+                                });
+                            }
+                        }
+                        Effect::PayLife { amount, .. } if self.players[seat.index()].life < self.eval_amount(amount, ctx) => {
+                            frames.push(Frame::Effects {
+                                effects: otherwise.clone(),
+                                next: 0,
+                            });
+                        }
+                        _ => {
+                            let label = match ctx.this {
+                                Some(this) => cardir::render_option(&self.card_def(this).ir, specs, who, effect),
+                                None => "Do it".into(),
+                            };
+                            frames.push(Frame::Branch {
+                                bind: MAY_BIND.into(),
+                                branches: vec![did, otherwise.clone()],
+                            });
+                            frames.push(Frame::ChooseOption {
+                                seat,
+                                labels: vec![label, "Don't".into()],
+                                bind: MAY_BIND.into(),
+                            });
+                        }
+                    }
+                    if scoped {
+                        let mut mine = ctx.clone();
+                        mine.chooser = Some(seat);
+                        frames.push(Frame::SetCtx(mine));
+                    }
+                }
+                return frames;
+            }
+            Effect::PayMana { player, cost } => {
+                // Outside a "may": pay with the first workable payment, if any.
+                for seat in self.players_of(player, ctx) {
+                    if let Some(payment) = self.enumerate_payments(seat, cost).into_iter().next() {
+                        let _ = self.pay_mana(seat, &payment, cost);
+                    }
+                }
+            }
+            Effect::PayLife { player, amount } => {
+                let n = self.eval_amount(amount, ctx);
+                for seat in self.players_of(player, ctx) {
+                    let from = self.players[seat.index()].life;
+                    if n > 0 && from >= n {
+                        self.players[seat.index()].life = from - n;
+                        self.emit(Event::LifeChanged { seat, from, to: from - n });
+                    }
+                }
             }
             Effect::Unsupported { .. } => {}
         }
@@ -503,10 +577,20 @@ impl Game {
     }
 }
 
-fn capitalize(s: &str) -> String {
-    let mut c = s.chars();
-    match c.next() {
-        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
-        None => String::new(),
+/// " (tap #3, #4)" / " (from pool {G})" for a payment's menu label.
+fn describe_payment(p: &crate::action::ManaPayment) -> String {
+    let mut parts = Vec::new();
+    if !p.tap.is_empty() {
+        let taps: Vec<String> = p.tap.iter().map(|t| t.to_string()).collect();
+        parts.push(format!("tap {}", taps.join(", ")));
+    }
+    if !p.from_pool.is_empty() {
+        let pool: String = p.from_pool.iter().map(|m| m.to_string()).collect();
+        parts.push(format!("from pool {pool}"));
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", parts.join(", "))
     }
 }

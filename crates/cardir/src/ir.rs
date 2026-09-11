@@ -247,14 +247,30 @@ pub enum Effect {
         at: DelayedAt,
         effects: Vec<Effect>,
     },
-    /// "You may [effect]. If you do, [then]. If you don't, [otherwise]."
-    /// The controller decides at resolution.
+    /// "[Who] may [effect]. If they do, [then]. If they don't, [otherwise]."
+    /// `who` decides at resolution (each of them in turn for "each opponent").
+    /// With `unless`, rendered the other way round: "[otherwise] unless
+    /// [who] pays [cost]", for a `PayMana` or `PayLife` effect.
     May {
+        #[serde(default, skip_serializing_if = "PlayerRef::is_you")]
+        who: PlayerRef,
         effect: Box<Effect>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         then: Vec<Effect>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         otherwise: Vec<Effect>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        unless: bool,
+    },
+    /// "pay {3}": the player spends mana, if they can.
+    PayMana {
+        player: PlayerRef,
+        cost: ManaCost,
+    },
+    /// "pay 2 life": the player loses that much life, if they have it.
+    PayLife {
+        player: PlayerRef,
+        amount: Amount,
     },
     /// Emitted by the ingestion tool for text the vocabulary cannot express.
     /// Never valid on a committed card.
@@ -336,8 +352,9 @@ pub enum Quantity {
     AnyNumber,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum PlayerRef {
+    #[default]
     You,
     TargetPlayer(u8),
     TargetOpponent(u8),
@@ -526,6 +543,12 @@ pub enum Condition {
     LifeAtLeast { player: PlayerRef, amount: i32 },
     /// "you have 10 or less life"
     LifeAtMost { player: PlayerRef, amount: i32 },
+}
+
+impl PlayerRef {
+    pub fn is_you(&self) -> bool {
+        *self == PlayerRef::You
+    }
 }
 
 impl Card {

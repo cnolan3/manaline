@@ -1,0 +1,17 @@
+Card(
+    name: "Mana Leak",
+    cost: "{1}{U}",
+    types: [Instant],
+    text: "Counter target spell unless its controller pays {3}.",
+    spell: Spell(
+        targets: [Spell],
+        effects: [
+            May(
+                who: Controller(Target(0)),
+                effect: PayMana(player: Controller(Target(0)), cost: "{3}"),
+                otherwise: [CounterSpell(target: Target(0))],
+                unless: true,
+            ),
+        ],
+    ),
+)

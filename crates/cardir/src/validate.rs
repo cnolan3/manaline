@@ -244,7 +244,22 @@ impl Ctx<'_> {
                     self.effect(e);
                 }
             }
-            Effect::May { effect, then, otherwise } => {
+            Effect::May {
+                who,
+                effect,
+                then,
+                otherwise,
+                unless,
+            } => {
+                self.player_ref(who);
+                if *unless {
+                    if !matches!(**effect, Effect::PayMana { .. } | Effect::PayLife { .. }) {
+                        self.err("`unless` needs a PayMana or PayLife effect");
+                    }
+                    if !then.is_empty() || otherwise.is_empty() {
+                        self.err("`unless` takes only `otherwise` effects");
+                    }
+                }
                 self.effect(effect);
                 for e in then {
                     self.effect(e);
@@ -252,6 +267,16 @@ impl Ctx<'_> {
                 for e in otherwise {
                     self.effect(e);
                 }
+            }
+            Effect::PayMana { player, cost } => {
+                self.player_ref(player);
+                if cost.is_free() || cost.has_x() {
+                    self.err("PayMana needs a fixed, non-empty cost");
+                }
+            }
+            Effect::PayLife { player, amount } => {
+                self.player_ref(player);
+                self.amount(amount);
             }
             Effect::Unsupported { reason } => self.err(format!("unsupported effect: {reason}")),
         }

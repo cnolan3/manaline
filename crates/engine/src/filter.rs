@@ -28,6 +28,10 @@ pub struct Ctx {
     /// The value announced for `{X}` when this was cast or activated.
     #[serde(default)]
     pub x: i32,
+    /// While one player of an "each opponent may" decides and acts, the
+    /// effects run for that player alone.
+    #[serde(default)]
+    pub chooser: Option<Seat>,
 }
 
 impl Ctx {
@@ -44,6 +48,7 @@ impl Ctx {
             bindings: BTreeMap::new(),
             options: BTreeMap::new(),
             x: 0,
+            chooser: None,
         }
     }
 
@@ -225,6 +230,9 @@ impl Game {
 
     /// The players a `PlayerRef` denotes right now.
     pub fn players_of(&self, p: &PlayerRef, ctx: &Ctx) -> Vec<Seat> {
+        if let (Some(c), PlayerRef::EachOpponent | PlayerRef::EachPlayer) = (ctx.chooser, p) {
+            return vec![c];
+        }
         match p {
             PlayerRef::You => vec![ctx.you],
             PlayerRef::TargetPlayer(i) | PlayerRef::TargetOpponent(i) => ctx

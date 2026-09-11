@@ -7,7 +7,7 @@
 
 use cardir::{Color, Keyword};
 use engine::testing::{advance_until, TestGame};
-use engine::{Action, AttackTarget, Game, ObjectId, PendingChoice, Seat, Target, Zone, EQUIP_ABILITY};
+use engine::{Action, AttackTarget, EventBase, Game, ObjectId, PendingChoice, Seat, Target, Zone, EQUIP_ABILITY};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -477,6 +477,70 @@ fn counter(name: &str, extra_draw: bool) {
     assert!(in_graveyard(&game, bears), "{name} counters the creature");
     if extra_draw {
         assert_eq!(hand_size(&game, ME), before, "{name} replaces itself");
+    }
+}
+
+/// "Counter target spell unless its controller pays {n}": with the mana
+/// spare the opponent may pay and keep the spell; without it, no question.
+fn soft_counter(name: &str, n: usize) {
+    soft_counter_spell(name, "Grizzly Bears", "Forest", n);
+}
+
+fn soft_counter_spell(name: &str, spell: &str, land: &str, n: usize) {
+    let tapped = |g: &Game| g.players[OPP.index()].battlefield.iter().filter(|o| g.objects[**o].tapped).count();
+    let countered = |g: &Game, id: ObjectId| g.log.iter().any(|e| matches!(e, EventBase::Countered { object } if *object == id));
+    for (spare, pays) in [(0, false), (n, false), (n, true)] {
+        let mut t = base()
+            .battlefield(OPP, land)
+            .battlefield(OPP, land)
+            .hand(OPP, spell)
+            .hand(ME, name)
+            .library(ME, &["Forest"; 4])
+            .starting_player(OPP);
+        for _ in 0..spare {
+            t = t.battlefield(OPP, "Mountain");
+        }
+        let mut game = t.build();
+        let their = hand(&game, OPP, spell);
+        let a = game
+            .legal_actions(OPP)
+            .into_iter()
+            .find(|a| matches!(a, Action::CastSpell { object, .. } if *object == their))
+            .unwrap();
+        game.apply(OPP, &a).unwrap();
+        let cast_cost = tapped(&game);
+        game.apply(OPP, &Action::PassPriority).unwrap();
+        cast_raw(&mut game, ME, name, &[Target::Object(their)]);
+        game.apply(ME, &Action::PassPriority).unwrap();
+        game.apply(OPP, &Action::PassPriority).unwrap();
+        if spare == 0 {
+            assert!(game.pending.is_none(), "{name}: nothing to pay with, no question");
+            assert!(countered(&game, their), "{name} counters the spell");
+            continue;
+        }
+        match &game.pending {
+            Some(PendingChoice::ChooseOption { seat, labels, .. }) => {
+                assert_eq!(*seat, OPP, "{name}: the spell's controller decides");
+                assert!(labels[0].starts_with("Pay {"), "{labels:?}");
+                assert_eq!(labels.last().unwrap(), "Don't pay");
+            }
+            other => panic!("{name}: expected the pay question, got {other:?}"),
+        }
+        let modes: Vec<Action> = game
+            .legal_actions(OPP)
+            .into_iter()
+            .filter(|a| matches!(a, Action::ChooseMode { .. }))
+            .collect();
+        let a = if pays { modes.first() } else { modes.last() }.unwrap().clone();
+        game.apply(OPP, &a).unwrap();
+        settle(&mut game);
+        if pays {
+            assert!(!countered(&game, their), "{name}: paid, so the spell resolves");
+            assert_eq!(tapped(&game), cast_cost + n, "{name}: the payment tapped {n} more lands");
+        } else {
+            assert!(countered(&game, their), "{name}: declined, so it is countered");
+            assert_eq!(tapped(&game), cast_cost);
+        }
     }
 }
 
@@ -1031,6 +1095,17 @@ fn registry() -> BTreeMap<&'static str, Check> {
     check!("Cancel", || counter("Cancel", false));
     check!("Counterspell", || counter("Counterspell", false));
     check!("Essence Scatter", || counter("Essence Scatter", false));
+    check!("Mana Leak", || soft_counter("Mana Leak", 3));
+    check!("Force Spike", || soft_counter("Force Spike", 1));
+    check!("Quench", || soft_counter("Quench", 2));
+    check!("Spell Pierce", || {
+        let game = base().hand(ME, "Spell Pierce").build();
+        assert!(!game
+            .legal_actions(ME)
+            .iter()
+            .any(|a| matches!(a, Action::CastSpell { object, .. } if *object == hand(&game, ME, "Spell Pierce"))));
+        soft_counter_spell("Spell Pierce", "Shock", "Mountain", 2);
+    });
     check!("Negate", || {
         let game = base().hand(ME, "Negate").build();
         // Nothing to counter: no legal cast (creature spells are not noncreature spells).

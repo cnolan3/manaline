@@ -1,0 +1,17 @@
+Card(
+    name: "Spell Pierce",
+    cost: "{U}",
+    types: [Instant],
+    text: "Counter target noncreature spell unless its controller pays {2}.",
+    spell: Spell(
+        targets: [And([Not(Creature), Spell])],
+        effects: [
+            May(
+                who: Controller(Target(0)),
+                effect: PayMana(player: Controller(Target(0)), cost: "{2}"),
+                otherwise: [CounterSpell(target: Target(0))],
+                unless: true,
+            ),
+        ],
+    ),
+)

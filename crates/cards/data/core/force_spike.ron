@@ -1,0 +1,17 @@
+Card(
+    name: "Force Spike",
+    cost: "{U}",
+    types: [Instant],
+    text: "Counter target spell unless its controller pays {1}.",
+    spell: Spell(
+        targets: [Spell],
+        effects: [
+            May(
+                who: Controller(Target(0)),
+                effect: PayMana(player: Controller(Target(0)), cost: "{1}"),
+                otherwise: [CounterSpell(target: Target(0))],
+                unless: true,
+            ),
+        ],
+    ),
+)
