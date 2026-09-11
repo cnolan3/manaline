@@ -37,6 +37,7 @@ fn db_with_extras() -> Arc<engine::CardDb> {
         r#"Card(name: "Test Brawler", cost: "{1}{R}", types: [Creature], subtypes: ["Bear"], pt: (2, 2), text: "Whenever this creature attacks or blocks, it gets +1/+1 until end of turn.", triggers: [Trigger(event: Any([ThisAttacks, ThisBlocks]), effects: [ModifyPt(target: This, power: Const(1), toughness: Const(1), until: EndOfTurn)])])"#,
         r#"Card(name: "Test Charm", cost: "{G}", types: [Instant], text: "Choose one or both —\n• Target creature gets +2/+2 until end of turn.\n• Draw a card.", spell: Spell(choose: OneOrBoth, modes: [Mode(targets: [Creature], effects: [ModifyPt(target: Target(0), power: Const(2), toughness: Const(2), until: EndOfTurn)]), Mode(effects: [Draw(player: You, count: Const(1))])]))"#,
         r#"Card(name: "Test Volley", cost: "{R}", types: [Instant], text: "Test Volley deals 2 damage to each of up to two target creatures.", spell: Spell(targets: [Targets(UpTo(2), Creature)], effects: [DealDamage(amount: Const(2), to: Target(0))]))"#,
+        r#"Card(name: "Test Ward", cost: "{W}", types: [Instant], text: "Target creature gets +2/+2 until your next turn.", spell: Spell(targets: [Creature], effects: [ModifyPt(target: Target(0), power: Const(2), toughness: Const(2), until: UntilYourNextTurn)]))"#,
         r#"Card(name: "Test Rouse", cost: "{G}", types: [Instant], text: "Tap a creature you control, then it gets +2/+2 until end of turn.", spell: Spell(effects: [Sequence([Tap(target: Chosen(who: You, filter: And([Creature, ControlledBy(You)]), count: Exactly(1), bind: "c")), ModifyPt(target: Named("c"), power: Const(2), toughness: Const(2), until: EndOfTurn)])]))"#,
     ];
     let mut all = cards::core_ir();
@@ -655,6 +656,23 @@ fn illegal_targets_are_pruned_one_by_one_and_only_a_total_loss_fizzles() {
     assert_eq!(game.objects[bears].zone, Zone::Hand);
     resolve_top(&mut game);
     assert_eq!(game.objects[giant].damage, 2, "the remaining target is still dealt damage");
+}
+
+#[test]
+fn until_your_next_turn_outlasts_the_opponents_turn() {
+    let mut game = TestGame::new(db_with_extras(), 2)
+        .battlefield(Seat(0), "Plains")
+        .battlefield(Seat(0), "Grizzly Bears")
+        .hand(Seat(0), "Test Ward")
+        .build();
+    let bears = bf(&game, Seat(0), "Grizzly Bears");
+    cast(&mut game, Seat(0), "Test Ward", &[Target::Object(bears)]);
+    resolve_top(&mut game);
+    assert_eq!(game.effective_stats(bears), Some((4, 4)));
+    advance_until(&mut game, |g| g.turn == 2 && g.phase == Phase::Main1).unwrap();
+    assert_eq!(game.effective_stats(bears), Some((4, 4)), "still on during the opponent's turn");
+    advance_until(&mut game, |g| g.turn == 3).unwrap();
+    assert_eq!(game.effective_stats(bears), Some((2, 2)), "gone as my next turn begins");
 }
 
 #[test]

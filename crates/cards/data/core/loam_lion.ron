@@ -1,0 +1,9 @@
+Card(
+    name: "Loam Lion",
+    cost: "{W}",
+    types: [Creature],
+    subtypes: ["Cat"],
+    pt: (1, 1),
+    text: "Loam Lion gets +1/+2 as long as you control a Forest.",
+    statics: [AsLongAs(condition: Controls(player: You, filter: Subtype("Forest"), at_least: 1), static_: PtBoost(filter: This, power: Const(1), toughness: Const(2)))],
+)

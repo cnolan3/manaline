@@ -65,6 +65,7 @@ impl Game {
             Filter::Player | Filter::Opponent => false,
             Filter::Spell => obj.zone == Zone::Stack,
             Filter::Other => ctx.this != Some(id),
+            Filter::This => ctx.this == Some(id),
             Filter::Attached => ctx.this.and_then(|t| self.objects.get(t)).and_then(|t| t.attached_to) == Some(id),
             Filter::Token => def.token,
             Filter::Subtype(s) => def.subtypes.iter().any(|x| x.eq_ignore_ascii_case(s)),
@@ -340,6 +341,12 @@ impl Game {
                     .count();
                 n as i32 >= *at_least
             }),
+            cardir::Condition::LifeAtLeast { player, amount } => {
+                self.players_of(player, ctx).iter().any(|s| self.players[s.index()].life >= *amount)
+            }
+            cardir::Condition::LifeAtMost { player, amount } => {
+                self.players_of(player, ctx).iter().any(|s| self.players[s.index()].life <= *amount)
+            }
         }
     }
 

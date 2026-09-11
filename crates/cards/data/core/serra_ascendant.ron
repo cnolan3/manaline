@@ -1,0 +1,10 @@
+Card(
+    name: "Serra Ascendant",
+    cost: "{W}",
+    types: [Creature],
+    subtypes: ["Human", "Monk"],
+    pt: (1, 1),
+    text: "Lifelink\nAs long as you have 30 or more life, Serra Ascendant gets +5/+5 and has flying.",
+    keywords: [Lifelink],
+    statics: [AsLongAs(condition: LifeAtLeast(player: You, amount: 30), static_: PtBoost(filter: This, power: Const(5), toughness: Const(5), keywords: [Flying]), leading: true)],
+)

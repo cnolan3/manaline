@@ -26,6 +26,8 @@ struct R<'a> {
     bound: BTreeMap<String, String>,
     /// Bindings introduced in the sentence being rendered, which read as "it".
     bound_this_sentence: BTreeSet<String>,
+    /// Targets already named in this ability, which read as "it" / "those creatures" after.
+    mentioned_targets: BTreeSet<u8>,
 }
 
 impl<'a> R<'a> {
@@ -37,6 +39,7 @@ impl<'a> R<'a> {
             this_mentioned: in_trigger,
             bound: BTreeMap::new(),
             bound_this_sentence: BTreeSet::new(),
+            mentioned_targets: BTreeSet::new(),
         }
     }
 
@@ -132,6 +135,15 @@ fn capitalize(s: &str) -> String {
     let mut c = s.chars();
     match c.next() {
         Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+        None => String::new(),
+    }
+}
+
+/// Lowercase the first letter, leaving "~" and proper nouns' later letters alone.
+fn uncapitalize(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        Some(f) => f.to_lowercase().collect::<String>() + c.as_str(),
         None => String::new(),
     }
 }
@@ -272,6 +284,7 @@ impl R<'_> {
             Filter::Spell => heads.push("spell".into()),
             Filter::Token => heads.push("token".into()),
             Filter::Other => adjectives.insert(0, "other".into()),
+            Filter::This => heads.push("~".into()),
             Filter::Attached => heads.push(
                 if self.card.is_equipment() {
                     "equipped creature"
@@ -385,10 +398,20 @@ impl R<'_> {
         }
     }
 
-    /// The object phrase for a `Ref` in object position.
+    /// The object phrase for a `Ref` in object position. A target already
+    /// named in this ability reads as "it" (or "those creatures").
     fn object(&mut self, r: &Ref) -> String {
         match r {
-            Ref::Target(i) => self.target_phrase(*i),
+            Ref::Target(i) => {
+                if self.mentioned_targets.insert(*i) {
+                    self.target_phrase(*i)
+                } else if self.multi_target(r) {
+                    let (f, _, _) = self.targets[*i as usize].spec_bounds();
+                    format!("those {}", self.noun(f, Number::Plural))
+                } else {
+                    "it".into()
+                }
+            }
             Ref::This => self.this(),
             Ref::Triggering => "that creature".into(),
             Ref::Each(f) => format!("each {}", self.noun(f, Number::Singular)),
@@ -502,15 +525,23 @@ impl R<'_> {
         }
     }
 
-    /// "you control an Elf", "you control two or more creatures".
+    /// "you control an Elf", "you control two or more creatures", "you have 30 or more life".
     fn condition(&mut self, c: &Condition) -> String {
         match c {
+            Condition::LifeAtLeast { player, amount } => {
+                let (subj, second) = self.player_subject(player);
+                format!("{subj} {} {amount} or more life", if second { "have" } else { "has" })
+            }
+            Condition::LifeAtMost { player, amount } => {
+                let (subj, second) = self.player_subject(player);
+                format!("{subj} {} {amount} or less life", if second { "have" } else { "has" })
+            }
             Condition::Controls { player, filter, at_least } => {
                 let (subj, second) = self.player_subject(player);
                 let control = if second { "control" } else { "controls" };
                 if *at_least <= 1 {
-                    let n = self.noun(filter, Number::Singular);
-                    format!("{subj} {control} {} {n}", article(&n))
+                    let n = self.some_noun(filter);
+                    format!("{subj} {control} {n}")
                 } else {
                     format!(
                         "{subj} {control} {} or more {}",
@@ -719,8 +750,19 @@ impl R<'_> {
                 };
                 let when = match until {
                     Duration::EndOfTurn => " this turn",
+                    Duration::UntilYourNextTurn => " until your next turn",
                 };
                 format!("{subj} {what}{when}")
+            }
+            Effect::SkipUntap { target } => {
+                let plural = self.multi_target(target) || matches!(target, Ref::Each(_));
+                let (subj, _) = self.subject(target);
+                let subj = subj.trim_end_matches(" each").to_string();
+                if plural {
+                    format!("{subj} don't untap during their controller's next untap step")
+                } else {
+                    format!("{subj} doesn't untap during its controller's next untap step")
+                }
             }
             Effect::Delayed { at, effects } => {
                 let parts: Vec<String> = effects.iter().map(|e| self.clause(e)).collect();
@@ -755,6 +797,7 @@ impl R<'_> {
     fn until(&self, d: &Duration) -> &'static str {
         match d {
             Duration::EndOfTurn => " until end of turn",
+            Duration::UntilYourNextTurn => " until your next turn",
         }
     }
 
@@ -793,12 +836,26 @@ impl R<'_> {
                     }
                 ))
             }
+            Static::AsLongAs {
+                condition,
+                static_,
+                leading,
+            } => {
+                let inner = self.static_(static_);
+                let inner = inner.trim_end_matches('.');
+                let cond = self.condition(condition);
+                if *leading {
+                    format!("As long as {cond}, {}.", uncapitalize(inner))
+                } else {
+                    format!("{inner} as long as {cond}.")
+                }
+            }
         }
     }
 
-    /// "Enchanted creature" is singular; everything else a static applies to is plural.
+    /// "Enchanted creature" and "~" are singular; everything else a static applies to is plural.
     fn static_subject(&self, f: &Filter) -> (String, Number) {
-        if matches!(f, Filter::Attached) {
+        if matches!(f, Filter::Attached | Filter::This) {
             (self.noun(f, Number::Singular), Number::Singular)
         } else {
             (self.noun(f, Number::Plural), Number::Plural)

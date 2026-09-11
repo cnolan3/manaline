@@ -1,0 +1,9 @@
+Card(
+    name: "Kird Ape",
+    cost: "{R}",
+    types: [Creature],
+    subtypes: ["Ape"],
+    pt: (1, 1),
+    text: "Kird Ape gets +1/+2 as long as you control a Forest.",
+    statics: [AsLongAs(condition: Controls(player: You, filter: Subtype("Forest"), at_least: 1), static_: PtBoost(filter: This, power: Const(1), toughness: Const(2)))],
+)

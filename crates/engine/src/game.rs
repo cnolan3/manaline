@@ -235,11 +235,27 @@ pub enum ModifierKind {
     Keyword(Keyword),
     /// "can't block this turn"
     Restriction(cardir::Restriction),
+    /// "doesn't untap during its controller's next untap step"
+    SkipUntap,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Expiry {
     EndOfTurn,
+    /// Ends as this seat's next turn begins ("until your next turn").
+    TurnOf(Seat),
+    /// Consumed by this seat's next untap step.
+    NextUntapOf(Seat),
+}
+
+impl Expiry {
+    /// The expiry for an effect `you` created with this duration.
+    pub fn from_duration(d: &cardir::Duration, you: Seat) -> Expiry {
+        match d {
+            cardir::Duration::EndOfTurn => Expiry::EndOfTurn,
+            cardir::Duration::UntilYourNextTurn => Expiry::TurnOf(you),
+        }
+    }
 }
 
 /// An "until end of turn" style effect stored on the object it modifies (§3.4).
@@ -894,8 +910,9 @@ impl Game {
         Keyword::ALL.iter().copied().filter(|k| self.has_keyword(id, *k)).collect()
     }
 
-    /// The static abilities of every permanent on the battlefield, with their source.
-    /// An aura or equipment's statics apply only while it is attached.
+    /// The static abilities of every permanent on the battlefield, with their
+    /// source. An aura or equipment's statics apply only while it is attached;
+    /// a conditional static ("as long as ...") only while its condition holds.
     pub(crate) fn active_statics(&self) -> Vec<(ObjectId, &cardir::Static)> {
         let mut out = Vec::new();
         for id in self.battlefield_objects() {
@@ -904,7 +921,15 @@ impl Game {
                 continue;
             }
             for s in &def.ir.statics {
-                out.push((id, s));
+                match s {
+                    cardir::Static::AsLongAs { condition, static_, .. } => {
+                        let ctx = crate::filter::Ctx::simple(self.objects[id].controller, Some(id));
+                        if self.condition_holds(condition, &ctx) {
+                            out.push((id, &**static_));
+                        }
+                    }
+                    s => out.push((id, s)),
+                }
             }
         }
         out

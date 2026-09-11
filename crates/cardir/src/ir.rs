@@ -231,6 +231,10 @@ pub enum Effect {
         target: Ref,
         to: ReturnZone,
     },
+    /// "It doesn't untap during its controller's next untap step."
+    SkipUntap {
+        target: Ref,
+    },
     /// "[target] can't block this turn".
     Restrict {
         target: Ref,
@@ -362,6 +366,8 @@ pub enum Filter {
     Spell,
     /// Objects other than this one.
     Other,
+    /// This card itself ("~ gets +1/+2 as long as ...").
+    This,
     /// The permanent this aura or equipment is attached to.
     Attached,
     /// A card in the named player's graveyard ("creature card from your graveyard").
@@ -471,11 +477,22 @@ pub enum Static {
         filter: Filter,
         amount: Amount,
     },
+    /// "~ gets +1/+2 as long as you control a Forest": the static applies
+    /// only while the condition holds.
+    AsLongAs {
+        condition: Condition,
+        static_: Box<Static>,
+        /// Rendering only: "As long as ..., ~ gets ..." rather than trailing.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        leading: bool,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum Duration {
     EndOfTurn,
+    /// "until your next turn": ends as the controller's next turn begins.
+    UntilYourNextTurn,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -502,6 +519,10 @@ pub enum CounterKind {
 pub enum Condition {
     /// The player controls at least `at_least` objects matching the filter.
     Controls { player: PlayerRef, filter: Filter, at_least: i32 },
+    /// "you have 30 or more life"
+    LifeAtLeast { player: PlayerRef, amount: i32 },
+    /// "you have 10 or less life"
+    LifeAtMost { player: PlayerRef, amount: i32 },
 }
 
 impl Card {

@@ -297,7 +297,7 @@ fn generic_permanent(name: &str) {
                     expect_kws.extend(keywords.iter().copied());
                 }
                 cardir::Static::GrantKeyword { keyword, .. } => expect_kws.push(*keyword),
-                cardir::Static::CostReduction { .. } => {}
+                cardir::Static::CostReduction { .. } | cardir::Static::AsLongAs { .. } => {}
             }
         }
         if t > 0 {
@@ -936,6 +936,35 @@ fn registry() -> BTreeMap<&'static str, Check> {
         assert_eq!(stats(&game, knight), (2, 2));
         assert!(kws(&game, knight).contains(&Keyword::Vigilance));
     });
+    check!("Loam Lion", || {
+        let game = base().battlefield(ME, "Loam Lion").build();
+        assert_eq!(stats(&game, bf(&game, ME, "Loam Lion")), (2, 3), "four Forests");
+        let game = TestGame::new(db(), 2).battlefield(ME, "Loam Lion").build();
+        assert_eq!(stats(&game, bf(&game, ME, "Loam Lion")), (1, 1));
+    });
+    check!("Ballynock Cohort", || {
+        let game = base().battlefield(ME, "Ballynock Cohort").build();
+        assert_eq!(stats(&game, bf(&game, ME, "Ballynock Cohort")), (2, 2), "alone");
+        let game = base().battlefield(ME, "Ballynock Cohort").battlefield(ME, "Savannah Lions").build();
+        assert_eq!(stats(&game, bf(&game, ME, "Ballynock Cohort")), (3, 3));
+        let game = base().battlefield(ME, "Ballynock Cohort").battlefield(ME, "Grizzly Bears").build();
+        assert_eq!(
+            stats(&game, bf(&game, ME, "Ballynock Cohort")),
+            (2, 2),
+            "a green creature doesn't count"
+        );
+    });
+    check!("Serra Ascendant", || {
+        let game = base().battlefield(ME, "Serra Ascendant").build();
+        let monk = bf(&game, ME, "Serra Ascendant");
+        assert_eq!(stats(&game, monk), (1, 1));
+        assert!(!kws(&game, monk).contains(&Keyword::Flying));
+        let game = base().battlefield(ME, "Serra Ascendant").life(ME, 30).build();
+        let monk = bf(&game, ME, "Serra Ascendant");
+        assert_eq!(stats(&game, monk), (6, 6));
+        assert!(kws(&game, monk).contains(&Keyword::Flying));
+        assert!(kws(&game, monk).contains(&Keyword::Lifelink));
+    });
     check!("Kor Skyfisher", || {
         let mut game = base().battlefield(ME, "Grizzly Bears").hand(ME, "Kor Skyfisher").build();
         let bear = bf(&game, ME, "Grizzly Bears");
@@ -997,6 +1026,27 @@ fn registry() -> BTreeMap<&'static str, Check> {
             .legal_actions(ME)
             .iter()
             .any(|a| matches!(a, Action::CastSpell { object, .. } if *object == hand(&game, ME, "Negate"))));
+    });
+    check!("Crippling Chill", || {
+        let mut game = base().hand(ME, "Crippling Chill").library(ME, &["Forest"; 3]).build();
+        let bear = bf(&game, OPP, "Grizzly Bears");
+        cast(&mut game, "Crippling Chill", &[Target::Object(bear)]);
+        assert!(game.objects[bear].tapped);
+        assert_eq!(hand_size(&game, ME), 1);
+        // The opponent's untap step leaves it tapped once; the one after untaps it.
+        advance_until(&mut game, |g| g.turn == 2 && g.phase == engine::Phase::Main1).unwrap();
+        assert!(game.objects[bear].tapped, "held through the opponent's untap step");
+        advance_until(&mut game, |g| g.turn == 4 && g.phase == engine::Phase::Main1).unwrap();
+        assert!(!game.objects[bear].tapped);
+    });
+    check!("Frost Breath", || {
+        let mut game = base().battlefield(OPP, "Hill Giant").hand(ME, "Frost Breath").build();
+        let bear = bf(&game, OPP, "Grizzly Bears");
+        let giant = bf(&game, OPP, "Hill Giant");
+        cast_steps(&mut game, "Frost Breath", &[], &[&[Target::Object(bear), Target::Object(giant)]]);
+        assert!(game.objects[bear].tapped && game.objects[giant].tapped);
+        advance_until(&mut game, |g| g.turn == 2 && g.phase == engine::Phase::Main1).unwrap();
+        assert!(game.objects[bear].tapped && game.objects[giant].tapped);
     });
     check!("Divination", || draw_spell("Divination", 2));
     check!("Unsummon", || bounce("Unsummon", "Hill Giant"));
@@ -1336,6 +1386,16 @@ fn registry() -> BTreeMap<&'static str, Check> {
         assert_eq!(hand_size(&game, OPP), 0);
         assert_eq!(game.objects[giant].zone, Zone::Hand);
     });
+    check!("Kird Ape", || {
+        let game = base().battlefield(ME, "Kird Ape").build();
+        assert_eq!(stats(&game, bf(&game, ME, "Kird Ape")), (2, 3));
+        let mut game = TestGame::new(db(), 2).battlefield(ME, "Kird Ape").hand(ME, "Forest").build();
+        let ape = bf(&game, ME, "Kird Ape");
+        assert_eq!(stats(&game, ape), (1, 1));
+        let forest = hand(&game, ME, "Forest");
+        game.apply(ME, &Action::PlayLand { object: forest }).unwrap();
+        assert_eq!(stats(&game, ape), (2, 3), "the condition is checked live");
+    });
     check!("Prodigal Pyromancer", || pinger("Prodigal Pyromancer"));
     check!("Goblin Chieftain", || {
         let game = base().battlefield(ME, "Goblin Chieftain").battlefield(ME, "Goblin Piker").build();
@@ -1471,6 +1531,15 @@ fn registry() -> BTreeMap<&'static str, Check> {
     });
 
     // ----- green -----
+    check!("Wild Nacatl", || {
+        let game = base().battlefield(ME, "Wild Nacatl").build();
+        assert_eq!(stats(&game, bf(&game, ME, "Wild Nacatl")), (3, 3), "a Mountain and a Plains");
+        let game = TestGame::new(db(), 2)
+            .battlefield(ME, "Wild Nacatl")
+            .battlefield(ME, "Mountain")
+            .build();
+        assert_eq!(stats(&game, bf(&game, ME, "Wild Nacatl")), (2, 2));
+    });
     check!("Giant Growth", || pump("Giant Growth", 3, 3, &[]));
     check!("Titanic Growth", || pump("Titanic Growth", 4, 4, &[]));
     check!("Naturalize", || destroy("Naturalize", "Bonesplitter"));

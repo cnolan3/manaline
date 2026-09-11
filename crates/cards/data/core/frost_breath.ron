@@ -1,0 +1,7 @@
+Card(
+    name: "Frost Breath",
+    cost: "{2}{U}",
+    types: [Instant],
+    text: "Tap up to two target creatures. Those creatures don't untap during their controller's next untap step.",
+    spell: Spell(targets: [Targets(UpTo(2), Creature)], effects: [Tap(target: Target(0)), SkipUntap(target: Target(0))]),
+)

@@ -163,6 +163,27 @@ Card(
     }
 
     #[test]
+    fn durations_conditional_statics_and_later_mentions_render_like_oracle() {
+        let cases = [
+            r#"Card(name: "Kird Ape", cost: "{R}", types: [Creature], subtypes: ["Ape"], pt: (1, 1), text: "Kird Ape gets +1/+2 as long as you control a Forest.", statics: [AsLongAs(condition: Controls(player: You, filter: Subtype("Forest"), at_least: 1), static_: PtBoost(filter: This, power: Const(1), toughness: Const(2)))])"#,
+            r#"Card(name: "Ballynock Cohort", cost: "{2}{W}", types: [Creature], subtypes: ["Kithkin", "Soldier"], pt: (2, 2), text: "Ballynock Cohort gets +1/+1 as long as you control another white creature.", statics: [AsLongAs(condition: Controls(player: You, filter: And([Other, Color(White), Creature]), at_least: 1), static_: PtBoost(filter: This, power: Const(1), toughness: Const(1)))])"#,
+            r#"Card(name: "Serra Ascendant", cost: "{W}", types: [Creature], subtypes: ["Human", "Monk"], pt: (1, 1), text: "Lifelink\nAs long as you have 30 or more life, Serra Ascendant gets +5/+5 and has flying.", keywords: [Lifelink], statics: [AsLongAs(condition: LifeAtLeast(player: You, amount: 30), static_: PtBoost(filter: This, power: Const(5), toughness: Const(5), keywords: [Flying]), leading: true)])"#,
+            r#"Card(name: "Crippling Chill", cost: "{2}{U}", types: [Instant], text: "Tap target creature. It doesn't untap during its controller's next untap step.\nDraw a card.", spell: Spell(targets: [Creature], effects: [Tap(target: Target(0)), SkipUntap(target: Target(0)), Draw(player: You, count: Const(1))]))"#,
+            r#"Card(name: "Frost Breath", cost: "{2}{U}", types: [Instant], text: "Tap up to two target creatures. Those creatures don't untap during their controller's next untap step.", spell: Spell(targets: [Targets(UpTo(2), Creature)], effects: [Tap(target: Target(0)), SkipUntap(target: Target(0))]))"#,
+            r#"Card(name: "Ward", cost: "{W}", types: [Instant], text: "Target creature gets +2/+2 until your next turn.", spell: Spell(targets: [Creature], effects: [ModifyPt(target: Target(0), power: Const(2), toughness: Const(2), until: UntilYourNextTurn)]))"#,
+            r#"Card(name: "Hold", cost: "{U}", types: [Instant], text: "Target creature can't block until your next turn.", spell: Spell(targets: [Creature], effects: [Restrict(target: Target(0), restriction: CantBlock, until: UntilYourNextTurn)]))"#,
+        ];
+        for text in cases {
+            let card = load(text).unwrap_or_else(|e| panic!("{e}"));
+            if let Err((want, got)) = round_trips(&card) {
+                panic!("{}:\n  oracle:   {want}\n  rendered: {got}", card.name);
+            }
+        }
+        let bad = r#"Card(name: "L", cost: "{G}", types: [Creature], pt: (1, 1), text: "", statics: [AsLongAs(condition: Controls(player: You, filter: PowerAtLeast(4), at_least: 1), static_: PtBoost(filter: This, power: Const(1), toughness: Const(1)))])"#;
+        assert!(load(bad).unwrap_err().contains("may not depend"));
+    }
+
+    #[test]
     fn chosen_is_only_a_direct_target_and_named_needs_its_binding() {
         let bad = r#"Card(name: "B", cost: "{R}", types: [Instant], text: "", spell: Spell(effects: [DealDamage(amount: PowerOf(Chosen(who: You, filter: Creature, count: Exactly(1))), to: Player(You))]))"#;
         assert!(load(bad).unwrap_err().contains("direct target"), "{}", load(bad).unwrap_err());

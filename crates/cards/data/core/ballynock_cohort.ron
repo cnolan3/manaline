@@ -1,0 +1,9 @@
+Card(
+    name: "Ballynock Cohort",
+    cost: "{2}{W}",
+    types: [Creature],
+    subtypes: ["Kithkin", "Soldier"],
+    pt: (2, 2),
+    text: "Ballynock Cohort gets +1/+1 as long as you control another white creature.",
+    statics: [AsLongAs(condition: Controls(player: You, filter: And([Other, Color(White), Creature]), at_least: 1), static_: PtBoost(filter: This, power: Const(1), toughness: Const(1)))],
+)

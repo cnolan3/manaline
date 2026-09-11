@@ -210,9 +210,10 @@ impl Ctx<'_> {
                 self.player_ref(player);
                 self.amount(count);
             }
-            Effect::ReturnFromGraveyard { target, .. } | Effect::ReturnExiled { target, .. } | Effect::Restrict { target, .. } => {
-                self.direct_ref(target)
-            }
+            Effect::ReturnFromGraveyard { target, .. }
+            | Effect::ReturnExiled { target, .. }
+            | Effect::Restrict { target, .. }
+            | Effect::SkipUntap { target } => self.direct_ref(target),
             Effect::Delayed { effects, .. } => {
                 if effects.is_empty() {
                     self.err("a delayed trigger needs at least one effect");
@@ -254,6 +255,42 @@ impl Ctx<'_> {
             Condition::Controls { player, filter, .. } => {
                 self.player_ref(player);
                 self.filter(filter);
+            }
+            Condition::LifeAtLeast { player, .. } | Condition::LifeAtMost { player, .. } => self.player_ref(player),
+        }
+    }
+
+    /// A condition on a static ability may not read power, toughness, or
+    /// keywords: those are computed from statics, which would loop.
+    fn static_condition(&mut self, c: &Condition) {
+        self.condition(c);
+        if let Condition::Controls { filter, .. } = c {
+            if reads_stats(filter) {
+                self.err("a static's condition may not depend on power, toughness, or keywords");
+            }
+        }
+    }
+
+    fn static_(&mut self, s: &Static) {
+        match s {
+            Static::PtBoost {
+                filter, power, toughness, ..
+            } => {
+                self.filter(filter);
+                self.amount(power);
+                self.amount(toughness);
+            }
+            Static::GrantKeyword { filter, .. } => self.filter(filter),
+            Static::CostReduction { filter, amount } => {
+                self.filter(filter);
+                self.amount(amount);
+            }
+            Static::AsLongAs { condition, static_, .. } => {
+                self.static_condition(condition);
+                if matches!(**static_, Static::AsLongAs { .. }) {
+                    self.err("nested AsLongAs");
+                }
+                self.static_(static_);
             }
         }
     }
@@ -374,20 +411,7 @@ pub fn validate(card: &Card) -> Result<(), ValidationError> {
     }
     for s in &card.statics {
         ctx.targets = 0;
-        match s {
-            Static::PtBoost {
-                filter, power, toughness, ..
-            } => {
-                ctx.filter(filter);
-                ctx.amount(power);
-                ctx.amount(toughness);
-            }
-            Static::GrantKeyword { filter, .. } => ctx.filter(filter),
-            Static::CostReduction { filter, amount } => {
-                ctx.filter(filter);
-                ctx.amount(amount);
-            }
-        }
+        ctx.static_(s);
     }
     for t in &card.triggers {
         ctx.in_trigger = true;
@@ -431,3 +455,13 @@ pub fn validate(card: &Card) -> Result<(), ValidationError> {
 }
 
 use crate::types::Keyword;
+
+/// Whether a filter looks at power, toughness, or keywords.
+fn reads_stats(f: &Filter) -> bool {
+    match f {
+        Filter::PowerAtLeast(_) | Filter::PowerAtMost(_) | Filter::HasKeyword(_) => true,
+        Filter::And(fs) | Filter::Or(fs) => fs.iter().any(reads_stats),
+        Filter::Not(f) | Filter::Targets(_, f) => reads_stats(f),
+        _ => false,
+    }
+}

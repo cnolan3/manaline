@@ -1,0 +1,7 @@
+Card(
+    name: "Crippling Chill",
+    cost: "{2}{U}",
+    types: [Instant],
+    text: "Tap target creature. It doesn't untap during its controller's next untap step.\nDraw a card.",
+    spell: Spell(targets: [Creature], effects: [Tap(target: Target(0)), SkipUntap(target: Target(0)), Draw(player: You, count: Const(1))]),
+)

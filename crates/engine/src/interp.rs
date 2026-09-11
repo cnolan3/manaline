@@ -31,7 +31,8 @@ fn direct_refs_mut(e: &mut Effect) -> Vec<&mut Ref> {
         | Effect::AddCounters { target, .. }
         | Effect::ReturnFromGraveyard { target, .. }
         | Effect::ReturnExiled { target, .. }
-        | Effect::Restrict { target, .. } => vec![target],
+        | Effect::Restrict { target, .. }
+        | Effect::SkipUntap { target } => vec![target],
         _ => Vec::new(),
     }
 }
@@ -149,10 +150,11 @@ impl Game {
                 power,
                 toughness,
                 keywords,
-                until: _,
+                until,
             } => {
                 let p = self.eval_amount(power, ctx);
                 let t = self.eval_amount(toughness, ctx);
+                let expires = Expiry::from_duration(until, ctx.you);
                 for id in self.objects_of(target, ctx) {
                     if self.objects[id].zone != Zone::Battlefield {
                         continue;
@@ -160,22 +162,23 @@ impl Game {
                     let obj = &mut self.objects[id];
                     obj.modifiers.push(Modifier {
                         kind: ModifierKind::Pt { power: p, toughness: t },
-                        expires: Expiry::EndOfTurn,
+                        expires: expires.clone(),
                     });
                     for k in keywords {
                         obj.modifiers.push(Modifier {
                             kind: ModifierKind::Keyword(*k),
-                            expires: Expiry::EndOfTurn,
+                            expires: expires.clone(),
                         });
                     }
                 }
             }
-            Effect::GrantKeyword { target, keyword, until: _ } => {
+            Effect::GrantKeyword { target, keyword, until } => {
+                let expires = Expiry::from_duration(until, ctx.you);
                 for id in self.objects_of(target, ctx) {
                     if self.objects[id].zone == Zone::Battlefield {
                         self.objects[id].modifiers.push(Modifier {
                             kind: ModifierKind::Keyword(*keyword),
-                            expires: Expiry::EndOfTurn,
+                            expires: expires.clone(),
                         });
                     }
                 }
@@ -302,13 +305,25 @@ impl Game {
             Effect::Restrict {
                 target,
                 restriction,
-                until: _,
+                until,
             } => {
+                let expires = Expiry::from_duration(until, ctx.you);
                 for id in self.objects_of(target, ctx) {
                     if self.objects[id].zone == Zone::Battlefield {
                         self.objects[id].modifiers.push(Modifier {
                             kind: ModifierKind::Restriction(*restriction),
-                            expires: Expiry::EndOfTurn,
+                            expires: expires.clone(),
+                        });
+                    }
+                }
+            }
+            Effect::SkipUntap { target } => {
+                for id in self.objects_of(target, ctx) {
+                    if self.objects[id].zone == Zone::Battlefield {
+                        let controller = self.objects[id].controller;
+                        self.objects[id].modifiers.push(Modifier {
+                            kind: ModifierKind::SkipUntap,
+                            expires: Expiry::NextUntapOf(controller),
                         });
                     }
                 }

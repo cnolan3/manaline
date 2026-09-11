@@ -2,7 +2,7 @@
 //! guarantees the engine never returns in a state where nobody can act.
 
 use crate::event::Event;
-use crate::game::{Expiry, Game, PendingChoice};
+use crate::game::{Expiry, Game, ModifierKind, PendingChoice};
 use crate::types::{ObjectId, Phase};
 
 impl Game {
@@ -82,6 +82,10 @@ impl Game {
         self.turn += 1;
         self.active_player = seat;
         self.turn_aborted = false;
+        // "Until your next turn" effects this player created end now.
+        for (_, obj) in self.objects.iter_mut() {
+            obj.modifiers.retain(|m| m.expires != Expiry::TurnOf(seat));
+        }
         self.emit(Event::TurnStarted {
             turn: self.turn,
             active: seat,
@@ -150,7 +154,11 @@ impl Game {
         for id in ids {
             let obj = &mut self.objects[id];
             obj.summoning_sick = false;
-            if obj.tapped {
+            // "Doesn't untap during its controller's next untap step": skip once, then forget.
+            let hold = |m: &crate::game::Modifier| m.kind == ModifierKind::SkipUntap && m.expires == Expiry::NextUntapOf(active);
+            let held = obj.modifiers.iter().any(hold);
+            obj.modifiers.retain(|m| !hold(m));
+            if obj.tapped && !held {
                 obj.tapped = false;
                 self.emit(Event::Untapped { object: id });
             }

@@ -1,0 +1,12 @@
+Card(
+    name: "Wild Nacatl",
+    cost: "{G}",
+    types: [Creature],
+    subtypes: ["Cat"],
+    pt: (1, 1),
+    text: "Wild Nacatl gets +1/+1 as long as you control a Mountain.\nWild Nacatl gets +1/+1 as long as you control a Plains.",
+    statics: [
+        AsLongAs(condition: Controls(player: You, filter: Subtype("Mountain"), at_least: 1), static_: PtBoost(filter: This, power: Const(1), toughness: Const(1))),
+        AsLongAs(condition: Controls(player: You, filter: Subtype("Plains"), at_least: 1), static_: PtBoost(filter: This, power: Const(1), toughness: Const(1))),
+    ],
+)
