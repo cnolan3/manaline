@@ -110,11 +110,11 @@ $ manaline play --deck decks/rw.txt --vs claude
 Behind that one command, `play` does all of the following and shows none of it:
 
 1. Spawns `manaline-daemon` as a child process on a fresh Unix socket (a random path in the platform runtime directory per §2's transport rules; no `--tcp` listener unless asked), with a `--parent-pid` so the daemon exits if `play` dies.
-2. Creates the game, takes seat 0's token for itself, and hands seat 1's token to whichever opponent was requested: the built-in random bot (spawned in-process), or the MCP server (spawned as a child, bound to seat 1).
-3. Submits the human's deck, waits for the opponent seat to be ready, and starts the game.
-4. Opens the TUI in the current terminal, connected as seat 0.
-5. For `--vs claude` (or `codex`, or the generic `--vs mcp`), prints the one thing the human *does* need to know, in the TUI's log pane: how to point their agent at the game — the streamable-HTTP URL or the stdio command, plus a copy-pasteable JSON snippet for the agent's config, and the suggested opening line to say to the agent.
-6. On quit: tears down the MCP server and the daemon, writes the replay file, and prints its path.
+2. Creates the game with one seat per entry of `--seats` (default `me,<--vs>`), keeps the `me` seat's token for the TUI, spawns the built-in bot for each `random` seat, and **publishes the table**: a `GameMarker` in the runtime directory naming the daemon's endpoint and every seat, with the seat tokens of the agent seats (§7). Nothing is spawned for an agent seat; the agent's own MCP session finds the marker and claims the seat.
+3. Submits the human's deck, waits for the other seats to be ready, and starts the game.
+4. Opens the TUI in the current terminal, connected as the `me` seat. With no `me` seat (`--seats claude,claude`) it runs headless and narrates the lobby and game on stdout, or spectates in the TUI with `--watch`.
+5. For agent seats, prints the one thing the human *does* need to know, in the TUI's log pane: that each agent should be pointed at `manaline mcp --stdio` (a one-time `claude mcp add`), that one agent session takes one seat, and the suggested opening line to say to the agent.
+6. On quit: withdraws the marker, tears down the daemon, writes the replay file, and prints its path.
 
 There is no separate "start the server" step, no game id to type, no token to copy — all of that is internal to `play`. The only process the human is consciously aware of besides the terminal they're typing in is their agent, which by design runs in a window they own. Crash and edge-case behaviour follows the same principle: if the daemon dies, `play` reports "the game crashed" and offers the replay path; it never surfaces socket paths or child-process errors as the primary message.
 
@@ -980,10 +980,13 @@ The waiting-on-agent nudge lives in the header line and reads from `must_act`, n
 
 ## 7. MCP server (`crates/mcp`)
 
-Built on `rmcp`. Runs as `manaline mcp --game <id> --seat 2` and speaks **both** transports:
+Built on `rmcp`. The server is a daemon client like the TUI: it holds no game state of its own, and it has no seat of its own either. **A seat belongs to an MCP session**, not to the process. Over stdio (`manaline mcp --stdio`, what Claude Code and Codex are pointed at) there is one session per process, so one seat; over streamable HTTP (`manaline mcp --http <addr>`, port 0 by default so it never collides) one process carries many sessions, each seated on its own. Nobody starts or stops a server by hand: the client launches the stdio process when it starts and kills it when it exits.
 
-- **Streamable HTTP** on `127.0.0.1:7454` (default) for clients that prefer URL config.
-- **stdio** when invoked with `--stdio`, for clients that only launch processes. In this mode the MCP process is a thin proxy; the daemon is still where state lives.
+**Finding the table.** `play` publishes the game it created as a `GameMarker` under `<runtime dir>/games/<game id>.json` (`crates/protocol/src/endpoint.rs`): the daemon's endpoint, the format, the spectator token, and one slot per seat with its kind (human, bot, agent), name and assigned deck; agent slots carry their seat token. The marker is withdrawn when `play` exits and ignored once its process is gone. A session that calls any game tool while unseated finds the newest live marker and **claims** the next free agent seat by creating `<games>/<game id>/seat-<n>` exclusively — atomic across processes, so two agents racing for one table get different seats, and a claim left by a dead process is taken over. It then joins the daemon with that seat's token, submits the assigned deck (or picks one with `list_decks` and `submit_deck` if the slot has none), and readies up. `sit_down { seat? }` does the same explicitly, `leave` gives the seat back. Two agents are two MCP sessions, which for Claude Code means two Claude Code sessions: subagents share their parent's servers.
+
+**No arbitration.** The daemon validates every action by seat token and `wait_for_turn` blocks on the calling session's seat, so N agent sessions in N seats need nothing from the server beyond the seat mapping.
+
+Deckbuilding tools live on the same server, gated by context: a session with no seat and a live editor marker gets the `editor_*` tools; a seated session gets the game tools.
 
 ### 7.1 Tools
 
@@ -1041,10 +1044,10 @@ Object ids are stable for the life of the game and appear everywhere so the agen
 
 ### 7.4 The agent loop, end to end
 
-1. Human runs `manaline play --deck decks/rw.txt --vs claude --opp-deck decks/ug.txt`. Per §2.1 this silently starts the daemon, opens the TUI in seat 0, starts the MCP server bound to seat 1, and prints the MCP connection snippet (URL, stdio command, config JSON) in the TUI's log pane. Nothing else is required of the human.
-2. Human adds the server to Claude Code / Codex in another window and says something like "you're playing Magic against me, pull the `play-a-game` prompt and go."
-3. Agent calls `wait_for_turn`. Mulligan decision arrives first.
-4. Game proceeds. Whenever the agent must act — priority, blockers, a choice — the blocked `wait_for_turn` returns with state and legal actions. The agent acts, possibly several times (cast, then pass), then calls `wait_for_turn` again.
+1. Once per machine, the human adds the server to their agent client: `claude mcp add manaline -- manaline mcp --stdio` (or the Codex equivalent). The client launches it with every session; unseated, it serves card data and the deckbuilder tools.
+2. Human runs `manaline play --deck decks/rw.txt --seats me,claude --opp-deck decks/ug.txt`. Per §2.1 this silently starts the daemon, publishes the table, and opens the TUI in seat 0. `--seats claude,claude` seats two agents and runs headless (`--watch` spectates in the TUI); `--seats me,claude,random` is a three-player pod. Nothing else is required of the human.
+3. In an agent window the human says something like "you're playing Magic against me, pull the `play-a-game` prompt and go." The agent's first `wait_for_turn` seats it in the next free agent seat.
+4. Mulligan decision arrives first. Game proceeds. Whenever the agent must act — priority, blockers, a choice — the blocked `wait_for_turn` returns with state and legal actions. The agent acts, possibly several times (cast, then pass), then calls `wait_for_turn` again.
 5. If the agent's client kills long tool calls (some do at 60 s), `wait_for_turn` returns `{ timed_out: true }` and the agent just calls it again. Meanwhile the human sees `Waiting on Claude…` in the TUI and can press Enter to post a system chat nudge, which the agent sees the next time it looks.
 6. Human and agent can `say` / `[c]hat` at any time. The human is also free to talk to the agent directly in the agent's own window — that conversation is outside the game and the game doesn't know about it.
 

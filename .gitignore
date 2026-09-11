@@ -23,3 +23,6 @@
 !/decks/rg-stompy.txt
 !/decks/gw-elves.txt
 !/decks/wb-lifegain.txt
+
+# Agent worktrees created by Claude Code.
+/.claude/worktrees/
