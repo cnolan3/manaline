@@ -1,6 +1,7 @@
 //! Where a daemon listens and where its files go. Transport-agnostic clients
 //! parse an `Endpoint` from one string: a socket path or a `host:port`.
 
+use crate::messages::Token;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -185,6 +186,222 @@ impl Runtime {
     }
 }
 
+/// What `play` publishes so agents can find the table: where the daemon
+/// listens and, per seat, who sits there. Agent seats carry their token;
+/// an agent claims one (`Runtime::claim_seat`) and joins with it.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct GameMarker {
+    pub game_id: String,
+    /// The `play` process; the marker is stale once it is gone.
+    pub pid: u32,
+    pub socket: Option<PathBuf>,
+    pub tcp: Option<String>,
+    pub format: String,
+    #[serde(default)]
+    pub spectator_token: Option<Token>,
+    pub seats: Vec<SeatSlot>,
+    /// The games directory this marker lives in (not part of the file).
+    #[serde(skip)]
+    pub dir: PathBuf,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SeatSlot {
+    pub seat: u8,
+    pub kind: SeatKind,
+    pub name: String,
+    /// The deck assigned to the seat (a name or path), if `play` chose one.
+    #[serde(default)]
+    pub deck: Option<String>,
+    /// The seat token; only agent seats publish theirs.
+    #[serde(default)]
+    pub token: Option<Token>,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SeatKind {
+    Human,
+    Bot,
+    Agent,
+}
+
+impl GameMarker {
+    pub fn endpoint(&self) -> Option<Endpoint> {
+        match (&self.socket, &self.tcp) {
+            (Some(p), _) => Some(Endpoint::Unix(p.clone())),
+            (None, Some(t)) => Some(Endpoint::Tcp(t.clone())),
+            (None, None) => None,
+        }
+    }
+
+    fn marker_path(&self) -> PathBuf {
+        self.dir.join(format!("{}.json", self.game_id))
+    }
+
+    /// Where this game's seat claims live: `<games dir>/<game id>/seat-<n>`.
+    fn claims_dir(&self) -> PathBuf {
+        self.dir.join(&self.game_id)
+    }
+
+    /// Remove the marker and every claim on it (`play` exiting).
+    pub fn withdraw(&self) {
+        let _ = std::fs::remove_file(self.marker_path());
+        let _ = std::fs::remove_dir_all(self.claims_dir());
+    }
+
+    /// Which agent seats are claimed, and by which process.
+    pub fn claims(&self) -> Vec<(u8, u32)> {
+        let Ok(entries) = std::fs::read_dir(self.claims_dir()) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for e in entries.flatten() {
+            let name = e.file_name();
+            let Some(n) = name
+                .to_str()
+                .and_then(|s| s.strip_prefix("seat-"))
+                .and_then(|s| s.parse::<u8>().ok())
+            else {
+                continue;
+            };
+            let pid = std::fs::read_to_string(e.path()).ok().and_then(|s| s.trim().parse::<u32>().ok());
+            if let Some(pid) = pid.filter(|p| process_alive(*p)) {
+                out.push((n, pid));
+            } else {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+        out.sort();
+        out
+    }
+}
+
+/// A seat an agent process has claimed; released on drop or explicitly.
+#[derive(Debug)]
+pub struct SeatClaim {
+    pub game: GameMarker,
+    pub slot: SeatSlot,
+    path: PathBuf,
+}
+
+impl SeatClaim {
+    pub fn seat(&self) -> u8 {
+        self.slot.seat
+    }
+
+    /// Give the seat back so another agent may take it.
+    pub fn release(self) {
+        let _ = std::fs::remove_file(&self.path);
+        std::mem::forget(self);
+    }
+}
+
+impl Drop for SeatClaim {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+impl Runtime {
+    /// Where game markers live: `<runtime dir>/games`.
+    pub fn games_dir(&self) -> PathBuf {
+        self.dir.join("games")
+    }
+
+    /// Publish a game for agents to find. Writes `<games dir>/<game id>.json`.
+    pub fn publish_game(&self, marker: &GameMarker) -> std::io::Result<GameMarker> {
+        let dir = self.games_dir();
+        std::fs::create_dir_all(&dir)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+        }
+        let mut marker = marker.clone();
+        marker.dir = dir;
+        let _ = std::fs::remove_dir_all(marker.claims_dir());
+        let json = serde_json::to_vec_pretty(&marker).map_err(std::io::Error::other)?;
+        std::fs::write(marker.marker_path(), json)?;
+        Ok(marker)
+    }
+
+    /// Every published game whose `play` is still running, newest first.
+    /// Markers that fail to parse or whose process is gone are deleted.
+    pub fn live_games(&self) -> Vec<GameMarker> {
+        let dir = self.games_dir();
+        let Ok(entries) = std::fs::read_dir(&dir) else { return Vec::new() };
+        let mut found: Vec<(std::time::SystemTime, GameMarker)> = Vec::new();
+        for e in entries.flatten() {
+            let file = e.path();
+            if file.extension().and_then(|x| x.to_str()) != Some("json") {
+                continue;
+            }
+            let parsed = std::fs::read(&file)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<GameMarker>(&bytes).ok());
+            match parsed {
+                Some(mut m) if process_alive(m.pid) => {
+                    m.dir = dir.clone();
+                    let at = e.metadata().and_then(|md| md.modified()).unwrap_or(std::time::UNIX_EPOCH);
+                    found.push((at, m));
+                }
+                _ => {
+                    let _ = std::fs::remove_file(&file);
+                }
+            }
+        }
+        found.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.game_id.cmp(&b.1.game_id)));
+        found.into_iter().map(|(_, m)| m).collect()
+    }
+
+    /// The game an agent should join: the most recently published live one.
+    pub fn newest_game(&self) -> Option<GameMarker> {
+        self.live_games().into_iter().next()
+    }
+
+    /// Claim an agent seat for this process: the one asked for, or the first
+    /// free one. Atomic across processes (the claim file is created
+    /// exclusively); a claim left by a dead process is taken over. `None`
+    /// when every agent seat is taken or the seat asked for is not an
+    /// agent's.
+    pub fn claim_seat(&self, game: &GameMarker, seat: Option<u8>) -> std::io::Result<Option<SeatClaim>> {
+        let dir = game.claims_dir();
+        std::fs::create_dir_all(&dir)?;
+        let candidates = game
+            .seats
+            .iter()
+            .filter(|s| s.kind == SeatKind::Agent && seat.is_none_or(|want| want == s.seat));
+        for slot in candidates {
+            let path = dir.join(format!("seat-{}", slot.seat));
+            for _ in 0..2 {
+                match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+                    Ok(mut f) => {
+                        use std::io::Write;
+                        write!(f, "{}", std::process::id())?;
+                        return Ok(Some(SeatClaim {
+                            game: game.clone(),
+                            slot: slot.clone(),
+                            path,
+                        }));
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                        let holder = std::fs::read_to_string(&path).ok().and_then(|s| s.trim().parse::<u32>().ok());
+                        match holder {
+                            Some(pid) if process_alive(pid) => break,
+                            _ => {
+                                let _ = std::fs::remove_file(&path);
+                            }
+                        }
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+        Ok(None)
+    }
+}
+
 /// An open deckbuilder announces itself so an MCP server helping the human
 /// can find the file they are editing: one JSON file per editor process
 /// under `<runtime dir>/editors/`, removed when the editor exits and
@@ -281,6 +498,75 @@ mod tests {
         assert_eq!(runtime_dir(), dir);
         assert_eq!(Runtime::default().dir, dir);
         assert_eq!(socket_path("g").parent().unwrap(), dir);
+    }
+
+    #[test]
+    fn games_are_published_and_seats_claimed_once() {
+        let rt = Runtime::at(std::env::temp_dir().join(format!("manaline-games-rt-{}", std::process::id())));
+        let _ = std::fs::remove_dir_all(&rt.dir);
+        let agent = |seat: u8| SeatSlot {
+            seat,
+            kind: SeatKind::Agent,
+            name: "Claude".into(),
+            deck: Some("red".into()),
+            token: Some(Token(format!("tok{seat}"))),
+        };
+        let marker = GameMarker {
+            game_id: "quiet-owl".into(),
+            pid: std::process::id(),
+            socket: Some(rt.dir.join("quiet-owl.sock")),
+            tcp: None,
+            format: "cube".into(),
+            spectator_token: Some(Token("spec".into())),
+            seats: vec![
+                SeatSlot {
+                    seat: 0,
+                    kind: SeatKind::Human,
+                    name: "Connor".into(),
+                    deck: None,
+                    token: None,
+                },
+                agent(1),
+                agent(2),
+            ],
+            dir: PathBuf::new(),
+        };
+        let published = rt.publish_game(&marker).unwrap();
+        assert_eq!(rt.live_games().len(), 1);
+        assert_eq!(rt.newest_game().unwrap().game_id, "quiet-owl");
+        assert_eq!(published.endpoint(), Some(Endpoint::Unix(rt.dir.join("quiet-owl.sock"))));
+
+        // First come, first seated; the human's seat is never offered.
+        let first = rt.claim_seat(&published, None).unwrap().unwrap();
+        assert_eq!(first.seat(), 1);
+        assert_eq!(first.slot.token, Some(Token("tok1".into())));
+        let second = rt.claim_seat(&published, None).unwrap().unwrap();
+        assert_eq!(second.seat(), 2);
+        assert!(rt.claim_seat(&published, None).unwrap().is_none(), "no third agent seat");
+        assert!(rt.claim_seat(&published, Some(0)).unwrap().is_none(), "seat 0 is the human's");
+        assert_eq!(published.claims(), vec![(1, std::process::id()), (2, std::process::id())]);
+
+        // Releasing frees the seat; a dead claimant's file is taken over.
+        second.release();
+        std::fs::write(published.claims_dir().join("seat-2"), "4000000000").unwrap();
+        let again = rt.claim_seat(&published, Some(2)).unwrap().unwrap();
+        assert_eq!(again.seat(), 2);
+        drop(again);
+        assert_eq!(published.claims(), vec![(1, std::process::id())]);
+
+        // A marker whose `play` is gone is not live, and is cleaned up.
+        let dead = GameMarker {
+            game_id: "gone".into(),
+            pid: 4_000_000_000,
+            ..marker.clone()
+        };
+        rt.publish_game(&dead).unwrap();
+        assert_eq!(rt.live_games().len(), 1);
+        assert!(!rt.games_dir().join("gone.json").exists());
+
+        published.withdraw();
+        assert!(rt.live_games().is_empty());
+        assert!(!published.claims_dir().exists());
     }
 
     #[test]
