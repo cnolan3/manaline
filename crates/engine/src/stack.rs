@@ -88,13 +88,13 @@ impl Game {
     }
 
     pub(crate) fn cast_spell(&mut self, seat: Seat, object: ObjectId, targets: &[Target], payment: &ManaPayment) -> Result<(), RulesError> {
-        let cost = self.cast_cost(seat, object);
+        let cost = self.cast_cost(seat, object).with_x(payment.x);
         if Game::is_two_step(self.card_def(object)) {
             if !targets.is_empty() {
                 return Err(RulesError::illegal("this spell's modes and targets are chosen after casting it"));
             }
             self.pay_mana(seat, payment, &cost)?;
-            self.begin_two_step_cast(seat, object);
+            self.begin_two_step_cast(seat, object, payment.x);
             return Ok(());
         }
         self.pay_mana(seat, payment, &cost)?;
@@ -106,6 +106,7 @@ impl Game {
             targets: targets.to_vec(),
             kind: StackKind::Spell,
             modes: Vec::new(),
+            x: payment.x,
         });
         self.emit(Event::Cast {
             seat,
@@ -139,6 +140,7 @@ impl Game {
                 targets: targets.to_vec(),
                 kind: StackKind::Equip { source: object },
                 modes: Vec::new(),
+                x: 0,
             });
             self.emit(Event::Activated {
                 seat,
@@ -158,7 +160,7 @@ impl Game {
             .ok_or_else(|| RulesError::illegal("no such ability"))?;
         for cost in &ability.cost {
             match cost {
-                Cost::Mana(m) => self.pay_mana(seat, payment, m)?,
+                Cost::Mana(m) => self.pay_mana(seat, payment, &m.with_x(payment.x))?,
                 Cost::Tap => {
                     if self.objects[object].tapped {
                         return Err(RulesError::illegal(format!("{object} is already tapped")));
@@ -222,6 +224,7 @@ impl Game {
             targets: targets.to_vec(),
             kind: StackKind::Ability { source: object, index },
             modes: Vec::new(),
+            x: payment.x,
         });
         self.emit(Event::Activated {
             seat,
@@ -246,6 +249,7 @@ impl Game {
             targets,
             kind,
             modes,
+            x,
         } = so;
         match kind {
             StackKind::Spell => {
@@ -282,7 +286,7 @@ impl Game {
                     choose: cardir::ModeChoice::One,
                 });
                 if !def.is_modal() {
-                    let ctx = Ctx::new(controller, Some(object), groups, None);
+                    let ctx = Ctx::new(controller, Some(object), groups, None).with_x(x);
                     return self.run(Continuation::new(ctx, specs, spell.effects));
                 }
                 // Each chosen mode runs in order with its own targets: frames go
@@ -299,7 +303,10 @@ impl Game {
                     let n = mode.targets.len();
                     let mode_groups = groups[at..(at + n).min(groups.len())].to_vec();
                     at += n;
-                    runs.push((Ctx::new(controller, Some(object), mode_groups, None), mode.effects.clone()));
+                    runs.push((
+                        Ctx::new(controller, Some(object), mode_groups, None).with_x(x),
+                        mode.effects.clone(),
+                    ));
                 }
                 for (ctx, effects) in runs.into_iter().rev() {
                     k.frames.push(Frame::Effects { effects, next: 0 });
@@ -313,7 +320,7 @@ impl Game {
                 let Some(groups) = self.legal_target_groups(controller, source, &ability.targets, &targets, None) else {
                     return true;
                 };
-                let ctx = Ctx::new(controller, Some(source), groups, None);
+                let ctx = Ctx::new(controller, Some(source), groups, None).with_x(x);
                 self.run(Continuation::new(ctx, ability.targets, ability.effects))
             }
             StackKind::Equip { source } => {

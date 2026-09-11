@@ -78,6 +78,30 @@ impl Game {
         out
     }
 
+    /// Every way to pay a cost that may have an `{X}`: for each value of X
+    /// that can be afforded (from 0 up), the payments for the cost with that
+    /// X, each marked with it.
+    pub fn enumerate_x_payments(&self, seat: Seat, cost: &ManaCost) -> Vec<ManaPayment> {
+        if !cost.has_x() {
+            return self.enumerate_payments(seat, cost);
+        }
+        let mut out = Vec::new();
+        for x in 0..=u8::MAX as u32 {
+            let mut payments = self.enumerate_payments(seat, &cost.with_x(x));
+            if payments.is_empty() {
+                break; // more X needs more mana still
+            }
+            // Generic mana paid from many colours has many splits; two per X
+            // is plenty to list, since any payment that covers the cost is accepted.
+            payments.truncate(2);
+            out.extend(payments.into_iter().map(|mut p| {
+                p.x = x;
+                p
+            }));
+        }
+        out
+    }
+
     /// Every distinct way `seat` could pay `cost` right now: one colour
     /// combination at a time (§10), realised as concrete permanents in up to
     /// two ways — lands first (fewest creatures tapped), and producers first

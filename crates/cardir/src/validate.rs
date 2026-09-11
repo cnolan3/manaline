@@ -23,6 +23,8 @@ struct Ctx<'a> {
     direct: bool,
     /// Names bound by earlier `Chosen`s in the current effect list.
     bound: Vec<String>,
+    /// Whether the spell or ability being checked has an `{X}` in its cost.
+    has_x: bool,
     errors: Vec<String>,
 }
 
@@ -156,7 +158,12 @@ impl Ctx<'_> {
             Amount::Count(f) => self.filter(f),
             Amount::LifeOf(p) => self.player_ref(p),
             Amount::PowerOf(r) => self.reference(r),
-            Amount::X => self.err("X amounts are not supported yet (no X costs)"),
+            Amount::Neg(a) => self.amount(a),
+            Amount::X => {
+                if !self.has_x {
+                    self.err("X is used but the cost has no {X}");
+                }
+            }
         }
     }
 
@@ -335,6 +342,7 @@ pub fn validate(card: &Card) -> Result<(), ValidationError> {
         in_trigger: false,
         direct: false,
         bound: Vec::new(),
+        has_x: false,
         errors: Vec::new(),
     };
 
@@ -376,6 +384,7 @@ pub fn validate(card: &Card) -> Result<(), ValidationError> {
     }
 
     if let Some(spell) = &card.spell {
+        ctx.has_x = card.cost.has_x();
         if spell.modes.is_empty() {
             ctx.targets(&spell.targets);
             if spell.effects.is_empty() {
@@ -409,6 +418,7 @@ pub fn validate(card: &Card) -> Result<(), ValidationError> {
         ctx.targets = 0;
         ctx.filter(f);
     }
+    ctx.has_x = false;
     for s in &card.statics {
         ctx.targets = 0;
         ctx.static_(s);
@@ -429,6 +439,7 @@ pub fn validate(card: &Card) -> Result<(), ValidationError> {
         ctx.in_trigger = false;
     }
     for a in &card.activated {
+        ctx.has_x = a.cost.iter().any(|c| matches!(c, Cost::Mana(m) if m.has_x()));
         ctx.targets(&a.targets);
         if a.cost.is_empty() {
             ctx.err("an activated ability needs a cost");

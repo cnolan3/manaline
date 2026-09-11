@@ -1,0 +1,7 @@
+Card(
+    name: "Heat Ray",
+    cost: "{X}{R}",
+    types: [Instant],
+    text: "Heat Ray deals X damage to target creature.",
+    spell: Spell(targets: [Creature], effects: [DealDamage(amount: X, to: Target(0))]),
+)

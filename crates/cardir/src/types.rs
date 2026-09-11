@@ -147,12 +147,15 @@ impl Keyword {
     }
 }
 
-/// A mana cost. v1 has no hybrid, phyrexian, or X symbols. Serializes as
-/// its Oracle text, e.g. `"{1}{G}{G}"`.
+/// A mana cost: generic, coloured pips, and any number of `{X}` symbols
+/// (no hybrid or phyrexian mana). Serializes as its Oracle text, e.g.
+/// `"{X}{1}{G}"`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct ManaCost {
     pub generic: u8,
     pub pips: Vec<Color>,
+    /// How many `{X}` symbols: each is paid with the announced value of X.
+    pub x: u8,
 }
 
 impl ManaCost {
@@ -168,6 +171,8 @@ impl ManaCost {
             let sym = &rest[1..close];
             if let Ok(n) = sym.parse::<u8>() {
                 cost.generic = cost.generic.saturating_add(n);
+            } else if sym == "X" {
+                cost.x = cost.x.saturating_add(1);
             } else if sym.len() == 1 {
                 let c =
                     Color::from_symbol(sym.chars().next().unwrap()).ok_or_else(|| format!("unknown mana symbol {{{sym}}} in {text:?}"))?;
@@ -190,7 +195,21 @@ impl ManaCost {
     }
 
     pub fn is_free(&self) -> bool {
-        self.generic == 0 && self.pips.is_empty()
+        self.generic == 0 && self.pips.is_empty() && self.x == 0
+    }
+
+    /// Whether the cost has an X to announce.
+    pub fn has_x(&self) -> bool {
+        self.x > 0
+    }
+
+    /// The cost with X announced as `value`: every `{X}` becomes that much generic mana.
+    pub fn with_x(&self, value: u32) -> ManaCost {
+        ManaCost {
+            generic: (self.generic as u32 + self.x as u32 * value).min(u8::MAX as u32) as u8,
+            pips: self.pips.clone(),
+            x: 0,
+        }
     }
 
     /// The colours in the cost, each once, in WUBRG order.
@@ -204,7 +223,10 @@ impl ManaCost {
 
 impl fmt::Display for ManaCost {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.generic > 0 || self.pips.is_empty() {
+        for _ in 0..self.x {
+            f.write_str("{X}")?;
+        }
+        if self.generic > 0 || (self.pips.is_empty() && self.x == 0) {
             write!(f, "{{{}}}", self.generic)?;
         }
         for c in &self.pips {
@@ -239,8 +261,8 @@ impl JsonSchema for ManaCost {
     fn json_schema(_gen: &mut schemars::SchemaGenerator) -> schemars::Schema {
         schemars::json_schema!({
             "type": "string",
-            "description": "A mana cost in Oracle notation, e.g. \"{1}{G}{G}\"; empty for no cost.",
-            "pattern": "^(\\{[0-9WUBRG]\\})*$"
+            "description": "A mana cost in Oracle notation, e.g. \"{1}{G}{G}\" or \"{X}{R}\"; empty for no cost.",
+            "pattern": "^(\\{[0-9XWUBRG]\\})*$"
         })
     }
 }
@@ -258,7 +280,11 @@ mod tests {
         assert_eq!(c.to_string(), "{1}{G}{G}");
         assert!(ManaCost::parse("").unwrap().is_free());
         assert_eq!(ManaCost::parse("{0}").unwrap().to_string(), "{0}");
-        assert!(ManaCost::parse("{X}{R}").is_err());
+        let x = ManaCost::parse("{X}{X}{1}{R}").unwrap();
+        assert_eq!((x.x, x.generic, x.mana_value()), (2, 1, 2));
+        assert_eq!(x.to_string(), "{X}{X}{1}{R}");
+        assert_eq!(x.with_x(3).to_string(), "{7}{R}");
+        assert!(!x.is_free() && x.has_x());
         let json = serde_json::to_string(&c).unwrap();
         assert_eq!(json, "\"{1}{G}{G}\"");
         let back: ManaCost = serde_json::from_str(&json).unwrap();

@@ -184,6 +184,29 @@ Card(
     }
 
     #[test]
+    fn x_costs_render_and_are_scoped_to_the_cost_that_has_them() {
+        let cases = [
+            r#"Card(name: "Blaze", cost: "{X}{R}", types: [Sorcery], text: "Blaze deals X damage to any target.", spell: Spell(targets: [Any], effects: [DealDamage(amount: X, to: Target(0))]))"#,
+            r#"Card(name: "Death Wind", cost: "{X}{B}", types: [Instant], text: "Target creature gets -X/-X until end of turn.", spell: Spell(targets: [Creature], effects: [ModifyPt(target: Target(0), power: Neg(X), toughness: Neg(X), until: EndOfTurn)]))"#,
+            r#"Card(name: "Mind Spring", cost: "{X}{U}{U}", types: [Sorcery], text: "Draw X cards.", spell: Spell(effects: [Draw(player: You, count: X)]))"#,
+            r#"Card(name: "Breather", cost: "{R}", types: [Creature], pt: (1, 1), text: "{X}: Breather gets +X/+0 until end of turn.", activated: [Ability(cost: [Mana("{X}")], effects: [ModifyPt(target: This, power: X, toughness: Const(0), until: EndOfTurn)])])"#,
+        ];
+        for text in cases {
+            let card = load(text).unwrap_or_else(|e| panic!("{e}"));
+            if let Err((want, got)) = round_trips(&card) {
+                panic!("{}:\n  oracle:   {want}\n  rendered: {got}", card.name);
+            }
+        }
+        let bad = r#"Card(name: "N", cost: "{R}", types: [Sorcery], text: "", spell: Spell(effects: [Draw(player: You, count: X)]))"#;
+        assert!(load(bad).unwrap_err().contains("no {X}"));
+        let bad = r#"Card(name: "M", cost: "{X}{R}", types: [Creature], pt: (1, 1), text: "", activated: [Ability(cost: [Tap], effects: [Draw(player: You, count: X)])])"#;
+        assert!(
+            load(bad).unwrap_err().contains("no {X}"),
+            "an ability's X is its own cost's, not the card's"
+        );
+    }
+
+    #[test]
     fn chosen_is_only_a_direct_target_and_named_needs_its_binding() {
         let bad = r#"Card(name: "B", cost: "{R}", types: [Instant], text: "", spell: Spell(effects: [DealDamage(amount: PowerOf(Chosen(who: You, filter: Creature, count: Exactly(1))), to: Player(You))]))"#;
         assert!(load(bad).unwrap_err().contains("direct target"), "{}", load(bad).unwrap_err());

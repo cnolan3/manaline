@@ -1,0 +1,7 @@
+Card(
+    name: "Stroke of Genius",
+    cost: "{X}{2}{U}",
+    types: [Instant],
+    text: "Target player draws X cards.",
+    spell: Spell(targets: [Player], effects: [Draw(player: TargetPlayer(0), count: X)]),
+)

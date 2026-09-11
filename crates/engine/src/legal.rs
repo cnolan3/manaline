@@ -110,7 +110,7 @@ impl Game {
                     if !(sorcery_timing || def.ir.has_instant_speed()) {
                         continue;
                     }
-                    let payments = self.enumerate_payments(seat, &self.cast_cost(seat, id));
+                    let payments = self.enumerate_x_payments(seat, &self.cast_cost(seat, id));
                     if payments.is_empty() {
                         continue;
                     }
@@ -228,7 +228,7 @@ impl Game {
                                 .iter()
                                 .any(|c| matches!(c, cardir::Cost::Tap | cardir::Cost::SacrificeThis));
                             let ps: Vec<crate::action::ManaPayment> = self
-                                .enumerate_payments(seat, m)
+                                .enumerate_x_payments(seat, m)
                                 .into_iter()
                                 .filter(|p| !(self_used && p.tap.contains(&id)))
                                 .collect();
@@ -242,6 +242,7 @@ impl Game {
                                             let mut b = base.clone();
                                             b.tap.extend(p.tap.iter().copied());
                                             b.from_pool.extend(p.from_pool.iter().copied());
+                                            b.x = p.x;
                                             b
                                         })
                                     })

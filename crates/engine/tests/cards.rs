@@ -38,6 +38,7 @@ fn db_with_extras() -> Arc<engine::CardDb> {
         r#"Card(name: "Test Charm", cost: "{G}", types: [Instant], text: "Choose one or both —\n• Target creature gets +2/+2 until end of turn.\n• Draw a card.", spell: Spell(choose: OneOrBoth, modes: [Mode(targets: [Creature], effects: [ModifyPt(target: Target(0), power: Const(2), toughness: Const(2), until: EndOfTurn)]), Mode(effects: [Draw(player: You, count: Const(1))])]))"#,
         r#"Card(name: "Test Volley", cost: "{R}", types: [Instant], text: "Test Volley deals 2 damage to each of up to two target creatures.", spell: Spell(targets: [Targets(UpTo(2), Creature)], effects: [DealDamage(amount: Const(2), to: Target(0))]))"#,
         r#"Card(name: "Test Ward", cost: "{W}", types: [Instant], text: "Target creature gets +2/+2 until your next turn.", spell: Spell(targets: [Creature], effects: [ModifyPt(target: Target(0), power: Const(2), toughness: Const(2), until: UntilYourNextTurn)]))"#,
+        r#"Card(name: "Test Breather", cost: "{R}", types: [Creature], subtypes: ["Elemental"], pt: (1, 1), text: "{X}: Test Breather gets +X/+0 until end of turn.", activated: [Ability(cost: [Mana("{X}")], effects: [ModifyPt(target: This, power: X, toughness: Const(0), until: EndOfTurn)])])"#,
         r#"Card(name: "Test Rouse", cost: "{G}", types: [Instant], text: "Tap a creature you control, then it gets +2/+2 until end of turn.", spell: Spell(effects: [Sequence([Tap(target: Chosen(who: You, filter: And([Creature, ControlledBy(You)]), count: Exactly(1), bind: "c")), ModifyPt(target: Named("c"), power: Const(2), toughness: Const(2), until: EndOfTurn)])]))"#,
     ];
     let mut all = cards::core_ir();
@@ -673,6 +674,90 @@ fn until_your_next_turn_outlasts_the_opponents_turn() {
     assert_eq!(game.effective_stats(bears), Some((4, 4)), "still on during the opponent's turn");
     advance_until(&mut game, |g| g.turn == 3).unwrap();
     assert_eq!(game.effective_stats(bears), Some((2, 2)), "gone as my next turn begins");
+}
+
+#[test]
+fn x_is_announced_with_the_payment_and_read_at_resolution() {
+    let mut game = TestGame::new(db(), 2)
+        .battlefield(Seat(0), "Mountain")
+        .battlefield(Seat(0), "Mountain")
+        .battlefield(Seat(0), "Mountain")
+        .hand(Seat(0), "Blaze")
+        .build();
+    let blaze = hand_card(&game, Seat(0), "Blaze");
+    let mountains = bfs(&game, Seat(0), "Mountain");
+    let casts: Vec<Action> = game
+        .legal_actions(Seat(0))
+        .into_iter()
+        .filter(|a| matches!(a, Action::CastSpell { object, targets, .. } if *object == blaze && targets == &vec![Target::Player(Seat(1))]))
+        .collect();
+    let mut xs: Vec<u32> = casts.iter().filter_map(|a| a.payment().map(|p| p.x)).collect();
+    xs.sort();
+    xs.dedup();
+    assert_eq!(xs, vec![0, 1, 2], "every affordable X, from zero");
+    let two = casts.iter().find(|a| a.payment().map(|p| p.x) == Some(2)).unwrap();
+    assert!(
+        engine::text::describe_action(&game, two).contains("X=2"),
+        "{}",
+        engine::text::describe_action(&game, two)
+    );
+    // A hand-built payment naming its own lands is fine as long as it covers {X}{R} at that X.
+    let custom = Action::CastSpell {
+        object: blaze,
+        targets: vec![Target::Player(Seat(1))],
+        payment: engine::ManaPayment {
+            tap: vec![mountains[0], mountains[2]],
+            x: 1,
+            ..Default::default()
+        },
+    };
+    game.apply(Seat(0), &custom).unwrap();
+    assert!(!game.objects[mountains[1]].tapped);
+    assert_eq!(game.stack[0].x, 1);
+    assert_eq!(game.view(Seat(1)).stack[0].x, 1, "the announced X is public");
+    resolve_top(&mut game);
+    assert_eq!(game.players[1].life, 19);
+    // Too little mana for the announced X is refused.
+    let mut game = TestGame::new(db(), 2)
+        .battlefield(Seat(0), "Mountain")
+        .battlefield(Seat(0), "Mountain")
+        .hand(Seat(0), "Blaze")
+        .build();
+    let blaze = hand_card(&game, Seat(0), "Blaze");
+    let mountains = bfs(&game, Seat(0), "Mountain");
+    let greedy = Action::CastSpell {
+        object: blaze,
+        targets: vec![Target::Player(Seat(1))],
+        payment: engine::ManaPayment {
+            tap: mountains.clone(),
+            x: 2,
+            ..Default::default()
+        },
+    };
+    assert!(matches!(game.apply(Seat(0), &greedy), Err(RulesError::IllegalAction { .. })));
+}
+
+#[test]
+fn an_ability_with_an_x_cost_announces_x_too() {
+    let mut game = TestGame::new(db_with_extras(), 2)
+        .battlefield(Seat(0), "Test Breather")
+        .battlefield(Seat(0), "Mountain")
+        .battlefield(Seat(0), "Mountain")
+        .build();
+    let breather = bf(&game, Seat(0), "Test Breather");
+    let acts: Vec<Action> = game
+        .legal_actions(Seat(0))
+        .into_iter()
+        .filter(|a| matches!(a, Action::ActivateAbility { object, .. } if *object == breather))
+        .collect();
+    let mut xs: Vec<u32> = acts.iter().filter_map(|a| a.payment().map(|p| p.x)).collect();
+    xs.sort();
+    xs.dedup();
+    assert_eq!(xs, vec![0, 1, 2]);
+    let two = acts.iter().find(|a| a.payment().map(|p| p.x) == Some(2)).unwrap().clone();
+    game.apply(Seat(0), &two).unwrap();
+    resolve_top(&mut game);
+    assert_eq!(game.effective_stats(breather), Some((3, 1)));
 }
 
 #[test]

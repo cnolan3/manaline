@@ -185,6 +185,7 @@ fn amount_phrase(a: &Amount) -> String {
     match a {
         Amount::Const(n) => n.to_string(),
         Amount::X => "X".into(),
+        Amount::Neg(a) => format!("-{}", amount_phrase(a)),
         Amount::Count(_) | Amount::LifeOf(_) | Amount::PowerOf(_) => "that much".into(),
     }
 }
@@ -194,6 +195,10 @@ fn signed(a: &Amount) -> String {
         Amount::Const(n) if *n >= 0 => format!("+{n}"),
         Amount::Const(n) => n.to_string(),
         Amount::X => "+X".into(),
+        Amount::Neg(a) => match &**a {
+            Amount::Const(n) => format!("-{n}"),
+            other => format!("-{}", amount_phrase(other)),
+        },
         _ => "+that much".into(),
     }
 }

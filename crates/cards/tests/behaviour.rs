@@ -119,6 +119,18 @@ fn cast_raw(game: &mut Game, seat: Seat, name: &str, targets: &[Target]) {
     game.apply(seat, &a).unwrap();
 }
 
+/// Cast a spell with `{X}` in its cost, announcing `x`, and let it resolve.
+fn cast_x(game: &mut Game, name: &str, x: u32, targets: &[Target]) {
+    let id = hand(game, ME, name);
+    let a = game
+        .legal_actions(ME)
+        .into_iter()
+        .find(|a| matches!(a, Action::CastSpell { object, targets: t, payment } if *object == id && t == targets && payment.x == x))
+        .unwrap_or_else(|| panic!("no legal cast of {name} with X={x} and {targets:?}"));
+    game.apply(ME, &a).unwrap();
+    settle(game);
+}
+
 /// Cast a spell whose modes and targets are chosen after paying: pay, pick
 /// each mode in turn (by index), then each target spec's targets in turn.
 fn cast_steps(game: &mut Game, name: &str, modes: &[u8], targets: &[&[Target]]) {
@@ -1048,6 +1060,16 @@ fn registry() -> BTreeMap<&'static str, Check> {
         advance_until(&mut game, |g| g.turn == 2 && g.phase == engine::Phase::Main1).unwrap();
         assert!(game.objects[bear].tapped && game.objects[giant].tapped);
     });
+    check!("Mind Spring", || {
+        let mut game = base().hand(ME, "Mind Spring").library(ME, &["Forest"; 5]).build();
+        cast_x(&mut game, "Mind Spring", 3, &[]);
+        assert_eq!(hand_size(&game, ME), 3);
+    });
+    check!("Stroke of Genius", || {
+        let mut game = base().hand(ME, "Stroke of Genius").build();
+        cast_x(&mut game, "Stroke of Genius", 2, &[Target::Player(OPP)]);
+        assert_eq!(hand_size(&game, OPP), 2);
+    });
     check!("Divination", || draw_spell("Divination", 2));
     check!("Unsummon", || bounce("Unsummon", "Hill Giant"));
     check!("Man-o'-War", || etb("Man-o'-War", Some("Hill Giant"), |g, _| assert_eq!(
@@ -1190,6 +1212,16 @@ fn registry() -> BTreeMap<&'static str, Check> {
             "not artifact creatures"
         );
     });
+    check!("Death Wind", || {
+        let mut game = base().battlefield(OPP, "Hill Giant").hand(ME, "Death Wind").build();
+        let giant = bf(&game, OPP, "Hill Giant");
+        cast_x(&mut game, "Death Wind", 1, &[Target::Object(giant)]);
+        assert_eq!(stats(&game, giant), (2, 2));
+        let mut game = base().hand(ME, "Death Wind").build();
+        let bear = bf(&game, OPP, "Grizzly Bears");
+        cast_x(&mut game, "Death Wind", 2, &[Target::Object(bear)]);
+        assert!(in_graveyard(&game, bear), "0/0 dies");
+    });
     check!("Last Gasp", || shrink("Last Gasp", 3, 3));
     check!("Disfigure", || shrink("Disfigure", 2, 2));
     check!("Grasp of Darkness", || shrink("Grasp of Darkness", 4, 4));
@@ -1288,6 +1320,43 @@ fn registry() -> BTreeMap<&'static str, Check> {
     });
 
     // ----- red -----
+    check!("Blaze", || {
+        let mut game = base().hand(ME, "Blaze").build();
+        cast_x(&mut game, "Blaze", 3, &[Target::Player(OPP)]);
+        assert_eq!(life(&game, OPP), 17);
+        let mut game = base().hand(ME, "Blaze").build();
+        let bear = bf(&game, OPP, "Grizzly Bears");
+        cast_x(&mut game, "Blaze", 2, &[Target::Object(bear)]);
+        assert!(in_graveyard(&game, bear));
+        // X can only be as big as the mana: {X}{R} with two Mountains means X is at most 1.
+        let game = TestGame::new(db(), 2)
+            .battlefield(ME, "Mountain")
+            .battlefield(ME, "Mountain")
+            .hand(ME, "Blaze")
+            .build();
+        let mut xs: Vec<u32> = game
+            .legal_actions(ME)
+            .iter()
+            .filter_map(|a| match a {
+                Action::CastSpell { payment, .. } => Some(payment.x),
+                _ => None,
+            })
+            .collect();
+        xs.sort();
+        xs.dedup();
+        assert_eq!(xs, vec![0, 1]);
+    });
+    check!("Heat Ray", || {
+        let mut game = base().hand(ME, "Heat Ray").build();
+        let bear = bf(&game, OPP, "Grizzly Bears");
+        cast_x(&mut game, "Heat Ray", 2, &[Target::Object(bear)]);
+        assert!(in_graveyard(&game, bear));
+    });
+    check!("Volcanic Geyser", || {
+        let mut game = base().hand(ME, "Volcanic Geyser").build();
+        cast_x(&mut game, "Volcanic Geyser", 4, &[Target::Player(OPP)]);
+        assert_eq!(life(&game, OPP), 16);
+    });
     check!("Lightning Bolt", || burn("Lightning Bolt", 3, true, true));
     check!("Shock", || burn("Shock", 2, true, true));
     check!("Lightning Strike", || burn("Lightning Strike", 3, true, true));
@@ -1539,6 +1608,11 @@ fn registry() -> BTreeMap<&'static str, Check> {
             .battlefield(ME, "Mountain")
             .build();
         assert_eq!(stats(&game, bf(&game, ME, "Wild Nacatl")), (2, 2));
+    });
+    check!("Stream of Life", || {
+        let mut game = base().hand(ME, "Stream of Life").build();
+        cast_x(&mut game, "Stream of Life", 5, &[Target::Player(ME)]);
+        assert_eq!(life(&game, ME), 25);
     });
     check!("Giant Growth", || pump("Giant Growth", 3, 3, &[]));
     check!("Titanic Growth", || pump("Titanic Growth", 4, 4, &[]));

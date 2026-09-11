@@ -136,7 +136,7 @@ impl Game {
 
     /// Begin casting a two-step spell: mana is paid, the card stays in hand
     /// while its modes and targets are chosen, nobody holds priority.
-    pub(crate) fn begin_two_step_cast(&mut self, seat: Seat, object: ObjectId) {
+    pub(crate) fn begin_two_step_cast(&mut self, seat: Seat, object: ObjectId, x: u32) {
         self.pending = Some(PendingChoice::Casting {
             seat,
             object,
@@ -144,6 +144,7 @@ impl Game {
             modes_done: false,
             targets: Vec::new(),
             spec: 0,
+            x,
         });
         self.priority = None;
         self.advance_casting();
@@ -160,6 +161,7 @@ impl Game {
                 modes_done,
                 targets,
                 spec,
+                x,
             }) = &self.pending
             else {
                 return;
@@ -170,9 +172,9 @@ impl Game {
             }
             let specs = Self::cast_specs(&def, modes);
             if *spec >= specs.len() {
-                let (seat, object, modes, targets) = (*seat, *object, modes.clone(), targets.clone());
+                let (seat, object, modes, targets, x) = (*seat, *object, modes.clone(), targets.clone(), *x);
                 self.pending = None;
-                self.finish_cast(seat, object, modes, targets);
+                self.finish_cast(seat, object, modes, targets, x);
                 return;
             }
             let (inner, min, _) = specs[*spec].spec_bounds();
@@ -216,7 +218,7 @@ impl Game {
     }
 
     /// The spell goes on the stack with everything chosen; the caster gets priority.
-    fn finish_cast(&mut self, seat: Seat, object: ObjectId, modes: Vec<u8>, targets: Vec<Target>) {
+    fn finish_cast(&mut self, seat: Seat, object: ObjectId, modes: Vec<u8>, targets: Vec<Target>, x: u32) {
         self.objects[object].controller = seat;
         self.move_object(object, Zone::Stack);
         self.stack.push(StackObject {
@@ -225,6 +227,7 @@ impl Game {
             targets: targets.clone(),
             kind: StackKind::Spell,
             modes,
+            x,
         });
         self.emit(Event::Cast { seat, object, targets });
         self.give_priority(seat);

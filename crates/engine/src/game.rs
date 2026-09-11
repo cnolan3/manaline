@@ -148,6 +148,8 @@ pub enum PendingChoice {
         targets: Vec<Target>,
         /// Index of the next spec to choose for.
         spec: usize,
+        /// The value announced for `{X}`.
+        x: u32,
     },
 }
 
@@ -218,6 +220,9 @@ pub struct StackObject {
     /// A modal spell's chosen modes, in order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub modes: Vec<u8>,
+    /// The value announced for `{X}`.
+    #[serde(default)]
+    pub x: u32,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -602,7 +607,7 @@ impl Game {
                 match (listed_twin, action.mana_cost_in(self)) {
                     (Some(_), Some(cost)) => {
                         let payment = action.payment().expect("cast or activation");
-                        self.payment_covers(seat, payment, &cost)?;
+                        self.payment_covers(seat, payment, &cost.with_x(payment.x))?;
                     }
                     _ => {
                         return Err(RulesError::illegal(format!(
@@ -780,6 +785,7 @@ impl Game {
                 controller: s.controller,
                 targets: s.targets.clone(),
                 modes: s.modes.clone(),
+                x: s.x,
                 kind: match s.kind {
                     StackKind::Spell => "spell",
                     StackKind::Ability { .. } => "ability",

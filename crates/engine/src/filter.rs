@@ -25,6 +25,9 @@ pub struct Ctx {
     /// Options picked by index ("you may": 0 did it, 1 declined), by name.
     #[serde(default)]
     pub options: BTreeMap<String, u8>,
+    /// The value announced for `{X}` when this was cast or activated.
+    #[serde(default)]
+    pub x: i32,
 }
 
 impl Ctx {
@@ -40,7 +43,13 @@ impl Ctx {
             triggering,
             bindings: BTreeMap::new(),
             options: BTreeMap::new(),
+            x: 0,
         }
+    }
+
+    pub fn with_x(mut self, x: u32) -> Ctx {
+        self.x = x as i32;
+        self
     }
 }
 
@@ -363,7 +372,8 @@ impl Game {
             }
             Amount::LifeOf(p) => self.players_of(p, ctx).first().map(|s| self.players[s.index()].life).unwrap_or(0),
             Amount::PowerOf(r) => self.objects_of(r, ctx).first().map(|id| self.power(*id)).unwrap_or(0),
-            Amount::X => 0,
+            Amount::X => ctx.x,
+            Amount::Neg(a) => -self.eval_amount(a, ctx),
         }
     }
 }

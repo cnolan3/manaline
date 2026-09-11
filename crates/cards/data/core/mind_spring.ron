@@ -1,0 +1,7 @@
+Card(
+    name: "Mind Spring",
+    cost: "{X}{U}{U}",
+    types: [Sorcery],
+    text: "Draw X cards.",
+    spell: Spell(effects: [Draw(player: You, count: X)]),
+)

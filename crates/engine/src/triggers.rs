@@ -323,6 +323,7 @@ impl Game {
             targets: targets.clone(),
             kind,
             modes: Vec::new(),
+            x: 0,
         });
         self.emit(Event::Triggered {
             source: f.source,

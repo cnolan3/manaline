@@ -39,6 +39,13 @@ pub struct ManaPayment {
     /// Cards discarded to pay a "Discard a card" cost.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub discard: Vec<ObjectId>,
+    /// The value announced for `{X}` in the cost; ignored for costs without one.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub x: u32,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 /// The `ability` index that means "equip" on an Equipment.

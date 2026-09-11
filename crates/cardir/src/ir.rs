@@ -293,7 +293,10 @@ pub enum Amount {
     Count(Filter),
     LifeOf(PlayerRef),
     PowerOf(Ref),
+    /// The value announced for the spell's or ability's `{X}`.
     X,
+    /// The negative of an amount ("-X/-X").
+    Neg(Box<Amount>),
 }
 
 /// Something an effect acts on.

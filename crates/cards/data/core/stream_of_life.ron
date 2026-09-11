@@ -1,0 +1,7 @@
+Card(
+    name: "Stream of Life",
+    cost: "{X}{G}",
+    types: [Sorcery],
+    text: "Target player gains X life.",
+    spell: Spell(targets: [Player], effects: [GainLife(player: TargetPlayer(0), amount: X)]),
+)

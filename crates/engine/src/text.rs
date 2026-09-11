@@ -279,6 +279,9 @@ pub fn describe_action(game: &Game, a: &Action) -> String {
                 .map(|_| game.card_def(*object).cost.to_string())
                 .unwrap_or_default();
             let mut s = format!("Cast {} {cost}", obj(game, *object));
+            if payment.x > 0 || cost.contains("{X}") {
+                write!(s, " X={}", payment.x).unwrap();
+            }
             if !targets.is_empty() {
                 let list: Vec<String> = targets
                     .iter()
@@ -319,6 +322,9 @@ pub fn describe_action(game: &Game, a: &Action) -> String {
                 (None, i) => format!("ability {i}"),
             };
             let mut s = format!("{}: {what}", obj(game, *object));
+            if payment.x > 0 || what.contains("{X}") {
+                write!(s, " X={}", payment.x).unwrap();
+            }
             if !targets.is_empty() {
                 let list: Vec<String> = targets
                     .iter()
@@ -463,7 +469,8 @@ pub fn render_view(v: &GameView) -> String {
             } else {
                 format!(" → {}", targets.join(", "))
             };
-            writeln!(s, "  {} {}{what}{arrow} ({})", so.name, so.object, seat_label(so.controller)).unwrap();
+            let x = if so.x > 0 { format!(" X={}", so.x) } else { String::new() };
+            writeln!(s, "  {} {}{x}{what}{arrow} ({})", so.name, so.object, seat_label(so.controller)).unwrap();
         }
     }
     let describe = |id: crate::types::ObjectId| -> String {

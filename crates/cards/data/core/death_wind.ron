@@ -1,0 +1,7 @@
+Card(
+    name: "Death Wind",
+    cost: "{X}{B}",
+    types: [Instant],
+    text: "Target creature gets -X/-X until end of turn.",
+    spell: Spell(targets: [Creature], effects: [ModifyPt(target: Target(0), power: Neg(X), toughness: Neg(X), until: EndOfTurn)]),
+)
