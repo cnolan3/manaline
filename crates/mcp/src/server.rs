@@ -32,6 +32,8 @@ pub struct McpServer {
     pub cards: Arc<engine::CardDb>,
     pub format: engine::Format,
     index: Arc<std::sync::OnceLock<Arc<cardsearch::Index>>>,
+    /// Where deckbuilders announce themselves (and, later, games).
+    pub runtime: protocol::endpoint::Runtime,
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -161,8 +163,8 @@ fn find_deck(name: &str) -> Option<DeckSource> {
 }
 
 /// The file the human has open in the deckbuilder, if exactly one editor is running.
-fn open_editor() -> Result<Option<protocol::endpoint::EditorSession>, String> {
-    let mut live = protocol::endpoint::EditorSession::live();
+fn open_editor_in(runtime: &protocol::endpoint::Runtime) -> Result<Option<protocol::endpoint::EditorSession>, String> {
+    let mut live = runtime.live_editors();
     match live.len() {
         0 => Ok(None),
         1 => Ok(live.pop()),
@@ -288,6 +290,7 @@ impl McpServer {
             format: session.format.clone(),
             session: Arc::new(std::sync::RwLock::new(Some(session))),
             index: Arc::new(std::sync::OnceLock::new()),
+            runtime: protocol::endpoint::Runtime::default(),
         }
     }
 
@@ -298,7 +301,15 @@ impl McpServer {
             cards: Arc::new(cards::core()),
             format,
             index: Arc::new(std::sync::OnceLock::new()),
+            runtime: protocol::endpoint::Runtime::default(),
         }
+    }
+
+    /// Look for deckbuilders (and games) under this runtime directory instead
+    /// of the user's.
+    pub fn with_runtime(mut self, runtime: protocol::endpoint::Runtime) -> McpServer {
+        self.runtime = runtime;
+        self
     }
 
     /// The seat this server plays, if it is in a game.
@@ -381,7 +392,7 @@ impl McpServer {
         if self.session().is_some() {
             return tool_error("the deckbuilder tools are only available when helping a human (no game connected)");
         }
-        let editor = match open_editor() {
+        let editor = match open_editor_in(&self.runtime) {
             Ok(Some(e)) => e,
             Ok(None) => return tool_error("no deckbuilder is open; ask the human to run `manaline deck edit <file>` and try again"),
             Err(e) => return tool_error(e),
@@ -950,7 +961,7 @@ impl McpServer {
         }
         let _ = writeln!(text, "\ndecks are looked up in: {}", cards::deck_dirs_text());
         if self.session().is_none() {
-            match open_editor() {
+            match open_editor_in(&self.runtime) {
                 Ok(Some(e)) => {
                     let _ = writeln!(
                         text,
@@ -1118,7 +1129,7 @@ impl ServerHandler for McpServer {
                 session.me.0
             )),
             None => {
-                let open = match open_editor() {
+                let open = match open_editor_in(&self.runtime) {
                     Ok(Some(e)) => format!(" The human has {} open in the deckbuilder: the editor_* tools act on it.", e.path.display()),
                     _ => " No deckbuilder is open yet; ask the human to run `manaline deck edit <file>` before changing a deck.".to_string(),
                 };

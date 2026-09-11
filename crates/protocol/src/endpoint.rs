@@ -49,7 +49,13 @@ impl fmt::Display for Endpoint {
 
 /// The per-user runtime directory for sockets: `$XDG_RUNTIME_DIR/manaline`
 /// on Linux; macOS has no runtime dir, so `$TMPDIR/manaline-<uid>` (mode 0700).
+/// The per-user runtime directory: `MANALINE_RUNTIME_DIR` if set (tests and
+/// scripts isolate themselves with it), else `$XDG_RUNTIME_DIR/manaline` or
+/// a per-uid directory under the temp dir.
 pub fn runtime_dir() -> PathBuf {
+    if let Some(d) = std::env::var_os("MANALINE_RUNTIME_DIR") {
+        return PathBuf::from(d);
+    }
     if let Some(d) = dirs::runtime_dir() {
         return d.join("manaline");
     }
@@ -98,43 +104,40 @@ pub fn display_path(p: &Path) -> String {
     p.display().to_string()
 }
 
-/// An open deckbuilder announces itself here so an MCP server helping the
-/// human can find the file they are editing: one JSON file per editor
-/// process under `<runtime dir>/editors/`, removed when the editor exits and
-/// ignored once its process is gone.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct EditorSession {
-    pub pid: u32,
-    pub path: PathBuf,
-    pub format: String,
-    /// The editor's Unix socket, if it accepts requests (see `crate::editor`).
-    #[serde(default)]
-    pub socket: Option<PathBuf>,
+/// A runtime directory to look things up in and announce things under.
+/// `Runtime::default()` is the user's real one; tests and tools that must not
+/// see each other use `Runtime::at(dir)`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Runtime {
+    pub dir: PathBuf,
 }
 
-/// Where editor markers live: `<runtime dir>/editors`.
-pub fn editor_sessions_dir() -> PathBuf {
-    runtime_dir().join("editors")
+impl Default for Runtime {
+    fn default() -> Self {
+        Runtime { dir: runtime_dir() }
+    }
 }
 
-/// Where the editor running as `pid` should listen: `<editors dir>/<pid>.sock`.
-pub fn socket_path_for(pid: u32) -> PathBuf {
-    editor_sessions_dir().join(format!("{pid}.sock"))
-}
-
-impl EditorSession {
-    /// Record this process as editing `path` (canonicalised when possible). Writes `<dir>/<pid>.json`.
-    pub fn announce(path: &Path, format: &str) -> std::io::Result<EditorSession> {
-        Self::write_marker(path, format, None)
+impl Runtime {
+    pub fn at(dir: impl Into<PathBuf>) -> Runtime {
+        Runtime { dir: dir.into() }
     }
 
-    /// As `announce`, but also record the socket this editor listens on for agent requests.
-    pub fn announce_with_socket(path: &Path, format: &str, socket: &Path) -> std::io::Result<EditorSession> {
-        Self::write_marker(path, format, Some(socket.to_path_buf()))
+    /// Where editor markers live: `<runtime dir>/editors`.
+    pub fn editors_dir(&self) -> PathBuf {
+        self.dir.join("editors")
     }
 
-    fn write_marker(path: &Path, format: &str, socket: Option<PathBuf>) -> std::io::Result<EditorSession> {
-        let dir = editor_sessions_dir();
+    /// Where the editor running as `pid` should listen: `<editors dir>/<pid>.sock`.
+    pub fn editor_socket_for(&self, pid: u32) -> PathBuf {
+        self.editors_dir().join(format!("{pid}.sock"))
+    }
+
+    /// Record this process as editing `path` (canonicalised when possible),
+    /// with the socket it answers agent requests on if it has one. Writes
+    /// `<editors dir>/<pid>.json`.
+    pub fn announce_editor(&self, path: &Path, format: &str, socket: Option<&Path>) -> std::io::Result<EditorSession> {
+        let dir = self.editors_dir();
         std::fs::create_dir_all(&dir)?;
         #[cfg(unix)]
         {
@@ -145,22 +148,18 @@ impl EditorSession {
             pid: std::process::id(),
             path: std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()),
             format: format.to_string(),
-            socket,
+            socket: socket.map(Path::to_path_buf),
+            dir: dir.clone(),
         };
         let json = serde_json::to_vec_pretty(&session).map_err(std::io::Error::other)?;
         std::fs::write(session.marker_path(), json)?;
         Ok(session)
     }
 
-    /// Remove this editor's marker file.
-    pub fn withdraw(&self) {
-        let _ = std::fs::remove_file(self.marker_path());
-    }
-
     /// Every editor whose process is still alive, sorted by marker file name.
     /// Markers that fail to parse or whose process is gone are deleted on the way.
-    pub fn live() -> Vec<EditorSession> {
-        let dir = editor_sessions_dir();
+    pub fn live_editors(&self) -> Vec<EditorSession> {
+        let dir = self.editors_dir();
         let Ok(entries) = std::fs::read_dir(&dir) else { return Vec::new() };
         let mut files: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
         files.sort();
@@ -173,7 +172,10 @@ impl EditorSession {
                 .ok()
                 .and_then(|bytes| serde_json::from_slice::<EditorSession>(&bytes).ok());
             match parsed {
-                Some(s) if process_alive(s.pid) => out.push(s),
+                Some(mut s) if process_alive(s.pid) => {
+                    s.dir = dir.clone();
+                    out.push(s);
+                }
                 _ => {
                     let _ = std::fs::remove_file(&file);
                 }
@@ -181,9 +183,58 @@ impl EditorSession {
         }
         out
     }
+}
+
+/// An open deckbuilder announces itself so an MCP server helping the human
+/// can find the file they are editing: one JSON file per editor process
+/// under `<runtime dir>/editors/`, removed when the editor exits and
+/// ignored once its process is gone.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct EditorSession {
+    pub pid: u32,
+    pub path: PathBuf,
+    pub format: String,
+    /// The editor's Unix socket, if it accepts requests (see `crate::editor`).
+    #[serde(default)]
+    pub socket: Option<PathBuf>,
+    /// The editors directory this marker lives in (not part of the file).
+    #[serde(skip)]
+    pub dir: PathBuf,
+}
+
+/// Where editor markers live in the default runtime: `<runtime dir>/editors`.
+pub fn editor_sessions_dir() -> PathBuf {
+    Runtime::default().editors_dir()
+}
+
+/// Where the editor running as `pid` should listen, in the default runtime.
+pub fn socket_path_for(pid: u32) -> PathBuf {
+    Runtime::default().editor_socket_for(pid)
+}
+
+impl EditorSession {
+    /// `Runtime::default().announce_editor(path, format, None)`.
+    pub fn announce(path: &Path, format: &str) -> std::io::Result<EditorSession> {
+        Runtime::default().announce_editor(path, format, None)
+    }
+
+    /// `Runtime::default().announce_editor(path, format, Some(socket))`.
+    pub fn announce_with_socket(path: &Path, format: &str, socket: &Path) -> std::io::Result<EditorSession> {
+        Runtime::default().announce_editor(path, format, Some(socket))
+    }
+
+    /// Remove this editor's marker file.
+    pub fn withdraw(&self) {
+        let _ = std::fs::remove_file(self.marker_path());
+    }
+
+    /// `Runtime::default().live_editors()`.
+    pub fn live() -> Vec<EditorSession> {
+        Runtime::default().live_editors()
+    }
 
     fn marker_path(&self) -> PathBuf {
-        editor_sessions_dir().join(format!("{}.json", self.pid))
+        self.dir.join(format!("{}.json", self.pid))
     }
 }
 
@@ -222,14 +273,27 @@ mod tests {
         assert!(replay_path("abc").to_string_lossy().ends_with("games/abc.jsonl"));
     }
     #[test]
+    fn the_runtime_dir_can_be_overridden() {
+        // Set once for this test binary; the other tests only check the
+        // "manaline" naming, which the override keeps.
+        let dir = std::env::temp_dir().join(format!("manaline-rt-{}", std::process::id()));
+        std::env::set_var("MANALINE_RUNTIME_DIR", &dir);
+        assert_eq!(runtime_dir(), dir);
+        assert_eq!(Runtime::default().dir, dir);
+        assert_eq!(socket_path("g").parent().unwrap(), dir);
+    }
+
+    #[test]
     fn editor_sessions_announce_and_expire() {
+        let rt = Runtime::at(std::env::temp_dir().join(format!("manaline-editor-rt-{}", std::process::id())));
+        let _ = std::fs::remove_dir_all(&rt.dir);
         let deck = std::env::temp_dir().join(format!("manaline-editor-test-{}.txt", std::process::id()));
         std::fs::write(&deck, "4 Lightning Bolt\n").unwrap();
-        let session = EditorSession::announce(&deck, "modern").unwrap();
+        let session = rt.announce_editor(&deck, "modern", None).unwrap();
         assert_eq!(session.pid, std::process::id());
         assert_eq!(session.format, "modern");
         assert_eq!(session.socket, None);
-        assert!(EditorSession::live().contains(&session));
+        assert!(rt.live_editors().contains(&session));
 
         // A marker for a process that does not exist is dropped and deleted.
         let dead = EditorSession {
@@ -237,26 +301,27 @@ mod tests {
             path: deck.clone(),
             format: "modern".into(),
             socket: None,
+            dir: rt.editors_dir(),
         };
-        let dead_marker = editor_sessions_dir().join(format!("{}.json", dead.pid));
+        let dead_marker = rt.editors_dir().join(format!("{}.json", dead.pid));
         std::fs::write(&dead_marker, serde_json::to_vec(&dead).unwrap()).unwrap();
-        let live = EditorSession::live();
+        let live = rt.live_editors();
         assert!(live.contains(&session));
         assert!(!live.iter().any(|s| s.pid == dead.pid));
         assert!(!dead_marker.exists());
 
         // An editor that accepts requests records its socket, and `live()` reports it.
-        let sock = socket_path_for(std::process::id());
-        let with_socket = EditorSession::announce_with_socket(&deck, "modern", &sock).unwrap();
+        let sock = rt.editor_socket_for(std::process::id());
+        let with_socket = rt.announce_editor(&deck, "modern", Some(&sock)).unwrap();
         assert_eq!(with_socket.socket.as_deref(), Some(sock.as_path()));
         assert!(sock.to_string_lossy().ends_with(&format!("{}.sock", std::process::id())));
-        let live = EditorSession::live();
+        let live = rt.live_editors();
         assert_eq!(live.iter().find(|s| s.pid == with_socket.pid), Some(&with_socket));
 
         with_socket.withdraw();
-        assert!(!EditorSession::live().contains(&with_socket));
+        assert!(!rt.live_editors().contains(&with_socket));
         session.withdraw();
-        assert!(!EditorSession::live().contains(&session));
+        assert!(!rt.live_editors().contains(&session));
         let _ = std::fs::remove_file(&deck);
     }
 }

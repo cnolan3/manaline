@@ -733,7 +733,9 @@ async fn search_and_deck_stats_tools_work_before_the_game_starts() {
 
 #[tokio::test]
 async fn a_standalone_server_serves_card_data_without_a_game() {
-    let server = mcp::standalone(engine::Format::cube());
+    let rt = std::env::temp_dir().join(format!("manaline-standalone-rt-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&rt);
+    let server = mcp::standalone(engine::Format::cube()).with_runtime(protocol::endpoint::Runtime::at(&rt));
     let res = server
         .search_cards(Parameters(SearchParams {
             query: "t:creature kw:flying c:w mv<=3".into(),
@@ -812,7 +814,7 @@ async fn a_standalone_server_serves_card_data_without_a_game() {
     let socket = dir.join("editor.sock");
     let listener = tokio::net::UnixListener::bind(&socket).unwrap();
     let service = tokio::spawn(tui::editor_service(listener, editor.clone()));
-    let announced = protocol::endpoint::EditorSession::announce_with_socket(&file, "cube", &socket).unwrap();
+    let announced = server.runtime.announce_editor(&file, "cube", Some(&socket)).unwrap();
 
     let res = server.editor_status().await.unwrap();
     assert!(!is_error(&res) && text_of(&res).contains("17 cards"), "{}", text_of(&res));
@@ -921,7 +923,7 @@ async fn play_can_seat_a_running_server_through_its_control_socket() {
     let marker_path = dir.join("mcp.json");
 
     // A standalone server advertising itself, as `manaline mcp` does.
-    let server = mcp::standalone(engine::Format::cube());
+    let server = mcp::standalone(engine::Format::cube()).with_runtime(protocol::endpoint::Runtime::at(&dir));
     let listener = tokio::net::UnixListener::bind(&socket).unwrap();
     let marker = Marker {
         pid: std::process::id(),
