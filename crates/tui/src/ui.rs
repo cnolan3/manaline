@@ -2,7 +2,7 @@
 
 use crate::app::{App, LogKind, Mode};
 use crate::theme::Theme;
-use engine::{ActReason, AttackTarget, CardType, HandView, Keyword, ObjectId, ObjectView, Outcome, Seat};
+use engine::{ActReason, AttackTarget, CardType, HandView, Keyword, ObjectId, ObjectView, Outcome, Seat, Target};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
@@ -380,9 +380,10 @@ fn draw_opponents(f: &mut Frame, app: &App, area: Rect, opponents: &[Seat], row_
             y += 1;
             let (lands, others) = split_field(app, &p.battlefield);
             // Mirrored table: the opponent's lands are farthest from the centre.
-            draw_row(f, app, Rect::new(area.x, y, area.width, row_h), &lands, None);
+            let highlight = picker_highlight(app);
+            draw_row(f, app, Rect::new(area.x, y, area.width, row_h), &lands, highlight.as_ref());
             y += row_h;
-            draw_row(f, app, Rect::new(area.x, y, area.width, row_h), &others, None);
+            draw_row(f, app, Rect::new(area.x, y, area.width, row_h), &others, highlight.as_ref());
             y += row_h;
         } else {
             let line = format!(
@@ -492,7 +493,19 @@ fn picker_highlight(app: &App) -> Option<(Vec<ObjectId>, Option<ObjectId>)> {
                 .collect(),
             p.blockers.get(p.cursor).copied(),
         )),
+        // The target picker marks objects; a player item has no row to highlight.
+        Mode::Pick(p) => Some((
+            p.picked().iter().filter_map(object_of).collect(),
+            p.items.get(p.cursor).and_then(object_of),
+        )),
         _ => None,
+    }
+}
+
+fn object_of(target: &Target) -> Option<ObjectId> {
+    match target {
+        Target::Object(id) => Some(*id),
+        Target::Player(_) => None,
     }
 }
 
@@ -890,10 +903,10 @@ fn draw_overlays(f: &mut Frame, app: &App, area: Rect) {
         }
         Mode::Pick(p) => {
             let marked = p.marked.iter().filter(|m| **m).count();
-            let mut lines = vec![Line::from(format!("Space marks a card; Enter confirms ({marked}/{} marked).", p.count)).dim()];
-            for (i, (id, m)) in p.cards.iter().zip(&p.marked).enumerate() {
+            let mut lines = vec![Line::from(format!("Space toggles; Enter confirms ({marked}/{} marked).", p.count)).dim()];
+            for (i, (t, m)) in p.items.iter().zip(&p.marked).enumerate() {
                 let mark = if *m { "[x]" } else { "[ ]" };
-                let text = format!("{mark} {} {}", i + 1, app.name_of(*id));
+                let text = format!("{mark} {} {}", i + 1, app.target_name(*t));
                 let style = if i == p.cursor {
                     Style::default().add_modifier(Modifier::REVERSED)
                 } else {

@@ -89,19 +89,43 @@ pub struct BlockPicker {
     pub cursor: usize,
 }
 
-/// Pick between `min` and `count` cards (bottoming after a mulligan,
-/// discarding to hand size, or answering an effect's "discard a card").
+/// Pick between `min` and `count` of `items` (bottoming after a mulligan,
+/// discarding to hand size, or answering an effect's or a spell's choice of
+/// targets). Items are `Target`s: objects, or whole players.
 #[derive(Clone, Debug)]
-pub struct CardPicker {
+pub struct TargetPicker {
     pub title: String,
-    pub cards: Vec<ObjectId>,
+    pub items: Vec<Target>,
     pub marked: Vec<bool>,
     pub min: usize,
     pub count: usize,
     pub cursor: usize,
     pub reason: ActReason,
-    /// Answer with `ChooseTargets` (an effect's choice) rather than a cleanup or mulligan action.
+    /// Answer with `ChooseTargets` (an effect's or a cast's choice) rather than
+    /// a cleanup or mulligan action.
     pub choose: bool,
+    /// When answering `ChooseTargets`: every legal answer, so Enter can check
+    /// the marked set against them and send the engine's own ordering.
+    pub answers: Vec<Vec<Target>>,
+}
+
+impl TargetPicker {
+    pub fn picked(&self) -> Vec<Target> {
+        self.items.iter().zip(&self.marked).filter(|(_, m)| **m).map(|(t, _)| *t).collect()
+    }
+
+    /// The legal answer naming exactly `picked`, order-insensitively.
+    fn matching_answer(&self, picked: &[Target]) -> Option<Vec<Target>> {
+        let mut want = picked.to_vec();
+        want.sort();
+        self.answers.iter().find(|a| sorted(a) == want).cloned()
+    }
+}
+
+fn sorted(targets: &[Target]) -> Vec<Target> {
+    let mut v = targets.to_vec();
+    v.sort();
+    v
 }
 
 #[derive(Clone, Debug)]
@@ -120,7 +144,7 @@ pub enum Mode {
     Attack(AttackPicker),
     Block(BlockPicker),
     Damage(DamagePicker),
-    Pick(CardPicker),
+    Pick(TargetPicker),
     Chat(String),
     Inspect(ObjectId),
     Help,
@@ -291,6 +315,14 @@ impl App {
         format!("{} {id}", self.name_of(id))
     }
 
+    /// A target's name: a card name, or a seat's player name.
+    pub fn target_name(&self, target: Target) -> String {
+        match target {
+            Target::Object(id) => self.name_of(id),
+            Target::Player(seat) => self.seat_name(seat),
+        }
+    }
+
     pub fn seat_name(&self, seat: Seat) -> String {
         if let Some(v) = &self.view {
             if let Some(p) = v.players.get(seat.index()) {
@@ -427,7 +459,8 @@ impl App {
             ActReason::Mulligan => self.open_menu("Mulligan"),
             ActReason::BottomCards => self.open_card_picker(ActReason::BottomCards),
             ActReason::Discard => self.open_card_picker(ActReason::Discard),
-            ActReason::Choice => self.open_menu("Choose"),
+            // A multi-target choice is a checkbox picker; anything else is a menu.
+            ActReason::Choice => self.open_target_picker(ActReason::Choice) || self.open_menu("Choose"),
             ActReason::DeclareAttackers => self.open_attack(),
             ActReason::DeclareBlockers => self.open_block(),
             ActReason::AssignDamage => self.open_damage(),
@@ -462,67 +495,98 @@ impl App {
         true
     }
 
-    /// A checkbox list over the cards the engine offers: my whole hand for a
-    /// mulligan bottom or a cleanup discard (exactly the listed count), or the
-    /// objects the listed `ChooseTargets` answers name, between the smallest
-    /// and largest answer sizes.
+    /// A checkbox list over my whole hand for a mulligan bottom or a cleanup
+    /// discard (exactly the listed count). An effect that asks the question
+    /// with `ChooseTargets` instead falls through to `open_target_picker`.
     fn open_card_picker(&mut self, reason: ActReason) -> bool {
         let (Some(me), Some(view)) = (self.me, &self.view) else {
             return false;
         };
-        let fixed = self.legal.iter().find_map(|l| match &l.action {
+        let Some(count) = self.legal.iter().find_map(|l| match &l.action {
             Action::BottomCards { objects } | Action::Discard { objects } => Some(objects.len()),
             _ => None,
-        });
-        let (min, count, choose, cards) = match fixed {
-            Some(n) => {
-                let engine::HandView::Yours(hand) = &view.player(me).hand else {
-                    return false;
-                };
-                (n, n, false, hand.clone())
-            }
-            None => {
-                let mut sizes = Vec::new();
-                let mut cards: Vec<ObjectId> = Vec::new();
-                for l in &self.legal {
-                    if let Action::ChooseTargets { targets } = &l.action {
-                        sizes.push(targets.len());
-                        for t in targets {
-                            if let Target::Object(id) = t {
-                                if !cards.contains(id) {
-                                    cards.push(*id);
-                                }
-                            }
-                        }
-                    }
-                }
-                cards.sort();
-                let (Some(&min), Some(&max)) = (sizes.iter().min(), sizes.iter().max()) else {
-                    return false;
-                };
-                (min, max, true, cards)
-            }
+        }) else {
+            return self.open_target_picker(reason);
         };
-        if cards.is_empty() || count == 0 {
+        let engine::HandView::Yours(hand) = &view.player(me).hand else {
+            return false;
+        };
+        let items: Vec<Target> = hand.iter().copied().map(Target::Object).collect();
+        if items.is_empty() || count == 0 {
             return false;
         }
-        let title = match (reason, choose) {
-            (ActReason::BottomCards, _) => format!("Put {count} on the bottom of your library"),
-            (ActReason::Discard, false) => format!("Discard {count} down to hand size"),
-            (ActReason::Discard, true) => format!("Discard {count}"),
+        let title = match reason {
+            ActReason::BottomCards => format!("Put {count} on the bottom of your library"),
+            _ => format!("Discard {count} down to hand size"),
+        };
+        self.mode = Mode::Pick(TargetPicker {
+            title,
+            marked: vec![false; items.len()],
+            items,
+            min: count,
+            count,
+            cursor: 0,
+            reason,
+            choose: false,
+            answers: Vec::new(),
+        });
+        true
+    }
+
+    /// A checkbox list over the targets the listed `ChooseTargets` answers
+    /// name — objects or whole players — between the smallest and largest
+    /// answer size. Declines (so the caller can fall back to a menu) when the
+    /// pending choice isn't answered with `ChooseTargets`, when another kind of
+    /// answer is legal too (`ChooseMode`: modes, "you may", pay questions), or
+    /// when a plain `Choice` picks at most one target, which reads better as a
+    /// menu of named answers.
+    fn open_target_picker(&mut self, reason: ActReason) -> bool {
+        let mut answers: Vec<Vec<Target>> = Vec::new();
+        let mut items: Vec<Target> = Vec::new();
+        for l in &self.legal {
+            match &l.action {
+                Action::ChooseTargets { targets } => {
+                    for t in targets {
+                        if !items.contains(t) {
+                            items.push(*t);
+                        }
+                    }
+                    answers.push(targets.clone());
+                }
+                Action::Concede => {}
+                // Anything else in the list is not a target choice.
+                _ => return false,
+            }
+        }
+        let (Some(min), Some(count)) = (answers.iter().map(|a| a.len()).min(), answers.iter().map(|a| a.len()).max()) else {
+            return false;
+        };
+        if count == 0 || items.is_empty() {
+            return false;
+        }
+        if reason == ActReason::Choice && count <= 1 && min == count {
+            return false;
+        }
+        // Objects first, in id order, then players in seat order.
+        items.sort();
+        // `GameView` carries no prompt for the pending choice, so the bounds
+        // make the title.
+        let title = match reason {
+            ActReason::Discard => format!("Discard {count}"),
+            _ if min == 0 => format!("Choose up to {count}"),
             _ if min == count => format!("Choose {count}"),
             _ => format!("Choose {min} to {count}"),
         };
-        let n = cards.len();
-        self.mode = Mode::Pick(CardPicker {
+        self.mode = Mode::Pick(TargetPicker {
             title,
-            cards,
-            marked: vec![false; n],
+            marked: vec![false; items.len()],
+            items,
             min,
             count,
             cursor: 0,
             reason,
-            choose,
+            choose: true,
+            answers,
         });
         true
     }
@@ -866,7 +930,7 @@ impl App {
             ActReason::Mulligan => self.open_menu("Mulligan"),
             ActReason::BottomCards => self.open_card_picker(ActReason::BottomCards),
             ActReason::Discard => self.open_card_picker(ActReason::Discard),
-            ActReason::Choice => self.open_menu("Choose"),
+            ActReason::Choice => self.open_target_picker(ActReason::Choice) || self.open_menu("Choose"),
             ActReason::DeclareAttackers => self.open_attack(),
             ActReason::DeclareBlockers => self.open_block(),
             ActReason::AssignDamage => self.open_damage(),
@@ -1072,11 +1136,11 @@ impl App {
         Vec::new()
     }
 
-    fn key_pick(&mut self, mut p: CardPicker, key: KeyEvent) -> Vec<Command> {
+    fn key_pick(&mut self, mut p: TargetPicker, key: KeyEvent) -> Vec<Command> {
         match key.code {
             KeyCode::Esc => return Vec::new(),
             KeyCode::Up | KeyCode::Char('k') => p.cursor = p.cursor.saturating_sub(1),
-            KeyCode::Down | KeyCode::Char('j') => p.cursor = (p.cursor + 1).min(p.cards.len() - 1),
+            KeyCode::Down | KeyCode::Char('j') => p.cursor = (p.cursor + 1).min(p.items.len() - 1),
             KeyCode::Char(' ') => {
                 let marked = p.marked.iter().filter(|m| **m).count();
                 if p.marked[p.cursor] {
@@ -1084,12 +1148,12 @@ impl App {
                 } else if marked < p.count {
                     p.marked[p.cursor] = true;
                 } else {
-                    self.set_status(format!("Pick exactly {} card(s); unmark one first", p.count));
+                    self.set_status(format!("Pick at most {}; unmark one first", p.count));
                 }
             }
             KeyCode::Char(ch) if ch.is_ascii_digit() => {
                 let idx = if ch == '0' { 9 } else { ch as usize - '1' as usize };
-                if idx < p.cards.len() {
+                if idx < p.items.len() {
                     p.cursor = idx;
                     let marked = p.marked.iter().filter(|m| **m).count();
                     if p.marked[idx] {
@@ -1100,24 +1164,35 @@ impl App {
                 }
             }
             KeyCode::Enter => {
-                let objects: Vec<ObjectId> = p.cards.iter().zip(&p.marked).filter(|(_, m)| **m).map(|(id, _)| *id).collect();
-                if objects.len() < p.min || objects.len() > p.count {
+                let picked = p.picked();
+                if picked.len() < p.min || picked.len() > p.count {
                     let want = if p.min == p.count {
                         format!("exactly {}", p.count)
                     } else {
                         format!("{} to {}", p.min, p.count)
                     };
-                    self.set_status(format!("Pick {want} card(s) ({} marked)", objects.len()));
+                    self.set_status(format!("Pick {want} ({} marked)", picked.len()));
+                } else if p.choose {
+                    // The marked set has to be one of the engine's answers, and
+                    // is sent in the engine's own order (it groups by spec).
+                    match p.matching_answer(&picked) {
+                        Some(targets) => return vec![Command::Act(Action::ChooseTargets { targets })],
+                        None => {
+                            let names: Vec<String> = picked.iter().map(|t| self.target_name(*t)).collect();
+                            self.set_status(format!("That combination isn't a legal choice: {}", names.join(", ")));
+                        }
+                    }
                 } else {
-                    let action = if p.choose {
-                        Action::ChooseTargets {
-                            targets: objects.into_iter().map(Target::Object).collect(),
-                        }
-                    } else {
-                        match p.reason {
-                            ActReason::BottomCards => Action::BottomCards { objects },
-                            _ => Action::Discard { objects },
-                        }
+                    let objects: Vec<ObjectId> = picked
+                        .iter()
+                        .filter_map(|t| match t {
+                            Target::Object(id) => Some(*id),
+                            Target::Player(_) => None,
+                        })
+                        .collect();
+                    let action = match p.reason {
+                        ActReason::BottomCards => Action::BottomCards { objects },
+                        _ => Action::Discard { objects },
                     };
                     return vec![Command::Act(action)];
                 }

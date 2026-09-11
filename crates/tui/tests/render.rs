@@ -762,3 +762,162 @@ fn conceding_is_explained_and_graveyards_can_be_browsed() {
     let text: Vec<String> = game.log.iter().map(|e| engine::text::describe_event(&game, e)).collect();
     assert!(text.iter().any(|t| t.contains("conceded and leaves the game")), "{text:?}");
 }
+
+fn hand_card(game: &engine::Game, seat: Seat, name: &str) -> engine::ObjectId {
+    game.players[seat.index()]
+        .hand
+        .iter()
+        .copied()
+        .find(|id| game.object_name(*id) == name)
+        .unwrap_or_else(|| panic!("no {name} in seat {}'s hand", seat.0))
+}
+
+fn on_battlefield(game: &engine::Game, seat: Seat, name: &str) -> engine::ObjectId {
+    game.players[seat.index()]
+        .battlefield
+        .iter()
+        .copied()
+        .find(|id| game.object_name(*id) == name)
+        .unwrap_or_else(|| panic!("no {name} on seat {}'s battlefield", seat.0))
+}
+
+/// Seat(0) has paid for Frost Breath ("tap up to two target creatures"); the
+/// engine is asking which creatures, with the opponent's two as candidates.
+fn frost_breath_asking_for_targets() -> engine::Game {
+    let mut game = TestGame::new(Arc::new(cards::core()), 2)
+        .battlefield(Seat(0), "Island")
+        .battlefield(Seat(0), "Island")
+        .battlefield(Seat(0), "Island")
+        .hand(Seat(0), "Frost Breath")
+        .library(Seat(0), &["Island"; 3])
+        .battlefield(Seat(1), "Grizzly Bears")
+        .battlefield(Seat(1), "Hill Giant")
+        .build();
+    let breath = hand_card(&game, Seat(0), "Frost Breath");
+    // A variable-count spec is a two-step cast: one action, no targets yet.
+    let cast = game
+        .legal_actions(Seat(0))
+        .into_iter()
+        .find(|a| matches!(a, Action::CastSpell { object, targets, .. } if *object == breath && targets.is_empty()))
+        .expect("Frost Breath is castable");
+    game.apply(Seat(0), &cast).unwrap();
+    assert!(matches!(game.pending, Some(PendingChoice::Casting { .. })), "{:?}", game.pending);
+    game
+}
+
+fn pass_until_resolved(game: &mut engine::Game) {
+    while game.pending.is_none() && !game.stack.is_empty() {
+        let seat = game.priority.expect("someone holds priority");
+        game.apply(seat, &Action::PassPriority).unwrap();
+    }
+}
+
+#[test]
+fn a_multi_target_choice_uses_a_checkbox_picker() {
+    let mut game = frost_breath_asking_for_targets();
+    let bears = on_battlefield(&game, Seat(1), "Grizzly Bears");
+    let giant = on_battlefield(&game, Seat(1), "Hill Giant");
+    let mut app = app_for(&game, Seat(0));
+    assert_eq!(app.my_reason(), Some(ActReason::Choice));
+    assert!(matches!(app.mode, Mode::Pick(_)), "a multi-target choice picks, {:?}", app.mode);
+    let s = render(&app, 100, 40);
+    assert!(s.contains("Choose up to 2"), "{s}");
+    assert!(s.contains("0/2 marked"), "{s}");
+    // Both creatures are offered once each, not as a menu of combinations.
+    assert_eq!(s.matches("[ ] ").count(), 2, "{s}");
+    assert!(s.contains("Grizzly Bears"), "{s}");
+    assert!(s.contains("Hill Giant"), "{s}");
+
+    // Mark both and confirm: the engine accepts the pair.
+    app.handle_key(key(KeyCode::Char(' ')));
+    app.handle_key(key(KeyCode::Down));
+    app.handle_key(key(KeyCode::Char(' ')));
+    let s = render(&app, 100, 40);
+    assert!(s.contains("2/2 marked"), "{s}");
+    let cmds = app.handle_key(key(KeyCode::Enter));
+    let targets = match cmds.as_slice() {
+        [Command::Act(Action::ChooseTargets { targets })] => targets.clone(),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(targets.len(), 2);
+    game.apply(Seat(0), &cmds_action(&cmds[0])).unwrap();
+    assert!(game.pending.is_none(), "the cast is complete: {:?}", game.pending);
+    pass_until_resolved(&mut game);
+    assert!(game.objects[bears].tapped, "both targets are tapped");
+    assert!(game.objects[giant].tapped);
+}
+
+#[test]
+fn a_target_picker_accepts_fewer_than_the_maximum_and_refuses_illegal_sets() {
+    let mut game = frost_breath_asking_for_targets();
+    let bears = on_battlefield(&game, Seat(1), "Grizzly Bears");
+    let giant = on_battlefield(&game, Seat(1), "Hill Giant");
+    let mut app = app_for(&game, Seat(0));
+    let Mode::Pick(p) = &app.mode else { panic!("{:?}", app.mode) };
+    assert_eq!(p.min, 0, "up to two: none is legal too");
+    assert_eq!(p.count, 2);
+    // A picker whose marks are not a legal answer stays open with a status line.
+    let mut stuck = app_for(&game, Seat(0));
+    if let Mode::Pick(p) = &mut stuck.mode {
+        p.answers.retain(|a| a.len() == 2);
+    }
+    stuck.handle_key(key(KeyCode::Char(' ')));
+    assert!(stuck.handle_key(key(KeyCode::Enter)).is_empty());
+    assert!(matches!(stuck.mode, Mode::Pick(_)), "{:?}", stuck.mode);
+    assert!(
+        stuck.status.as_ref().unwrap().0.contains("isn't a legal choice"),
+        "{:?}",
+        stuck.status
+    );
+
+    // One of the two is a legal answer on its own.
+    app.handle_key(key(KeyCode::Char(' ')));
+    let cmds = app.handle_key(key(KeyCode::Enter));
+    match cmds.as_slice() {
+        [Command::Act(Action::ChooseTargets { targets })] => assert_eq!(targets.len(), 1),
+        other => panic!("{other:?}"),
+    }
+    game.apply(Seat(0), &cmds_action(&cmds[0])).unwrap();
+    pass_until_resolved(&mut game);
+    let tapped = [bears, giant].iter().filter(|id| game.objects[**id].tapped).count();
+    assert_eq!(tapped, 1, "only the chosen creature is tapped");
+}
+
+#[test]
+fn a_single_target_choice_stays_a_menu() {
+    let mut game = TestGame::new(Arc::new(cards::core()), 2)
+        .battlefield(Seat(0), "Swamp")
+        .battlefield(Seat(0), "Swamp")
+        .hand(Seat(0), "Cruel Edict")
+        .library(Seat(0), &["Swamp"; 3])
+        .battlefield(Seat(1), "Grizzly Bears")
+        .battlefield(Seat(1), "Hill Giant")
+        .build();
+    let edict = hand_card(&game, Seat(0), "Cruel Edict");
+    let cast = game
+        .legal_actions(Seat(0))
+        .into_iter()
+        .find(|a| matches!(a, Action::CastSpell { object, .. } if *object == edict))
+        .expect("Cruel Edict is castable");
+    game.apply(Seat(0), &cast).unwrap();
+    pass_until_resolved(&mut game);
+    assert!(
+        matches!(game.pending, Some(PendingChoice::Choose { seat: Seat(1), .. })),
+        "{:?}",
+        game.pending
+    );
+    // "Sacrifice a creature" is exactly one target: the named answers read
+    // better as a menu.
+    let mut app = app_for(&game, Seat(1));
+    assert_eq!(app.my_reason(), Some(ActReason::Choice));
+    assert!(matches!(app.mode, Mode::Menu(_)), "{:?}", app.mode);
+    let s = render(&app, 100, 32);
+    assert!(s.contains("Grizzly Bears"), "{s}");
+    let cmds = app.handle_key(key(KeyCode::Enter));
+    match cmds.as_slice() {
+        [Command::Act(Action::ChooseTargets { targets })] => assert_eq!(targets.len(), 1),
+        other => panic!("{other:?}"),
+    }
+    game.apply(Seat(1), &cmds_action(&cmds[0])).unwrap();
+    assert_eq!(game.players[1].battlefield.len(), 1);
+}

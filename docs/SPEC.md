@@ -361,7 +361,7 @@ Two details worth getting right up front:
 
 **Mana payment is explicit.** `CastSpell` carries a `ManaPayment` naming which permanents to tap and which pool mana to spend. For the TUI this is auto-filled by a solver when unambiguous and prompted otherwise. For the agent, `legal_actions` enumerates one `CastSpell` per distinct legal payment when the cast is actually possible, and the state view shows `castable: true/false` per card. This avoids the agent trying to cast things it can't afford.
 
-**Targets are chosen at cast time.** `legal_actions` enumerates `CastSpell` with each legal target combination for spells with ≤ 2 targets, which covers the entire v1 cube. This is simpler for agents than a two-step "cast, then choose" flow. `PendingChoice` is reserved for choices that happen on resolution (e.g., "choose a creature to sacrifice"), for mulligan bottoming, and for combat damage assignment.
+**Targets are chosen at cast time, with one exception.** `legal_actions` enumerates `CastSpell` with each legal target combination for spells with ≤ 2 targets, which covers almost the whole v1 cube. This is simpler for agents than a two-step "cast, then choose" flow. The exception is the spells that can't be enumerated that way — modal spells, and spells whose target spec takes a caster-chosen number ("up to two target creatures"): those pay their cost first and then answer a `PendingChoice::Casting` for their modes and each target spec in turn (§4.1.1). Otherwise `PendingChoice` is reserved for choices that happen on resolution (e.g., "choose a creature to sacrifice"), for mulligan bottoming, and for combat damage assignment.
 
 **Combat damage assignment follows current rules, not the pre-Foundations ones.** The Foundations rules update (November 2024) removed "damage assignment order": an attacker blocked by several creatures divides its damage among them however its controller likes, with only trample still requiring lethal damage to every blocker before any goes to the player. So there is no `OrderBlockers`. Instead: when an attacker has exactly one blocker and no trample, the engine assigns damage automatically. Otherwise the attacker's controller gets `AssignCombatDamage` in `legal_actions` and the engine enumerates a small set of sensible splits (all to each blocker; lethal to each in the declared order then remainder to the next / to the player) as suggestions, and any other split that satisfies the rule is accepted under the division carve-out at the top of §3. The default the TUI offers on `Enter` is "lethal to each blocker in the order they were declared, remainder to the player if trample".
 
@@ -386,15 +386,15 @@ Combat is the hairiest part. Sequence: `BeginCombat` → `DeclareAttackers` (act
 
 The full layers system is out of scope. The cube is chosen so that only these forms of continuous effect exist:
 
-- **Static P/T or keyword buffs from the object itself** (e.g., a lord: "other Elves you control get +1/+1") — computed on read by `Game::effective_stats(id)`, which walks the battlefield for applicable statics. Recomputed every time it's asked, never cached. Correct by construction, and fast enough at two-player cube scale.
-- **"Until end of turn" modifiers** from spells and abilities — stored as `Modifier { kind, expires: Expiry::EndOfTurn }` on the object and cleared in cleanup.
+- **Static P/T or keyword buffs from the object itself** (e.g., a lord: "other Elves you control get +1/+1") — computed on read by `Game::effective_stats(id)`, which walks the battlefield for applicable statics. Recomputed every time it's asked, never cached, so a static gated on a condition (`AsLongAs`) is simply re-evaluated on every read. Correct by construction, and fast enough at two-player cube scale.
+- **Timed modifiers** from spells and abilities — stored as `Modifier { kind, expires }` on the object: `Expiry::EndOfTurn` is cleared in cleanup, `Expiry::TurnOf(seat)` ("until your next turn") ends as that seat's next turn begins, and `Expiry::NextUntapOf(seat)` ("doesn't untap during its controller's next untap step") is consumed by that seat's untap step.
 - **Auras and Equipment** granting P/T or keywords — treated as statics on the attached object, resolved through the same `effective_stats` walk.
 
 Order of application inside `effective_stats`: base → copy (none in v1) → control (none) → text-changing (none) → type-changing (none) → P/T setting → P/T modifying (statics, modifiers, counters) → P/T switching (none). That's layer 7 and nothing else, which is honest about what the cube needs.
 
 ### 3.5 Triggered abilities
 
-Triggers are collected when an `Event` is emitted, not polled. Each card's IR `triggers` list (§4.1) is matched against emitted events by `engine::interp`. After each turn-based action or resolution, the engine drains triggered abilities onto the stack in APNAP order, prompting for targets via `PendingChoice` where needed. Supported trigger events in v1: enters the battlefield, dies, attacks, deals combat damage to a player, beginning of upkeep/end step, becomes tapped/untapped (for a couple of cards).
+Triggers are collected when an `Event` is emitted, not polled. Each card's IR `triggers` list (§4.1) is matched against emitted events by `engine::triggers`. After each turn-based action or resolution, the engine drains triggered abilities onto the stack in APNAP order, prompting for targets via `PendingChoice` where needed. The supported trigger events are the `EventPattern` variants of §4.1: this card entering, dying, attacking, blocking, becoming blocked, becoming tapped, or dealing combat damage to a player; another permanent matching a filter entering or dying; the beginning of a player's upkeep, end step, or combat; a player casting a matching spell, gaining life, or discarding; and any combination of those. Delayed triggers that an effect set up ("at the beginning of the next end step") wait in `Game::delayed` and are drained the same way.
 
 ### 3.6 Determinism and replay
 
@@ -443,7 +443,7 @@ The rules that make this hold: an object gets an `ObjectView` entry only when it
 ### 3.8 Testing strategy
 
 - Unit tests per rule in `engine` (priority passing, combat damage assignment, state-based actions, mana payment).
-- One integration test per card in `cards`, using a `TestGame` builder that puts specific objects on the battlefield and asserts on the result of casting/activating. Plus one round-trip test per card: `render(load(card)) == normalise(card.text)` (§4.3).
+- One integration test per card in `cards`, using a `TestGame` builder that puts specific objects on the battlefield and asserts on the result of casting/activating. Plus one round-trip test per card: `normalise(render(load(card))) == normalise(card.text)` (§4.3).
 - One interpreter test per IR primitive in `engine::interp`, independent of any real card.
 - Replay regression tests as above.
 - A property test: play N random games choosing uniformly from `legal_actions`; assert invariants after every action (life totals consistent with damage events, no object in two zones, `must_act()` non-empty while the game is not over and every seat in it has ≥ 1 legal action, stack empties within bounded passes, `view(seat)` for every seat contains no hidden zone contents of any other seat).
@@ -466,31 +466,65 @@ Card(
     name: "Lightning Strike",
     cost: "{1}{R}",
     types: [Instant],
-    text: "Lightning Strike deals 3 damage to any target.",   // Oracle, for display + round-trip
-    spell: Spell(
-        targets: [Any],
-        effects: [DealDamage(amount: Const(3), to: Target(0))],
-    ),
+    text: "Lightning Strike deals 3 damage to any target.",
+    spell: Spell(targets: [Any], effects: [DealDamage(amount: Const(3), to: Target(0))]),
 )
 
 // crates/cards/data/core/elvish_archdruid.ron
 Card(
     name: "Elvish Archdruid",
     cost: "{1}{G}{G}",
-    types: [Creature], subtypes: [Elf, Druid], pt: (2, 2),
+    types: [Creature],
+    subtypes: ["Elf", "Druid"],
+    pt: (2, 2),
     text: "Other Elf creatures you control get +1/+1.\n{T}: Add {G} for each Elf you control.",
-    statics: [
-        PtBoost(
-            filter: And([Other, Creature, Subtype(Elf), ControlledBy(You)]),
-            power: Const(1), toughness: Const(1),
-        ),
-    ],
-    activated: [
-        Ability(
-            cost: [Tap],
-            effects: [AddMana(color: Green, amount: Count(And([Subtype(Elf), ControlledBy(You)])))],
-        ),
-    ],
+    statics: [PtBoost(filter: And([Other, Subtype("Elf"), Creature, ControlledBy(You)]), power: Const(1), toughness: Const(1))],
+    activated: [Ability(cost: [Tap], effects: [AddMana(color: Green, amount: Count(And([Subtype("Elf"), ControlledBy(You)])))])],
+)
+
+// crates/cards/data/core/kor_skyfisher.ron — `Chosen`: a pick made as the effect resolves, without targeting
+Card(
+    name: "Kor Skyfisher",
+    cost: "{1}{W}",
+    types: [Creature],
+    subtypes: ["Kor", "Soldier"],
+    pt: (2, 3),
+    text: "Flying\nWhen this creature enters, return a permanent you control to its owner's hand.",
+    keywords: [Flying],
+    triggers: [Trigger(event: ThisEnters, effects: [ReturnToHand(target: Chosen(who: You, filter: And([Permanent, ControlledBy(You)]), count: Exactly(1)))])],
+)
+
+// crates/cards/data/core/mana_leak.ron — a `May` another player answers, phrased as "unless"
+Card(
+    name: "Mana Leak",
+    cost: "{1}{U}",
+    types: [Instant],
+    text: "Counter target spell unless its controller pays {3}.",
+    spell: Spell(
+        targets: [Spell],
+        effects: [
+            May(
+                who: Controller(Target(0)),
+                effect: PayMana(player: Controller(Target(0)), cost: "{3}"),
+                otherwise: [CounterSpell(target: Target(0))],
+                unless: true,
+            ),
+        ],
+    ),
+)
+
+// crates/cards/data/core/kolaghans_command.ron — modes, each with its own targets, chosen as it is cast
+Card(
+    name: "Kolaghan's Command",
+    cost: "{1}{B}{R}",
+    types: [Instant],
+    text: "Choose two —\n• Target player discards a card.\n• Return target creature card from your graveyard to your hand.\n• Destroy target artifact.\n• Kolaghan's Command deals 2 damage to any target.",
+    spell: Spell(choose: Two, modes: [
+        Mode(targets: [Player], effects: [Discard(player: TargetPlayer(0), count: Const(1))]),
+        Mode(targets: [And([Creature, InGraveyard(You)])], effects: [ReturnFromGraveyard(target: Target(0), to: Hand)]),
+        Mode(targets: [Artifact], effects: [Destroy(target: Target(0))]),
+        Mode(targets: [Any], effects: [DealDamage(amount: Const(2), to: Target(0))]),
+    ]),
 )
 ```
 
@@ -500,68 +534,154 @@ The IR is defined once as Rust types in `cardir` and everything else derives fro
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct Card {
     pub name: String,
-    pub cost: ManaCost,
+    pub cost: ManaCost,                   // Oracle notation, `{X}` included; lands are free
     pub types: Vec<CardType>,
-    #[serde(default)] pub subtypes: Vec<Subtype>,
-    pub pt: Option<(i32, i32)>,
-    pub text: String,
-    #[serde(default)] pub keywords: Vec<Keyword>,
+    pub supertypes: Vec<Supertype>,       // Basic, Legendary, Snow
+    pub subtypes: Vec<String>,
+    pub pt: Option<(i32, i32)>,           // present iff Creature
+    pub text: String,                     // Oracle, for display + round-trip
+    pub keywords: Vec<Keyword>,
     pub spell: Option<Spell>,             // instants & sorceries
-    #[serde(default)] pub statics: Vec<Static>,
-    #[serde(default)] pub triggers: Vec<Trigger>,
-    #[serde(default)] pub activated: Vec<Ability>,
+    pub enchant: Option<Filter>,          // auras: what this may enchant
+    pub equip: Option<ManaCost>,          // equipment: the equip cost
+    pub statics: Vec<Static>,
+    pub triggers: Vec<Trigger>,
+    pub activated: Vec<Ability>,
 }
+
+pub struct Spell { pub targets: Vec<Filter>, pub effects: Vec<Effect>, pub modes: Vec<Mode>, pub choose: ModeChoice }
+pub struct Mode { pub targets: Vec<Filter>, pub effects: Vec<Effect> }
+pub enum ModeChoice { One, Two, OneOrBoth }
+
+pub struct Ability {
+    pub cost: Vec<Cost>, pub targets: Vec<Filter>, pub effects: Vec<Effect>,
+    pub sorcery_speed: bool,              // "Activate only as a sorcery"
+    pub from_graveyard: bool,             // activated from the graveyard, not the battlefield
+}
+pub enum Cost { Mana(ManaCost), Tap, SacrificeThis, Sacrifice(Filter), PayLife(i32), Discard(i32) }
 
 pub enum Effect {
     DealDamage { amount: Amount, to: Ref },
-    Destroy { target: Ref }, Exile { target: Ref },
+    Destroy { target: Ref },
+    Exile { target: Ref },
     Draw { player: PlayerRef, count: Amount },
     Discard { player: PlayerRef, count: Amount, random: bool },
-    GainLife { player: PlayerRef, amount: Amount }, LoseLife { .. },
-    ModifyPt { target: Ref, power: Amount, toughness: Amount, until: Duration },
+    GainLife { player: PlayerRef, amount: Amount },
+    LoseLife { player: PlayerRef, amount: Amount },
+    ModifyPt { target: Ref, power: Amount, toughness: Amount, keywords: Vec<Keyword>, until: Duration },
     GrantKeyword { target: Ref, keyword: Keyword, until: Duration },
     CreateToken { spec: TokenSpec, count: Amount },
     AddCounters { target: Ref, kind: CounterKind, count: Amount },
-    AddMana { color: Color, amount: Amount },
-    Tap { target: Ref }, Untap { target: Ref },
+    AddMana { color: Option<Color>, amount: Amount },   // None is colourless {C}
+    Tap { target: Ref },
+    Untap { target: Ref },
     ReturnToHand { target: Ref },
     CounterSpell { target: Ref },
     Sacrifice { player: PlayerRef, filter: Filter, count: Amount },
-    Sequence(Vec<Effect>),                          // "do A, then B"
+    Mill { player: PlayerRef, count: Amount },
+    ReturnFromGraveyard { target: Ref, to: ReturnZone },
+    ReturnExiled { target: Ref, to: ReturnZone },
+    SkipUntap { target: Ref },
+    Restrict { target: Ref, restriction: Restriction, until: Duration },
+    Delayed { at: DelayedAt, effects: Vec<Effect> },    // "at the beginning of the next end step"
+    May { who: PlayerRef, effect: Box<Effect>, then: Vec<Effect>, otherwise: Vec<Effect>, unless: bool },
+    PayMana { player: PlayerRef, cost: ManaCost },
+    PayLife { player: PlayerRef, amount: Amount },
+    Sequence(Vec<Effect>),                             // "do A, then B"
     Conditional { if_: Condition, then: Box<Effect>, else_: Option<Box<Effect>> },
+    Unsupported { reason: String },                    // ingestion output only; never on a committed card
 }
 
-pub enum Amount { Const(i32), Count(Filter), LifeOf(PlayerRef), PowerOf(Ref), X }
-pub enum Ref { Target(u8), This, Triggering, Each(Filter), Player(PlayerRef), .. }
-pub enum PlayerRef { You, TargetOpponent(u8), EachOpponent, EachPlayer, Triggering, Owner(Box<Ref>) }
-pub enum Filter { Creature, Land, Any, Other, Subtype(Subtype), ControlledBy(PlayerRef),
-                  Tapped, Attacking, Blocking, PowerAtLeast(i32), And(Vec<Filter>), Or(Vec<Filter>), Not(Box<Filter>) }
-pub enum Trigger { Etb { effects }, Dies { effects }, Attacks { effects }, CombatDamageToPlayer { effects },
-                   Upkeep { whose: PlayerRef, effects }, EndStep { .. }, BecomesTapped { .. } }
-pub enum Static { PtBoost { filter, power, toughness }, GrantKeyword { filter, keyword }, CostReduction { .. } }
-pub enum Cost { Mana(ManaCost), Tap, SacrificeThis, Sacrifice(Filter), PayLife(i32), Discard(i32) }
+pub enum Amount { Const(i32), Count(Filter), LifeOf(PlayerRef), PowerOf(Ref), X, Neg(Box<Amount>) }
+pub enum Ref { Target(u8), This, Triggering, Each(Filter), Player(PlayerRef), Attached,
+               Chosen { who: PlayerRef, filter: Filter, count: Quantity, bind: Option<String> },
+               Named(String) }
+pub enum Quantity { Exactly(i32), UpTo(i32), AnyNumber }
+pub enum PlayerRef { You, TargetPlayer(u8), TargetOpponent(u8), EachOpponent, EachPlayer, Triggering,
+                     Controller(Box<Ref>), Owner(Box<Ref>) }
+
+pub enum Filter {
+    Targets(Quantity, Box<Filter>),       // "up to two target creatures"; only at the top of a target spec
+    Any, Creature, Land, Artifact, Enchantment, Instant, Sorcery, Permanent, Player, Opponent, Spell,
+    Other, This, Attached, InGraveyard(PlayerRef), Token,
+    Subtype(String), Color(Color), ControlledBy(PlayerRef),
+    Tapped, Untapped, Attacking, Blocking, PowerAtLeast(i32), PowerAtMost(i32), HasKeyword(Keyword),
+    And(Vec<Filter>), Or(Vec<Filter>), Not(Box<Filter>),
+}
+
+pub struct Trigger { pub event: EventPattern, pub condition: Option<Condition>,   // intervening "if"
+                     pub targets: Vec<Filter>, pub effects: Vec<Effect> }
+pub enum EventPattern {
+    ThisEnters, ThisDies, ThisAttacks, ThisBlocks, ThisBecomesBlocked,
+    ThisDealsCombatDamageToPlayer, ThisBecomesTapped,
+    Enters(Filter), Dies(Filter),
+    Upkeep(PlayerRef), EndStep(PlayerRef), BeginCombat(PlayerRef),
+    Cast { who: PlayerRef, filter: Filter },
+    GainsLife(PlayerRef), Discards(PlayerRef),
+    Any(Vec<EventPattern>),               // "When ~ enters or dies"
+}
+
+pub enum Static {
+    PtBoost { filter: Filter, power: Amount, toughness: Amount, keywords: Vec<Keyword> },
+    GrantKeyword { filter: Filter, keyword: Keyword },
+    CostReduction { filter: Filter, amount: Amount },
+    AsLongAs { condition: Condition, static_: Box<Static>, leading: bool },
+}
+
+pub enum Condition {
+    Controls { player: PlayerRef, filter: Filter, at_least: i32 },
+    LifeAtLeast { player: PlayerRef, amount: i32 },
+    LifeAtMost { player: PlayerRef, amount: i32 },
+}
+
+pub enum Duration { EndOfTurn, UntilYourNextTurn }
+pub enum ReturnZone { Hand, Battlefield }
+pub enum Restriction { CantAttack, CantBlock, CantAttackOrBlock }
+pub enum DelayedAt { NextEndStep }
+pub enum CounterKind { Plus1Plus1, Minus1Minus1 }
+pub struct TokenSpec { pub name: String, pub colors: Vec<Color>, pub types: Vec<CardType>,
+                       pub subtypes: Vec<String>, pub pt: Option<(i32, i32)>, pub keywords: Vec<Keyword> }
 ```
 
-**There is no `Opponent` singular.** Oracle text is already written for N players — "each opponent", "target opponent", "target player" — and the IR mirrors it exactly. A card that says "each opponent loses 2 life" is `LoseLife { player: EachOpponent, .. }` and works unchanged in a two-player game and a four-player pod. This is the one place multiplayer costs nothing if you're disciplined from the first card and costs a full cube rewrite if you're not. The renderer (§4.3) enforces it: there's no template for a bare "opponent".
+**There is no bare "opponent".** Oracle text is already written for N players — "each opponent", "target opponent", "target player" — and the IR mirrors it exactly. A card that says "each opponent loses 2 life" is `LoseLife { player: EachOpponent, .. }` and works unchanged in a two-player game and a four-player pod. What the IR deliberately lacks is the *singular, non-target* opponent. `Filter::Opponent` does exist, but only as a target spec — "target opponent" — and `PlayerRef::TargetOpponent(i)` / `PlayerRef::TargetPlayer(i)` do nothing but index into the targets chosen for spec `i`; there is no `PlayerRef::Opponent` that quietly means "the other player". Everything else that names a player names a set (`EachOpponent`, `EachPlayer`) or derives from an object (`Controller`, `Owner`). This is the one place multiplayer costs nothing if you're disciplined from the first card and costs a full cube rewrite if you're not. The renderer (§4.3) enforces it: there's no template for a bare "opponent".
 
 The exact enum set is the v1 cube's vocabulary (§4.2); it grows only when a card needs it. Three derived artefacts fall out of these types for free:
 
 - **A JSON Schema** via `schemars`, handed to the ingestion model as the contract for what it may emit.
-- **A validator** (`cardir::validate`) that checks what the schema can't: target indices in range, `X` only on cards with `{X}` in cost, `Triggering` only inside a trigger, colour of `AddMana` consistent with colour identity, P/T present iff Creature.
-- **An English renderer** (`cardir::render`) that turns IR back into templated Oracle-style text. This is the correctness oracle for ingestion (§4.3) and the fallback display text for any card that has no Scryfall entry (custom cards).
+- **A validator** (`cardir::validate`) that checks what the schema can't. Structural rules: `Target(i)` in range for the spec list it is read against, at most one target spec with a variable count, `Targets(count, ..)` only as the whole of one spec and never nested, `Triggering` only inside a trigger, `Attached` only on an aura or equipment, `Chosen` only as an effect's *direct* target (never inside `Each`, an `Amount`, or a filter), `Named` only after the `Chosen` that bound that name, `X` only when the spell's or the ability's own cost has an `{X}`, `Sequence` with at least two effects, `May { unless }` only over a `PayMana` or `PayLife` and only with `otherwise` effects, `PayMana` with a fixed non-empty cost, and no `Unsupported` anywhere. Card-shape rules: P/T present iff Creature, `spell` present iff instant or sorcery, `enchant` iff Enchantment — Aura, `equip` iff Artifact — Equipment, lands with no mana cost, a modal spell keeping its targets and effects in its modes with at least as many modes as `choose` takes, token P/T iff the token is a creature, no duplicate or redundant keywords. And one loop-breaker: a static's `AsLongAs` condition may not read power, toughness, or keywords, because those are computed *from* statics.
+- **An English renderer** (`cardir::render`) that turns IR back into templated Oracle-style text. Every committed card round-trips (`normalise(render(card)) == normalise(card.text)`, which is what `cardir::round_trips` checks; §4.3), which is the correctness oracle for ingestion and the fallback display text for any card with no Scryfall entry (custom cards). It is also a runtime component, not just a dev tool: the engine calls back into it below card level — `render_option` for the menu entry a "may" offers a player mid-resolution (§4.1.1), and `render_mode` / `render_ability` / `render_trigger` / `render_clause` to say what an entry on the stack will do — so prompts and the stack read in the card's own words rather than in type names.
 
-**Presentation will leak into the IR; here's the boundary.** Exact-match rendering means the IR must eventually distinguish things that are semantically identical but phrased differently — "it" vs. "that creature", clause order inside `Sequence`, "you may" placement. Two rules, decided now: (1) anything that changes *game behaviour* is a real field (so `Any` vs. `CreatureOrPlayer` are different filters — "any target" includes planeswalkers and battles — not a rendering choice); (2) anything that doesn't lives in one optional `hints: RenderHints` field on the node, `#[serde(default)]`, ignored by `engine::interp`, ignored by IR equality in tests, and never required — a node with no hints renders with the most common phrasing. If a round-trip fails only on a hint-level difference, the ingestion report classes it as "near", not "failed". The hint set is expected to stay under a dozen variants; if it grows past that, the renderer is doing the IR's job and the design should be revisited.
+**Presentation will leak into the IR; here's the boundary.** Exact-match rendering means the IR must eventually distinguish things that are semantically identical but phrased differently — "it" vs. "that creature", clause order inside `Sequence`, "you may" placement. Two rules, decided now: (1) anything that changes *game behaviour* is a real field (so `Any` and a hypothetical `CreatureOrPlayer` would be different filters — "any target" includes planeswalkers and battles — not a rendering choice); (2) anything that doesn't lives in one optional `hints: RenderHints` field on the node, `#[serde(default)]`, ignored by `engine::interp`, ignored by IR equality in tests, and never required — a node with no hints renders with the most common phrasing. Rule (2) still stands, and has not yet been needed: there is no `hints` field in `cardir::ir`, because the renderer derives "it" vs. "that creature" from state it tracks itself (which targets and bindings a sentence has already named, whether the trigger's head named the card). What exists instead is two narrow flags on the two nodes whose phrasing genuinely isn't recoverable: `Static::AsLongAs { leading }`, which chooses only between "As long as …, ~ gets +1/+2" and the trailing order, and `Effect::May { unless }`, which selects "counter it unless its controller pays {3}" over "its controller may pay {3}; if they don't, counter it" — a phrasing choice, which is why the validator constrains it to the shape that sentence can actually have. If either grows into a family, it becomes `hints`. If a round-trip fails only on a hint-level difference, the ingestion report classes it as "near", not "failed". The hint set is expected to stay under a dozen variants; if it grows past that, the renderer is doing the IR's job and the design should be revisited.
 
-The engine consumes the IR through one interpreter module, `engine::interp`, which maps each `Effect` variant to engine operations. Adding a primitive means: add an enum variant, add an interpreter arm, add a renderer arm, add one test. That's the whole ceremony.
+The engine consumes the IR through one interpreter module, `engine::interp`, which maps each `Effect` variant to engine operations. Adding a primitive means: add an enum variant, add an interpreter arm, add a renderer arm, add a validator arm if it has a rule the schema can't state, and add one test. An effect that has to stop and ask a player something also needs a `Frame` (§4.1.1) rather than doing its work inline. That's the whole ceremony.
 
 Card metadata that isn't behaviour (Scryfall id, set, rarity, artist, legalities) comes from `carddb`'s cached Scryfall bulk data (§4.5) and is joined by name at load time; it's never hand-typed. The IR file carries only what the engine needs plus the Oracle text for round-trip.
+
+#### 4.1.1 How the engine runs it
+
+A resolving spell, activated ability, or trigger is a `Continuation` (`crates/engine/src/stack.rs`): a context plus a stack of frames. The context (`Ctx`, `crates/engine/src/filter.rs`) is everything the IR reads relative to — who "you" is, the source object for `This`, the chosen targets grouped per spec, what caused the trigger, the announced X, and the bindings and answers collected so far. A `Frame` is one piece of work still to do: run these effects from index *n*, switch context, ask this seat to pick, take the branch the answer named. `Game::run` pops frames; `engine::interp`'s `step` applies one effect and hands back the frames it unfolded into, so a `Sequence` becomes an `Effects` frame, "each player discards" a `Discard` frame over the remaining seats, and a `Conditional` just the branch that holds. Effects run in order until one needs a decision.
+
+At that point the game pauses: the continuation — frame stack and all — is stored in `Game::pending` as a `PendingChoice` (`crates/engine/src/game.rs`), nobody holds priority, and the engine returns. Four of the variants come from card IR:
+
+- **`Choose`** — pick between `min` and `max` of a list of objects, with a verb for the menu: the `Chosen` in "return a permanent you control", the permanents a `Sacrifice` takes, the cards a `Discard` takes. Answered with `ChooseTargets`.
+- **`ChooseOption`** — pick one of a few labelled options: the two branches of a `May`, or — for a `May` over `PayMana` — one entry per distinct way to pay, plus "Don't pay". Answered with `ChooseMode`.
+- **`ChooseTargets`** — a fired trigger needs its targets before it goes on the stack (`crates/engine/src/triggers.rs`).
+- **`Casting`** — the two-step cast, for a modal spell or one whose target spec takes a caster-chosen number ("up to two target creatures"). Mana is paid first; then modes, then each spec in turn, while the card is still in hand (`crates/engine/src/casting.rs`). Every other spell has its targets chosen up front (§3.2).
+
+A frame that turns out to contain no real decision is settled on the spot and never pauses: nothing legal to pick binds the empty list, and exactly as many options as the minimum takes them all.
+
+The answer is bound **by name** in the context — picks into `ctx.bindings`, option indices into `ctx.options` — and resolution resumes from the same frame stack, so a pause at any depth loses nothing. That naming is what `Chosen`/`Named` is for: an effect whose direct target is a `Chosen` is rewritten with that `Ref` replaced by `Named(name)` and re-run after the pick, and a `Chosen { bind: Some(..) }` lets later effects in the same list refer to what was picked as `Named` — "it", "that creature". Names the evaluator invents for its own frames start with `$` (`$sacrifice`, `$discard`, `$may`), which card-written binds never do.
+
+A `May` asks whichever player the IR names in `who`, and for `EachOpponent` / `EachPlayer` each of them in turn — frames go on in reverse so the first named decides first, and while one of them is deciding, `ctx.chooser` narrows the effects to that player alone, so "each opponent may sacrifice a creature" runs once per opponent and names them alone. The label they see is rendered from the card (`cardir::render_option`) in the imperative they would read. With `unless: true` the question is the payment: the engine enumerates the ways that player can pay the `PayMana` and offers them plus "Don't pay", and runs `otherwise` when they decline — or immediately, without asking, when they cannot pay at all.
+
+X is announced with the payment (`ManaPayment::x`) when the spell is cast or the ability activated, and `ManaCost::with_x` turns each `{X}` into that much generic mana for the actual payment. The announced value rides on the stack object and is read at resolution through `Ctx::x`, which is what `Amount::X` evaluates to — so "Blaze deals X damage to any target" needs no machinery beyond that. Durations become an `Expiry` on whatever modifier the effect created: `EndOfTurn` is cleared in cleanup, `UntilYourNextTurn` becomes `Expiry::TurnOf(seat)` for the controller and ends as that player's next turn begins, and `SkipUntap` hangs an `Expiry::NextUntapOf(controller)` modifier that their next untap step consumes. `Delayed` effects never touch the stack when they are created: they wait in `Game::delayed` together with the context they resolved in — targets, bindings and all — and are put on the stack when their `DelayedAt` comes round (`crates/engine/src/triggers.rs`).
 
 ### 4.2 The starter cube
 
 ~200 cards, two colours deep in each of five colours plus a small artifact/land slice, sized so ten 40-card or four 60-card decks are possible. Selection criteria, in priority order:
 
-1. Effect is one of: damage, destroy, exile, draw, discard, gain life, lose life, P/T modification, keyword grant, token creation, counter placement, mana production, tap/untap, return-to-hand, counter target spell.
-2. Zero replacement effects, no copies, no control-change, no "as enters" choices, no X costs, no alternate costs, no additional costs beyond tap/sacrifice.
+1. Effect is one of: damage, destroy, exile, draw, discard, mill, gain life, lose life, P/T modification, keyword grant, token creation, counter placement, mana production, tap/untap, return-to-hand, return from graveyard or exile, attack/block restriction, counter target spell, and the "you may"/"unless you pay" wrappers over those.
+2. Zero replacement effects, no copies, no control-change, no "as enters" choices, no alternate costs, no additional costs beyond tap/sacrifice/discard. `{X}` in a cost is allowed (`Amount::X`, announced on casting); modes and "up to N targets" are allowed and cast in two steps (§3.2).
 3. Keywords limited to: flying, first strike, double strike, deathtouch, lifelink, trample, vigilance, haste, reach, menace, defender, flash, hexproof, indestructible, prowess.
 4. Prefer cards with real printings so Scryfall metadata exists.
 
@@ -605,7 +725,7 @@ Scryfall bulk JSON ──▶ select cards ──▶ ┌────────�
 
 **Step 2 — Validate.** Deserialize into `cardir::Card`, run `cardir::validate`. On failure, feed the error messages back and regenerate, up to three times. Most failures are target indices and `Amount` shapes, which models fix reliably when told.
 
-**Step 3 — Round-trip.** Render the IR back to English with `cardir::render`, normalise both sides (lowercase, strip reminder text in parentheses, collapse whitespace, replace the card's own name with `~`), and compare. Exact match is *strong* evidence of correctness precisely because Oracle text is templated: if the renderer emits "Target creature gets +3/+3 until end of turn." and Scryfall says the same thing, the IR almost certainly encodes the right effect. Near-misses are diffed and shown in the report. This check is the single most valuable component of the tool and costs nothing per card.
+**Step 3 — Round-trip.** Render the IR back to English with `cardir::render`, normalise both sides (lowercase, strip reminder text in parentheses, collapse whitespace and punctuation, replace the card's own name — and the modern "this creature" phrasing for it — with `~`), and compare. Exact match is *strong* evidence of correctness precisely because Oracle text is templated: if the renderer emits "Target creature gets +3/+3 until end of turn." and Scryfall says the same thing, the IR almost certainly encodes the right effect. Near-misses are diffed and shown in the report. This check is the single most valuable component of the tool and costs nothing per card.
 
 **Step 4 — Propose tests.** For each effect on the card, the model proposes a `TestGame` scenario in the same builder used by hand-written tests ("battlefield: 2/2 bear (opp); cast this targeting it; assert it's in the graveyard"). Generated tests are compiled and run; failures land in the report. Generated tests are proposals for a human to skim, not proof — but a passing generated test plus an exact round-trip is a very high bar.
 
