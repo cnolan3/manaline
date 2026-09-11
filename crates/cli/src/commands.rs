@@ -157,7 +157,7 @@ pub struct McpArgs {
     /// The agent's display name at the table.
     #[arg(long, default_value = "Agent")]
     pub name: String,
-    /// Serve streamable HTTP at this address (default 127.0.0.1:7454; port 0 picks a free one).
+    /// Serve streamable HTTP at this address (default 127.0.0.1:0, a free port).
     #[arg(long, conflicts_with = "stdio")]
     pub http: Option<String>,
     /// Serve over stdin/stdout for clients that launch processes.
@@ -168,8 +168,11 @@ pub struct McpArgs {
     pub parent_pid: Option<u32>,
 }
 
-/// Run the MCP server on a seat. In HTTP mode, prints one JSON line with the
-/// URL first (`play` reads it), then serves until stopped.
+/// Run the MCP server. Normally an agent launches it with `--stdio` and it
+/// finds a published game by itself (`manaline play` publishes one); the
+/// `--connect`/`--token` flags are for generic clients driving a known seat.
+/// In HTTP mode it prints one JSON line with the URL first, then serves until
+/// stopped.
 pub async fn mcp(args: McpArgs) -> Result<()> {
     if let Some(McpCmd::Stop { http }) = args.cmd {
         return stop_processes("mcp", None, http.as_deref()).await;
@@ -209,52 +212,16 @@ pub async fn mcp(args: McpArgs) -> Result<()> {
     if args.stdio {
         return mcp::serve_stdio(server).await;
     }
-    let addr = args.http.clone().unwrap_or_else(|| "127.0.0.1:7454".into());
-    let http = match mcp::serve_http(server.clone(), &addr).await {
-        Ok(h) => h,
-        Err(e) if addr.ends_with(":7454") => {
-            tracing::warn!("{e:#}; falling back to a free port");
-            mcp::serve_http(server.clone(), "127.0.0.1:0").await?
-        }
-        Err(e) => return Err(e),
-    };
+    // A free port by default: nothing looks the server up by address any more.
+    let addr = args.http.clone().unwrap_or_else(|| "127.0.0.1:0".into());
+    let http = mcp::serve_http(server, &addr).await?;
     println!("{}", serde_json::json!({ "url": http.url(), "addr": http.addr.to_string() }));
-    // Advertise for `status`, `play`, and `deck edit`, and take control requests.
-    let control_socket = mcp::control::control_socket_path();
-    let _ = std::fs::remove_file(&control_socket);
-    let advertised = match tokio::net::UnixListener::bind(&control_socket) {
-        Ok(listener) => {
-            let marker = mcp::control::Marker {
-                pid: std::process::id(),
-                url: http.url(),
-                control_socket: control_socket.clone(),
-                mode: server.mode(),
-            };
-            match mcp::control::Advertised::write(&mcp::control::marker_path(), &marker) {
-                Ok(a) => {
-                    let a = std::sync::Arc::new(a);
-                    tokio::spawn(mcp::control::serve(listener, server.clone(), http.url(), a.clone()));
-                    Some(a)
-                }
-                Err(e) => {
-                    tracing::warn!("could not advertise the MCP server: {e}");
-                    None
-                }
-            }
-        }
-        Err(e) => {
-            tracing::warn!("could not open the control socket: {e}");
-            None
-        }
-    };
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
-    let result = tokio::select! {
+    tokio::select! {
         r = http.wait() => r,
         _ = tokio::signal::ctrl_c() => Ok(()),
         _ = async { match term.as_mut() { Some(t) => { t.recv().await; } None => std::future::pending::<()>().await } } => Ok(()),
-    };
-    drop(advertised);
-    result
+    }
 }
 
 #[derive(clap::Args)]
@@ -320,7 +287,8 @@ pub fn replay(args: ReplayArgs) -> Result<()> {
     Ok(())
 }
 
-/// `manaline status`: which daemons and MCP servers are running on this machine.
+/// `manaline status`: which tables are published and which of our processes
+/// are running on this machine.
 pub async fn status(clean: bool) -> Result<()> {
     // Daemons: one socket per game in the runtime directory; ping each.
     let dir = protocol::endpoint::runtime_dir();
@@ -355,36 +323,19 @@ pub async fn status(clean: bool) -> Result<()> {
         }
     }
 
-    // Processes: daemons and MCP servers by command line (macOS and Linux `ps`).
+    // Processes: daemons, clients, editors and MCP servers by command line
+    // (macOS and Linux `ps`).
     let procs = our_processes();
-    let mut mcp_addrs: Vec<String> = Vec::new();
     println!("\nprocesses:");
     if procs.is_empty() {
         println!("  none");
     }
     for p in &procs {
         println!("  {:>7}  {:<7} {}", p.pid, p.kind, p.describe());
-        if p.kind == "mcp" {
-            mcp_addrs.push(p.http_addr());
-        }
     }
 
-    if let Some(m) = mcp::control::running() {
-        println!("\nmcp server: {} ({}), pid {}", m.url, m.mode, m.pid);
-    }
-    // MCP servers: the default port plus whatever the processes named.
-    if !mcp_addrs.iter().any(|a| a == "127.0.0.1:7454") {
-        mcp_addrs.push("127.0.0.1:7454".into());
-    }
-    println!("\nmcp servers:");
-    for addr in mcp_addrs {
-        let probe = addr.replace("0.0.0.0", "127.0.0.1");
-        let up = tokio::time::timeout(std::time::Duration::from_secs(1), tokio::net::TcpStream::connect(&probe)).await;
-        match up {
-            Ok(Ok(_)) => println!("  http://{probe}/mcp   listening"),
-            _ => println!("  http://{probe}/mcp   not listening"),
-        }
-    }
+    print_published_games(&protocol::endpoint::Runtime::default());
+
     if !stale.is_empty() {
         if clean {
             for p in &stale {
@@ -396,6 +347,42 @@ pub async fn status(clean: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The tables `play` has published for agents to find, seat by seat. An agent
+/// seat is either free or held by one MCP session's process.
+fn print_published_games(runtime: &protocol::endpoint::Runtime) {
+    use protocol::endpoint::SeatKind;
+    let games = runtime.live_games();
+    println!("\npublished games ({}):", runtime.games_dir().display());
+    if games.is_empty() {
+        println!("  none");
+    }
+    for g in &games {
+        let endpoint = g.endpoint().map(|e| e.to_string()).unwrap_or_else(|| "no endpoint".into());
+        println!("  {}  {}  {}  (play pid {})", g.game_id, endpoint, g.format, g.pid);
+        let claims = g.claims();
+        for s in &g.seats {
+            let kind = match s.kind {
+                SeatKind::Human => "human",
+                SeatKind::Bot => "bot",
+                SeatKind::Agent => "agent",
+            };
+            let deck = match (&s.deck, s.kind) {
+                (Some(d), _) => d.clone(),
+                (None, SeatKind::Agent) => "the agent chooses".into(),
+                (None, _) => "—".into(),
+            };
+            let held = match s.kind {
+                SeatKind::Agent => match claims.iter().find(|(n, _)| *n == s.seat) {
+                    Some((_, pid)) => format!("   claimed by pid {pid}"),
+                    None => "   free".into(),
+                },
+                _ => String::new(),
+            };
+            println!("    seat {} {kind:<6} {:<16} deck {deck}{held}", s.seat, s.name);
+        }
+    }
 }
 
 /// A running manaline daemon or MCP server, from `ps`.
@@ -419,8 +406,17 @@ impl Proc {
         None
     }
 
-    fn http_addr(&self) -> String {
-        self.flag("--http").unwrap_or_else(|| "127.0.0.1:7454".into())
+    /// The address an MCP server was told to listen on, if any. A server an
+    /// agent launched speaks stdio and has none.
+    fn http_addr(&self) -> Option<String> {
+        self.flag("--http")
+    }
+
+    fn transport(&self) -> String {
+        match self.http_addr() {
+            Some(a) => format!("at {a}"),
+            None => "over stdio".into(),
+        }
     }
 }
 
@@ -470,11 +466,14 @@ impl Proc {
         let words: Vec<&str> = self.cmd.split_whitespace().collect();
         match self.kind {
             "editor" => format!("deck editor on {}", words.get(3).unwrap_or(&"?")),
-            "play" => format!(
-                "game client (play) deck {} vs {}",
-                self.flag("--deck").unwrap_or_else(|| "?".into()),
-                self.flag("--vs").unwrap_or_else(|| "random".into())
-            ),
+            "play" => {
+                let seats = self
+                    .flag("--seats")
+                    .or_else(|| self.flag("--vs").map(|v| format!("me,{v}")))
+                    .unwrap_or_else(|| "me,random".into());
+                let deck = self.flag("--deck").map(|d| format!(", deck {d}")).unwrap_or_default();
+                format!("game client (play) seats {seats}{deck}")
+            }
             "client" => match (self.flag("--game"), self.flag("--connect"), words.get(2)) {
                 (Some(g), _, _) => format!("game client on game {g}"),
                 (_, Some(c), _) => format!("game client connected to {c}"),
@@ -483,9 +482,9 @@ impl Proc {
             },
             "replay" => format!("replay viewer on {}", words.get(2).unwrap_or(&"?")),
             "mcp" => match (self.flag("--game"), self.flag("--connect")) {
-                (Some(g), _) => format!("MCP server for game {g} at {}", self.http_addr()),
-                (_, Some(c)) => format!("MCP server for {c} at {}", self.http_addr()),
-                _ => format!("MCP server, card data only, at {}", self.http_addr()),
+                (Some(g), _) => format!("MCP server for game {g} {}", self.transport()),
+                (_, Some(c)) => format!("MCP server for {c} {}", self.transport()),
+                _ => format!("MCP server for an agent {}", self.transport()),
             },
             "daemon" => format!(
                 "game daemon{}",
@@ -514,7 +513,7 @@ pub async fn stop_processes(kind: &str, game: Option<&str>, http: Option<&str>) 
         }
     }
     if let Some(http) = http {
-        targets.retain(|p| p.http_addr() == http);
+        targets.retain(|p| p.http_addr().as_deref() == Some(http));
         if targets.is_empty() {
             bail!("no MCP server is listening at {http} (see `manaline status`)");
         }
@@ -559,32 +558,6 @@ pub async fn stop_processes(kind: &str, game: Option<&str>, http: Option<&str>) 
     Ok(())
 }
 
-/// The machine's MCP server, starting one if none is running. Returns its
-/// marker and whether this call started it.
-pub async fn ensure_mcp_server() -> Result<(mcp::control::Marker, bool)> {
-    if let Some(m) = mcp::control::running() {
-        return Ok((m, false));
-    }
-    let exe = std::env::current_exe().context("locating the manaline binary")?;
-    let log_dir = protocol::endpoint::data_dir().join("logs");
-    std::fs::create_dir_all(&log_dir).ok();
-    let log = std::fs::File::create(log_dir.join("mcp.log")).context("creating the MCP log file")?;
-    std::process::Command::new(exe)
-        .args(["mcp", "--http", "127.0.0.1:7454"])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::from(log.try_clone()?))
-        .stderr(std::process::Stdio::from(log))
-        .spawn()
-        .context("starting the MCP server")?;
-    for _ in 0..40 {
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        if let Some(m) = mcp::control::running() {
-            return Ok((m, true));
-        }
-    }
-    bail!("the MCP server did not start (see {})", log_dir.join("mcp.log").display())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -595,7 +568,9 @@ mod tests {
         assert_eq!(classify("manaline daemon stop"), None);
         assert_eq!(classify("/usr/local/bin/manaline mcp --http 127.0.0.1:7454"), Some("mcp"));
         assert_eq!(classify("manaline mcp stop --http 127.0.0.1:7454"), None);
+        assert_eq!(classify("/usr/local/bin/manaline mcp --stdio"), Some("mcp"));
         assert_eq!(classify("manaline play --deck rg-stompy --vs claude"), Some("play"));
+        assert_eq!(classify("manaline play --seats me,claude,codex --deck green"), Some("play"));
         assert_eq!(classify("manaline join 127.0.0.1:7455 --token abc --deck green"), Some("client"));
         assert_eq!(classify("manaline tui --game ABC --token t"), Some("client"));
         assert_eq!(classify("manaline deck edit decks/rg-stompy.txt"), Some("editor"));
@@ -615,12 +590,24 @@ mod tests {
             kind: "mcp",
             cmd: "manaline mcp --http 127.0.0.1:7461".into(),
         };
-        assert_eq!(p.describe(), "MCP server, card data only, at 127.0.0.1:7461");
+        assert_eq!(p.describe(), "MCP server for an agent at 127.0.0.1:7461");
+        let p = Proc {
+            pid: 1,
+            kind: "mcp",
+            cmd: "manaline mcp --stdio".into(),
+        };
+        assert_eq!(p.describe(), "MCP server for an agent over stdio");
         let p = Proc {
             pid: 1,
             kind: "play",
             cmd: "manaline play --deck rg-stompy --vs claude".into(),
         };
-        assert_eq!(p.describe(), "game client (play) deck rg-stompy vs claude");
+        assert_eq!(p.describe(), "game client (play) seats me,claude, deck rg-stompy");
+        let p = Proc {
+            pid: 1,
+            kind: "play",
+            cmd: "manaline play --seats random,claude".into(),
+        };
+        assert_eq!(p.describe(), "game client (play) seats random,claude");
     }
 }

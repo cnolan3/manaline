@@ -36,13 +36,48 @@ A human plays an AI agent in the terminal:
 cargo run -- play --deck rg-stompy --vs claude
 ```
 
-That starts the game daemon, seats the agent's MCP server on seat 1, opens
-the terminal client on seat 0, and shows how to point your agent at the game.
-`--vs random` plays the built-in bot; `--vs human` prints a `join` command
-for a second terminal.
+That starts the game daemon, opens the terminal client on seat 0, and
+publishes the table so your agent can find it: nobody starts or stops an MCP
+server by hand. `--vs random` plays the built-in bot; `--vs human` prints a
+`join` command for a second terminal.
+
+`--seats` seats every chair at once, one word per seat in seat order — `me`,
+`human`, `random`, `claude`, `codex`, or `mcp`:
+
+```
+cargo run -- play --deck green --seats me,claude,random --format free-for-all
+cargo run -- play --seats random,claude --format free-for-all   # no `me`: nothing opens the TUI
+```
+
+With no `me` seat `play` stays in the foreground, keeps the table published,
+and prints one line per thing worth knowing (who joined, who is ready, whose
+turn and decision it is, the outcome); `--watch` opens the terminal client as
+a spectator instead. Ctrl-C ends the table either way.
 
 Not yet: the in-house Oracle-text-to-IR model and its ingestion pipeline (M5,
 in a companion research repo), networked play (M8), Commander (M9).
+
+## Pointing an agent at manaline
+
+Register the MCP server with your agent once, and never start one again:
+
+```
+claude mcp add manaline -- manaline mcp --stdio       # Claude Code
+codex mcp add manaline -- manaline mcp --stdio        # Codex
+```
+
+```json
+{"mcpServers": {"manaline": {"command": "manaline", "args": ["mcp", "--stdio"]}}}
+```
+
+`play` publishes the table as a marker in the runtime directory
+(`$XDG_RUNTIME_DIR/manaline/games`, or `$MANALINE_RUNTIME_DIR` when set). The
+agent's session finds the newest published table the first time it calls a game
+tool and claims the next free agent seat, so the seating is first come, first
+served; with two agent seats you need two separate agent sessions, one each. An
+agent seat with no deck assigned picks one itself with `list_decks` and
+`submit_deck`. `manaline status` shows every published table, its seats, and
+which process holds each agent seat. The marker goes away when `play` exits.
 
 ## Layout
 
@@ -69,6 +104,7 @@ decks/          starter decklists in the standard text format (§4.5)
 cargo run -- play --deck green --vs random     # you against the built-in bot
 cargo run -- play --deck green --vs claude     # you against an agent (see the hints in the client)
 cargo run -- play --deck green --vs human      # prints a join command for another terminal
+cargo run -- play --seats random,claude --format free-for-all   # a table you only watch
 cargo run -- sim --seats 4 --games 5 --log        # random bots in a pod, every event printed
 cargo run -- replay ~/.local/share/manaline/games/<id>.jsonl --log
 cargo run -- list formats | decks | cards
@@ -86,10 +122,12 @@ cargo run -- cards search 't:creature c:r mv<=2'    # Scryfall-style search; --a
 cargo run -- replay <file.jsonl> --step             # step through a recorded game in the client
 cargo run -- play --deck green --vs random --theme mono
 cargo run -- play --deck green --vs claude --opp-deck agent   # the agent picks one of the existing decks
-cargo run -- mcp --http 127.0.0.1:7454              # card search and deck stats for an agent, no game needed
-cargo run -- status                                 # running daemons, MCP servers, stale sockets
+cargo run -- play --deck green --seats me,claude,codex --seat-deck 2=wu-fliers --format free-for-all
+cargo run -- mcp --stdio                            # the MCP server an agent launches; finds the published table
+cargo run -- mcp --http 127.0.0.1:0                 # the same over streamable HTTP, for a client that wants a URL
+cargo run -- status                                 # published tables and their seats, daemons, stale sockets
 cargo run -- daemon stop [--game ID]                # stop daemons gracefully
-cargo run -- mcp stop [--http ADDR]                 # stop MCP servers (one runs per machine; play and deck edit reuse it)
+cargo run -- mcp stop [--http ADDR]                 # stop MCP servers
 ```
 
 Deckbuilder keys: type to search, `↑↓` and `Enter` to add, `Tab` to the deck
@@ -98,12 +136,12 @@ save, `u` to undo, `q` to quit, `?` for the rest. `scripts/screencast.sh`
 records a short tour with asciinema.
 
 An agent can sit with you at the deckbuilder. `manaline deck edit <file>`
-starts the machine's MCP server if none is running (or reuses the one that
-is) and shows its URL in the status line; the agent's `editor_*` tools
-add and remove cards, pull up stats, undo, and save through the editor you
-already have open. Every change the agent makes is highlighted in place, so you
-see it arrive and can take it back with `u`. The MCP server never writes deck
-files itself; only the editor does, when you or `editor_save` saves.
+announces the file it has open in the runtime directory, and your agent's own
+MCP session finds it from there; its `editor_*` tools add and remove cards,
+pull up stats, undo, and save through the editor you already have open. Every
+change the agent makes is highlighted in place, so you see it arrive and can
+take it back with `u`. The MCP server never writes deck files itself; only the
+editor does, when you or `editor_save` saves.
 
 Deck files: one `N Card Name` per line, optional `Deck` / `Sideboard` headers,
 `//` comments, `(SET) 123` printing suffixes tolerated. A deck name works

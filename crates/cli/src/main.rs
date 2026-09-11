@@ -22,7 +22,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Play a game in this terminal: `manaline play --deck green --vs random`.
+    /// Set up a table: `manaline play --deck green --vs random`, or `--seats me,claude,random`.
     Play(play::PlayArgs),
     /// Join a game someone else is hosting, with the token they gave you.
     Join(play::JoinArgs),
@@ -34,7 +34,7 @@ enum Command {
     Daemon(commands::DaemonArgs),
     /// Join a daemon as the built-in random bot.
     Bot(commands::BotArgs),
-    /// Run the MCP server on a seat so an agent can play it (advanced; `play --vs claude` does this).
+    /// Run the MCP server an agent plays through (agents launch this themselves: `manaline mcp --stdio`).
     Mcp(commands::McpArgs),
     /// Reconstruct a game from its replay log.
     Replay(commands::ReplayArgs),
@@ -58,7 +58,7 @@ enum Command {
         #[command(subcommand)]
         cmd: deck::IngestCommand,
     },
-    /// Which game daemons and MCP servers are running on this machine.
+    /// Which tables are published and which manaline processes are running here.
     Status {
         /// Remove socket files whose daemon is gone.
         #[arg(long)]
