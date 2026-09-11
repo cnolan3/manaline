@@ -460,7 +460,10 @@ impl App {
             ActReason::BottomCards => self.open_card_picker(ActReason::BottomCards),
             ActReason::Discard => self.open_card_picker(ActReason::Discard),
             // A multi-target choice is a checkbox picker; anything else is a menu.
-            ActReason::Choice => self.open_target_picker(ActReason::Choice) || self.open_menu("Choose"),
+            ActReason::Choice => {
+                let title = self.prompt().unwrap_or_else(|| "Choose".into());
+                self.open_target_picker(ActReason::Choice) || self.open_menu(&title)
+            }
             ActReason::DeclareAttackers => self.open_attack(),
             ActReason::DeclareBlockers => self.open_block(),
             ActReason::AssignDamage => self.open_damage(),
@@ -472,6 +475,11 @@ impl App {
     }
 
     // ----- overlays -----
+
+    /// What the engine says the pending choice is asking me, if anything.
+    fn prompt(&self) -> Option<String> {
+        self.view.as_ref().and_then(|v| v.prompt.clone())
+    }
 
     fn open_menu(&mut self, title: &str) -> bool {
         let items: Vec<MenuItem> = self
@@ -569,13 +577,16 @@ impl App {
         }
         // Objects first, in id order, then players in seat order.
         items.sort();
-        // `GameView` carries no prompt for the pending choice, so the bounds
-        // make the title.
-        let title = match reason {
-            ActReason::Discard => format!("Discard {count}"),
-            _ if min == 0 => format!("Choose up to {count}"),
-            _ if min == count => format!("Choose {count}"),
-            _ => format!("Choose {min} to {count}"),
+        // The engine says what the pending choice is asking; without one, the
+        // bounds make the title.
+        let title = match self.prompt() {
+            Some(prompt) => prompt,
+            None => match reason {
+                ActReason::Discard => format!("Discard {count}"),
+                _ if min == 0 => format!("Choose up to {count}"),
+                _ if min == count => format!("Choose {count}"),
+                _ => format!("Choose {min} to {count}"),
+            },
         };
         self.mode = Mode::Pick(TargetPicker {
             title,
@@ -930,7 +941,10 @@ impl App {
             ActReason::Mulligan => self.open_menu("Mulligan"),
             ActReason::BottomCards => self.open_card_picker(ActReason::BottomCards),
             ActReason::Discard => self.open_card_picker(ActReason::Discard),
-            ActReason::Choice => self.open_target_picker(ActReason::Choice) || self.open_menu("Choose"),
+            ActReason::Choice => {
+                let title = self.prompt().unwrap_or_else(|| "Choose".into());
+                self.open_target_picker(ActReason::Choice) || self.open_menu(&title)
+            }
             ActReason::DeclareAttackers => self.open_attack(),
             ActReason::DeclareBlockers => self.open_block(),
             ActReason::AssignDamage => self.open_damage(),
@@ -1439,6 +1453,7 @@ impl App {
         });
         let theme = self.theme();
         match crate::editor::Editor::new(crate::editor::EditorSetup {
+            banner: None,
             path: src.path,
             text: src.text,
             format: src.format,

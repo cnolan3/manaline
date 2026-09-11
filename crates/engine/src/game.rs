@@ -834,11 +834,76 @@ impl Game {
             phase: self.phase,
             priority: self.priority,
             must_act: self.must_act(),
+            prompt: self.view_prompt(viewer),
             state_version: self.state_version,
             outcome: self.outcome,
             stack,
             players,
             objects,
+        }
+    }
+
+    /// What the pending choice is asking `viewer`, as one line for a popup
+    /// title. `None` unless the viewer is the seat that has to decide, and
+    /// `None` for the choices whose overlay says what it is by itself
+    /// (mulligans, blockers, damage assignment, the cleanup discard).
+    fn view_prompt(&self, viewer: Option<Seat>) -> Option<String> {
+        let pending = self.pending.as_ref()?;
+        if viewer != Some(pending.seat()) {
+            return None;
+        }
+        match pending {
+            PendingChoice::Choose {
+                prompt, min, max, resume, ..
+            } => {
+                let n = if min == max {
+                    format!("{max}")
+                } else if *min == 0 {
+                    format!("up to {max}")
+                } else {
+                    format!("{min} to {max}")
+                };
+                Some(match resume.ctx.this {
+                    Some(id) => format!("{}: {prompt} — choose {n}", self.object_name(id)),
+                    None => format!("{prompt} — choose {n}"),
+                })
+            }
+            PendingChoice::ChooseOption { resume, .. } => Some(match resume.ctx.this {
+                Some(id) => format!("{}: choose an option", self.object_name(id)),
+                None => "Choose an option".into(),
+            }),
+            PendingChoice::ChooseTargets { trigger, .. } => {
+                Some(format!("{}'s triggered ability: choose a target", self.object_name(trigger.source)))
+            }
+            PendingChoice::Casting {
+                object,
+                modes,
+                modes_done,
+                spec,
+                ..
+            } => {
+                let def = self.card_def(*object);
+                let name = def.name.clone();
+                if !Self::modes_complete(def, modes, *modes_done) {
+                    return Some(format!("{name}: choose a mode"));
+                }
+                // `spec` indexes the chosen modes' target specs, concatenated
+                // in the order the modes were picked.
+                let mut at = 0;
+                let mode = def.ir.spell.as_ref().and_then(|spell| {
+                    modes.iter().filter_map(|&m| spell.modes.get(m as usize)).find(|m| {
+                        let end = at + m.targets.len();
+                        let hit = (at..end).contains(spec);
+                        at = end;
+                        hit
+                    })
+                });
+                Some(match mode {
+                    Some(m) => format!("{name}: target for {}", cardir::render_mode(&def.ir, m)),
+                    None => format!("{name}: choose a target"),
+                })
+            }
+            _ => None,
         }
     }
 

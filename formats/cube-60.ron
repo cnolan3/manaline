@@ -1,0 +1,11 @@
+// The starter cube with constructed-sized decks: at least 60 cards, four of a card.
+Format(
+    name: "Starter Cube (60)",
+    players: (min: 2, max: 2),
+    starting_life: 20,
+    starting_hand: 7,
+    mulligan: London(free_first: false),
+    deck: Deck(size: Min(60), singleton: false, includes_commander: false, max_copies: Some(4)),
+    rules: [],
+    legality: Legality(pool: Builtin("core"), banned: [], allowed: []),
+)

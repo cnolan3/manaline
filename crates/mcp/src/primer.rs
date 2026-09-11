@@ -118,7 +118,9 @@ analysis, and `submit_deck` with that deck's `name` plays it as-is. You cannot
 build a new deck during a game.
 
 Between games, with no game attached, the same server helps a human at the
-deckbuilder, but only while they have `manaline deck edit <file>` open: the
+deckbuilder (opening the deckbuilder starts or reuses it, and starting a game
+seats it, so your connection stays the same), but only while they have
+`manaline deck edit <file>` open: the
 editor listens on a socket and the `editor_*` tools drive it. `editor_status`
 and `editor_deck` read back what the editor holds, `editor_add_card`,
 `editor_remove_card`, `editor_set_count`, and `editor_replace_deck` change it,

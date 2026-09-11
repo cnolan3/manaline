@@ -185,6 +185,7 @@ impl std::fmt::Display for Violation {
 }
 
 const CUBE_RON: &str = include_str!("../../../formats/cube.ron");
+const CUBE_60_RON: &str = include_str!("../../../formats/cube-60.ron");
 const TWO_PLAYER_RON: &str = include_str!("../../../formats/two-player.ron");
 const FREE_FOR_ALL_RON: &str = include_str!("../../../formats/free-for-all.ron");
 const COMMANDER_RON: &str = include_str!("../../../formats/commander.ron");
@@ -196,12 +197,13 @@ impl Format {
 
     /// Formats compiled into the binary, by file stem.
     pub fn builtin_names() -> &'static [&'static str] {
-        &["cube", "two-player", "free-for-all", "commander"]
+        &["cube", "cube-60", "two-player", "free-for-all", "commander"]
     }
 
     pub fn builtin(name: &str) -> Option<Format> {
         let text = match name {
             "cube" => CUBE_RON,
+            "cube-60" => CUBE_60_RON,
             "two-player" => TWO_PLAYER_RON,
             "free-for-all" => FREE_FOR_ALL_RON,
             "commander" => COMMANDER_RON,

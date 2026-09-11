@@ -821,7 +821,10 @@ fn a_multi_target_choice_uses_a_checkbox_picker() {
     assert_eq!(app.my_reason(), Some(ActReason::Choice));
     assert!(matches!(app.mode, Mode::Pick(_)), "a multi-target choice picks, {:?}", app.mode);
     let s = render(&app, 100, 40);
-    assert!(s.contains("Choose up to 2"), "{s}");
+    assert!(
+        s.contains("Frost Breath: choose a target"),
+        "the casting card titles the picker: {s}"
+    );
     assert!(s.contains("0/2 marked"), "{s}");
     // Both creatures are offered once each, not as a menu of combinations.
     assert_eq!(s.matches("[ ] ").count(), 2, "{s}");
@@ -881,6 +884,43 @@ fn a_target_picker_accepts_fewer_than_the_maximum_and_refuses_illegal_sets() {
     pass_until_resolved(&mut game);
     let tapped = [bears, giant].iter().filter(|id| game.objects[**id].tapped).count();
     assert_eq!(tapped, 1, "only the chosen creature is tapped");
+}
+
+/// The popup for a choice a resolving card asks for says which card is
+/// asking and what it wants, not a bare "Choose 1".
+#[test]
+fn a_resolution_choice_titles_its_popup_with_the_cards_prompt() {
+    let mut game = TestGame::new(Arc::new(cards::core()), 2)
+        .battlefield(Seat(0), "Swamp")
+        .battlefield(Seat(0), "Swamp")
+        .battlefield(Seat(0), "Swamp")
+        .battlefield(Seat(0), "Swamp")
+        .hand(Seat(0), "Cruel Edict")
+        .library(Seat(0), &["Swamp"; 3])
+        .battlefield(Seat(1), "Grizzly Bears")
+        .battlefield(Seat(1), "Hill Giant")
+        .build();
+    let edict = hand_card(&game, Seat(0), "Cruel Edict");
+    let cast = game
+        .legal_actions(Seat(0))
+        .into_iter()
+        .find(|a| matches!(a, Action::CastSpell { object, .. } if *object == edict))
+        .expect("Cruel Edict is castable");
+    game.apply(Seat(0), &cast).unwrap();
+    while !matches!(game.pending, Some(PendingChoice::Choose { seat: Seat(1), .. })) {
+        let seat = game.priority.expect("someone holds priority");
+        game.apply(seat, &Action::PassPriority).unwrap();
+    }
+
+    // Only the seat that has to decide is told what the question is.
+    let mine = game.view(Seat(1)).prompt;
+    assert!(mine.is_some(), "the deciding seat gets a prompt");
+    assert!(game.view(Seat(0)).prompt.is_none(), "the caster is not being asked");
+
+    let app = app_for(&game, Seat(1));
+    let s = render(&app, 100, 32);
+    assert!(s.contains("Cruel Edict: Sacrifice"), "the card and the verb title the popup: {s}");
+    assert!(s.contains("choose 1"), "how many to pick: {s}");
 }
 
 #[test]

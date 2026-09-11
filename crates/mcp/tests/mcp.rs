@@ -123,7 +123,7 @@ async fn an_agent_plays_a_whole_game_through_the_tools() {
     })
     .await
     .unwrap();
-    assert_eq!(server.session.as_ref().unwrap().me, Seat(1));
+    assert_eq!(server.session().unwrap().me, Seat(1));
     let res = server.get_game_state().await.unwrap();
     assert!(is_error(&res));
     assert!(text_of(&res).contains("has not started"), "{}", text_of(&res));
@@ -568,7 +568,7 @@ async fn action_ids_are_bound_to_their_state_version() {
     let (acts, version) = human.get_legal_actions().await.unwrap();
     let keep = acts.iter().find(|a| a.description.starts_with("Keep")).unwrap();
     human.act_by_id(keep.id, version).await.unwrap();
-    server.session.as_ref().unwrap().refresh().await;
+    server.session().unwrap().refresh().await;
     let res = server
         .take_action(Parameters(TakeActionParams {
             action_id: Some(0),
@@ -725,7 +725,7 @@ async fn search_and_deck_stats_tools_work_before_the_game_starts() {
         .await
         .unwrap();
     assert!(!is_error(&res) && text_of(&res).contains("ready"), "{}", text_of(&res));
-    assert!(server.session.as_ref().unwrap().lobby().seats[1].deck_ok);
+    assert!(server.session().unwrap().lobby().seats[1].deck_ok);
 
     r.handle.shutdown();
     r.task.await.unwrap();
@@ -798,6 +798,7 @@ async fn a_standalone_server_serves_card_data_without_a_game() {
     let db = std::sync::Arc::new(cards::core());
     let index = std::sync::Arc::new(cardsearch::Index::from_db(&db));
     let editor = tui::editor::Editor::new(tui::editor::EditorSetup {
+        banner: None,
         path: Some(file.clone()),
         text: "17 Plains\n".into(),
         format: engine::Format::cube(),
@@ -907,4 +908,106 @@ async fn a_standalone_server_serves_card_data_without_a_game() {
     announced.withdraw();
     service.abort();
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn play_can_seat_a_running_server_through_its_control_socket() {
+    use mcp::control::{running_at, Advertised, ControlReply, ControlRequest, Marker};
+    let r = start(14).await;
+    let dir = std::env::temp_dir().join(format!("manaline-control-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let socket = dir.join("mcp.sock");
+    let marker_path = dir.join("mcp.json");
+
+    // A standalone server advertising itself, as `manaline mcp` does.
+    let server = mcp::standalone(engine::Format::cube());
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let marker = Marker {
+        pid: std::process::id(),
+        url: "http://127.0.0.1:7454/mcp".into(),
+        control_socket: socket.clone(),
+        mode: server.mode(),
+    };
+    let advertised = std::sync::Arc::new(Advertised::write(&marker_path, &marker).unwrap());
+    let service = tokio::spawn(mcp::control::serve(
+        listener,
+        server.clone(),
+        marker.url.clone(),
+        advertised.clone(),
+    ));
+    assert_eq!(running_at(&marker_path).unwrap().mode, "card data only");
+    assert!(is_error(&server.get_game_state().await.unwrap()));
+
+    // `play` seats it: it joins the daemon with the seat token and submits the deck.
+    let req = ControlRequest::Attach {
+        endpoint: r.endpoint.to_string(),
+        token: r.tokens[1].0.clone(),
+        name: "Agent".into(),
+        decklist: Some(cards::deck_text("red").unwrap()),
+    };
+    match mcp::control::request(&socket, &req).await.unwrap() {
+        ControlReply::Ok { mode, .. } => assert!(mode.starts_with("game "), "{mode}"),
+        ControlReply::Error { message } => panic!("{message}"),
+    }
+    assert!(
+        running_at(&marker_path).unwrap().mode.starts_with("game "),
+        "the marker follows the mode"
+    );
+    assert!(server.session().is_some());
+    let res = server.editor_status().await.unwrap();
+    assert!(
+        is_error(&res) && text_of(&res).contains("only available"),
+        "seated: no deckbuilder tools"
+    );
+    match mcp::control::request(&socket, &req).await.unwrap() {
+        ControlReply::Error { message } => assert!(message.contains("already seated"), "{message}"),
+        other => panic!("{other:?}"),
+    }
+
+    // The human sits down: the game starts and the seated server sees it.
+    let mut human = Client::connect(&r.endpoint).await.unwrap();
+    human.hello(&r.tokens[0], Some("Connor")).await.unwrap();
+    human.set_deck(&cards::deck_text("green").unwrap()).await.unwrap().unwrap();
+    human.ready().await.unwrap();
+    let mut status = r.handle.status();
+    status.wait_for(|s| !s.must_act.is_empty()).await.unwrap();
+    let res = server.get_game_state().await.unwrap();
+    assert!(!is_error(&res), "{}", text_of(&res));
+
+    // When the game is over, `play` detaches it: card data only again, and the
+    // deckbuilder tools come back.
+    match mcp::control::request(&socket, &ControlRequest::Detach).await.unwrap() {
+        ControlReply::Ok { mode, .. } => assert_eq!(mode, "card data only"),
+        other => panic!("{other:?}"),
+    }
+    assert!(server.session().is_none());
+    assert!(is_error(&server.get_game_state().await.unwrap()));
+    let res = server.editor_status().await.unwrap();
+    assert!(
+        is_error(&res) && text_of(&res).contains("no deckbuilder is open"),
+        "{}",
+        text_of(&res)
+    );
+
+    // A marker whose process is gone is not "running", and is cleaned up.
+    let stale = dir.join("stale.json");
+    std::fs::write(
+        &stale,
+        serde_json::to_vec(&Marker {
+            pid: 4_000_000_000,
+            ..marker.clone()
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(running_at(&stale).is_none());
+    assert!(!stale.exists());
+
+    service.abort();
+    let _ = service.await;
+    drop(advertised);
+    assert!(!marker_path.exists(), "dropping the advertisement removes the marker");
+    r.handle.shutdown();
+    r.task.await.unwrap();
 }

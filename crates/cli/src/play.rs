@@ -76,6 +76,7 @@ pub async fn play(args: PlayArgs) -> Result<()> {
     let mut hints = Vec::new();
     let mut bot_task = None;
     let mut mcp_child: Option<tokio::process::Child> = None;
+    let mut attached_control: Option<std::path::PathBuf> = None;
     match opponent {
         Opponent::Random => {
             let settings = BotSettings {
@@ -88,9 +89,29 @@ pub async fn play(args: PlayArgs) -> Result<()> {
             bot_task = Some(tokio::spawn(bot::run(settings)));
         }
         Opponent::Agent(kind) => {
-            let deck = if agent_chooses { None } else { Some(opp_deck_name.as_str()) };
-            let (child, url) = spawn_mcp(&socket, &tokens[1], deck, kind.name()).await?;
-            mcp_child = Some(child);
+            let url = if let Some(running) = mcp::control::running() {
+                // One server per machine: seat the running one instead of starting another.
+                let decklist = if agent_chooses { None } else { Some(opp_decklist.clone()) };
+                let _ = mcp::control::request(&running.control_socket, &mcp::control::ControlRequest::Detach).await;
+                let req = mcp::control::ControlRequest::Attach {
+                    endpoint: socket.display().to_string(),
+                    token: tokens[1].0.clone(),
+                    name: kind.name().into(),
+                    decklist,
+                };
+                match mcp::control::request(&running.control_socket, &req).await? {
+                    mcp::control::ControlReply::Ok { url, .. } => {
+                        attached_control = Some(running.control_socket.clone());
+                        url
+                    }
+                    mcp::control::ControlReply::Error { message } => bail!("the running MCP server could not join: {message}"),
+                }
+            } else {
+                let deck = if agent_chooses { None } else { Some(opp_deck_name.as_str()) };
+                let (child, url) = spawn_mcp(&socket, &tokens[1], deck, kind.name()).await?;
+                mcp_child = Some(child);
+                url
+            };
             hints.push(agent_hints(kind, &url, &socket, &tokens[1]));
             if agent_chooses {
                 hints.push("The agent's seat has no deck: it must pick one with list_decks and submit_deck before the game starts.".into());
@@ -128,6 +149,9 @@ pub async fn play(args: PlayArgs) -> Result<()> {
     if let Some(mut child) = mcp_child {
         let _ = child.kill().await;
         let _ = child.wait().await;
+    }
+    if let Some(control) = attached_control {
+        let _ = mcp::control::request(&control, &mcp::control::ControlRequest::Detach).await;
     }
     daemon.stop().await;
 

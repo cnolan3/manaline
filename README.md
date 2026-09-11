@@ -89,7 +89,7 @@ cargo run -- play --deck green --vs claude --opp-deck agent   # the agent picks 
 cargo run -- mcp --http 127.0.0.1:7454              # card search and deck stats for an agent, no game needed
 cargo run -- status                                 # running daemons, MCP servers, stale sockets
 cargo run -- daemon stop [--game ID]                # stop daemons gracefully
-cargo run -- mcp stop [--http ADDR]                 # stop MCP servers
+cargo run -- mcp stop [--http ADDR]                 # stop MCP servers (one runs per machine; play and deck edit reuse it)
 ```
 
 Deckbuilder keys: type to search, `↑↓` and `Enter` to add, `Tab` to the deck
@@ -97,8 +97,9 @@ pane, `+`/`-`/`x` to change counts, `t` for stats and sample hands, `s` to
 save, `u` to undo, `q` to quit, `?` for the rest. `scripts/screencast.sh`
 records a short tour with asciinema.
 
-An agent can sit with you at the deckbuilder: run `manaline mcp --http
-127.0.0.1:7454` alongside `manaline deck edit <file>`, and its `editor_*` tools
+An agent can sit with you at the deckbuilder. `manaline deck edit <file>`
+starts the machine's MCP server if none is running (or reuses the one that
+is) and shows its URL in the status line; the agent's `editor_*` tools
 add and remove cards, pull up stats, undo, and save through the editor you
 already have open. Every change the agent makes is highlighted in place, so you
 see it arrive and can take it back with `u`. The MCP server never writes deck

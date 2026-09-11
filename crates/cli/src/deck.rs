@@ -247,7 +247,16 @@ fn edit_deck(path: PathBuf, text: String, format: Format, theme: Option<String>)
         Some(c) => cardsearch::Index::from_cache(c, &db),
         None => cardsearch::Index::from_db(&db),
     });
+    let banner = match super::runtime()?.block_on(super::commands::ensure_mcp_server()) {
+        Ok((m, started)) => Some(format!(
+            "agent server {} at {} (`manaline mcp stop` ends it)",
+            if started { "started" } else { "already running" },
+            m.url
+        )),
+        Err(e) => Some(format!("no agent server: {e:#}")),
+    };
     let setup = tui::editor::EditorSetup {
+        banner,
         path: Some(path),
         text,
         format,

@@ -32,6 +32,8 @@ pub enum Row {
 }
 
 pub struct EditorSetup {
+    /// A status line to show on open (e.g. which agent server is running).
+    pub banner: Option<String>,
     pub path: Option<PathBuf>,
     pub text: String,
     pub format: Format,
@@ -105,7 +107,7 @@ impl Editor {
             show_stats: false,
             dirty: false,
             undo: Vec::new(),
-            status: None,
+            status: setup.banner,
             report: CheckReport::default(),
             stats: Stats::default(),
             hands: Vec::new(),

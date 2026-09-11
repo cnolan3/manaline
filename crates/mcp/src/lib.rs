@@ -1,6 +1,7 @@
 //! The manaline MCP server (docs/SPEC.md §7): a thin proxy that lets any
 //! MCP-capable agent play a seat. Speaks stdio and streamable HTTP.
 
+pub mod control;
 pub mod primer;
 pub mod render;
 pub mod server;

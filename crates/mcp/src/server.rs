@@ -27,7 +27,8 @@ pub const DEFAULT_WAIT_SECS: u64 = 45;
 pub struct McpServer {
     /// The seat's connection, or `None` when serving card data only
     /// (`manaline mcp` with no game: search, deck stats, the resources).
-    pub session: Option<Arc<Session>>,
+    /// `play` attaches and detaches it at runtime through the control socket.
+    session: Arc<std::sync::RwLock<Option<Arc<Session>>>>,
     pub cards: Arc<engine::CardDb>,
     pub format: engine::Format,
     index: Arc<std::sync::OnceLock<Arc<cardsearch::Index>>>,
@@ -285,7 +286,7 @@ impl McpServer {
         McpServer {
             cards: Arc::new(session.cards.clone()),
             format: session.format.clone(),
-            session: Some(session),
+            session: Arc::new(std::sync::RwLock::new(Some(session))),
             index: Arc::new(std::sync::OnceLock::new()),
         }
     }
@@ -293,10 +294,33 @@ impl McpServer {
     /// A server with no game: card data, search, and deck analysis only.
     pub fn standalone(format: engine::Format) -> McpServer {
         McpServer {
-            session: None,
+            session: Arc::new(std::sync::RwLock::new(None)),
             cards: Arc::new(cards::core()),
             format,
             index: Arc::new(std::sync::OnceLock::new()),
+        }
+    }
+
+    /// The seat this server plays, if it is in a game.
+    pub fn session(&self) -> Option<Arc<Session>> {
+        self.session.read().unwrap().clone()
+    }
+
+    /// Seat this server in a game (from `play`, over the control socket).
+    pub fn attach(&self, session: Arc<Session>) {
+        *self.session.write().unwrap() = Some(session);
+    }
+
+    /// Back to card data only.
+    pub fn detach(&self) {
+        *self.session.write().unwrap() = None;
+    }
+
+    /// "card data only" or "game <id>, seat <n>".
+    pub fn mode(&self) -> String {
+        match self.session() {
+            Some(s) => format!("game {}, seat {}", s.game_id, s.me.0),
+            None => "card data only".into(),
         }
     }
 
@@ -354,7 +378,7 @@ impl McpServer {
 
     /// Send one request to the human's open deckbuilder and turn the reply into a tool result.
     async fn editor(&self, req: protocol::editor::EditorRequest) -> CallToolResult {
-        if self.session.is_some() {
+        if self.session().is_some() {
             return tool_error("the deckbuilder tools are only available when helping a human (no game connected)");
         }
         let editor = match open_editor() {
@@ -456,20 +480,20 @@ impl McpServer {
         description = "The current game from your seat: every player's life and zones, the battlefield, your hand, whose turn it is to act, and your legal actions if it is yours. Returns a text rendering and structured JSON."
     )]
     pub async fn get_game_state(&self) -> Result<CallToolResult, ErrorData> {
-        let Some(session) = self.session.as_ref() else {
+        let Some(session) = self.session() else {
             return Ok(no_game());
         };
         session.begin_call();
         session.refresh().await;
         let Some(view) = session.view() else {
-            return Ok(self.not_started(session));
+            return Ok(self.not_started(&session));
         };
         let legal = if view.must_act.contains_key(&session.me) {
             session.legal_actions().await.map(|(l, _, _)| l).unwrap_or_default()
         } else {
             Vec::new()
         };
-        Ok(self.state_result(session, &view, &legal, None))
+        Ok(self.state_result(&session, &view, &legal, None))
     }
 
     #[tool(
@@ -477,14 +501,14 @@ impl McpServer {
         description = "The numbered list of actions you may take right now, with descriptions. Empty if it is not your turn to act. Pass an id to take_action."
     )]
     pub async fn get_legal_actions(&self) -> Result<CallToolResult, ErrorData> {
-        let Some(session) = self.session.as_ref() else {
+        let Some(session) = self.session() else {
             return Ok(no_game());
         };
         session.begin_call();
         if !session.started() {
             session.refresh().await;
             if !session.started() {
-                return Ok(self.not_started(session));
+                return Ok(self.not_started(&session));
             }
         }
         match session.legal_actions().await {
@@ -512,7 +536,7 @@ impl McpServer {
         description = "Take one of your legal actions, by id from the last list (pass the list's state_version too, so a stale id is refused rather than applied to a different situation), or pass a full `action` object. For a cast or activation you may edit `payment.tap` to any set of your untapped mana sources that covers the cost (e.g. tap a big mana creature instead of lands); the listed payments are just the common choices. The reply says whether you still must act and lists the next legal actions if so."
     )]
     pub async fn take_action(&self, Parameters(p): Parameters<TakeActionParams>) -> Result<CallToolResult, ErrorData> {
-        let Some(session) = self.session.as_ref() else {
+        let Some(session) = self.session() else {
             return Ok(no_game());
         };
         session.begin_call();
@@ -546,7 +570,7 @@ impl McpServer {
                     }
                     text.push('\n');
                 }
-                text.push_str(&render_state(session, &view, &legal));
+                text.push_str(&render_state(&session, &view, &legal));
                 let json = serde_json::json!({
                     "applied": action,
                     "events": events,
@@ -570,7 +594,7 @@ impl McpServer {
         description = "Block until you have a real decision to make (a spell or ability you can afford, a land drop, attackers, blockers, a mulligan, a choice) or the game ends. Priority moments where passing is your only option are passed for you while you wait (set auto_pass=false to be woken at every one). Returns the state, its state_version, why you must act, and your legal actions; `auto_passed` counts the passes made for you. A { \"timed_out\": true } reply means the opponent is still thinking: the game is NOT over and you must call wait_for_turn again straight away, without stopping or asking anyone."
     )]
     pub async fn wait_for_turn(&self, Parameters(p): Parameters<WaitParams>) -> Result<CallToolResult, ErrorData> {
-        let Some(session) = self.session.as_ref() else {
+        let Some(session) = self.session() else {
             return Ok(no_game());
         };
         let generation = session.begin_call();
@@ -593,8 +617,8 @@ impl McpServer {
                     if let Some(o) = view.outcome {
                         let text = format!(
                             "The game is over: {}.\n\n{}",
-                            outcome_text(session, o),
-                            render_state(session, &view, &[])
+                            outcome_text(&session, o),
+                            render_state(&session, &view, &[])
                         );
                         return Ok(text_and_json(
                             text,
@@ -628,7 +652,7 @@ impl McpServer {
                         continue;
                     }
                     let extra = serde_json::json!({ "reason": reason, "timed_out": false, "auto_passed": auto_passed, "state_version": view.state_version });
-                    return Ok(self.state_result(session, &view, &legal, Some(extra)));
+                    return Ok(self.state_result(&session, &view, &legal, Some(extra)));
                 }
             }
         }
@@ -646,7 +670,7 @@ impl McpServer {
         description = "Look up a card by name or by object id: its cost, types, power/toughness, and rules text, plus its current state if it is on the battlefield."
     )]
     pub async fn get_card(&self, Parameters(p): Parameters<GetCardParams>) -> Result<CallToolResult, ErrorData> {
-        let view = self.session.as_ref().and_then(|s| s.view());
+        let view = self.session().and_then(|s| s.view());
         if let Some(id) = p.object_id {
             let id = ObjectId(id);
             let Some(o) = view.as_ref().and_then(|v| v.object(id).cloned()) else {
@@ -658,7 +682,7 @@ impl McpServer {
                 format!("{:?}", o.zone).to_lowercase(),
                 format!(
                     "controlled by {}",
-                    self.session.as_ref().map(|s| s.seat_name(o.controller)).unwrap_or_default()
+                    self.session().map(|s| s.seat_name(o.controller)).unwrap_or_default()
                 ),
             ];
             if o.tapped {
@@ -710,7 +734,7 @@ impl McpServer {
         description = "Search the card database with Scryfall-style syntax: t: types, c: colours (c:rg, c:c colourless, c:m multicolour), ci: identity, mv/pow/tou with comparisons, o: Oracle text (quote phrases), kw: keywords, r: rarity, s: set, f: format legality, is:implemented; `-` negates, `or` alternates, parentheses group. Only cards the engine can play are returned unless include_unimplemented is set."
     )]
     pub async fn search_cards(&self, Parameters(p): Parameters<SearchParams>) -> Result<CallToolResult, ErrorData> {
-        if let Some(session) = &self.session {
+        if let Some(session) = self.session() {
             session.begin_call();
         }
         let index = self.card_index();
@@ -837,7 +861,7 @@ impl McpServer {
         description = "Analyse a decklist: card counts, mana curve, colour pips against sources, interaction count, land odds, and legality problems in this game's format."
     )]
     pub async fn deck_stats(&self, Parameters(p): Parameters<DeckStatsParams>) -> Result<CallToolResult, ErrorData> {
-        if let Some(session) = &self.session {
+        if let Some(session) = self.session() {
             session.begin_call();
         }
         Ok(self.deck_stats_result(&p.decklist))
@@ -848,7 +872,7 @@ impl McpServer {
         description = "The game log including table chat, seat-filtered, one line per event."
     )]
     pub async fn get_log(&self, Parameters(p): Parameters<GetLogParams>) -> Result<CallToolResult, ErrorData> {
-        let Some(session) = self.session.as_ref() else {
+        let Some(session) = self.session() else {
             return Ok(no_game());
         };
         session.begin_call();
@@ -870,7 +894,7 @@ impl McpServer {
         description = "Say something to the table (parameter: text). It appears in the other players' logs."
     )]
     pub async fn say(&self, Parameters(p): Parameters<SayParams>) -> Result<CallToolResult, ErrorData> {
-        let Some(session) = self.session.as_ref() else {
+        let Some(session) = self.session() else {
             return Ok(no_game());
         };
         match session.client.chat(&p.text, None).await {
@@ -881,7 +905,7 @@ impl McpServer {
 
     #[tool(name = "concede", description = "Concede the game. This ends it for you immediately.")]
     pub async fn concede(&self) -> Result<CallToolResult, ErrorData> {
-        let Some(session) = self.session.as_ref() else {
+        let Some(session) = self.session() else {
             return Ok(no_game());
         };
         session.begin_call();
@@ -889,7 +913,7 @@ impl McpServer {
         match session.act(Action::Concede, version).await {
             Ok((_, view, _)) => {
                 let text = match view.outcome {
-                    Some(o) => format!("You conceded. {}", outcome_text(session, o)),
+                    Some(o) => format!("You conceded. {}", outcome_text(&session, o)),
                     None => "You conceded; the game continues for the others.".into(),
                 };
                 Ok(text_and_json(text, serde_json::json!({ "outcome": view.outcome })))
@@ -903,7 +927,7 @@ impl McpServer {
         description = "Every deck you could play as it is, by name: card count, colours, whether it is legal in this format, and where it lives. Use get_deck to read one and submit_deck with its name to play it."
     )]
     pub async fn list_decks(&self) -> Result<CallToolResult, ErrorData> {
-        if let Some(session) = &self.session {
+        if let Some(session) = self.session() {
             session.begin_call();
         }
         let mut text = String::new();
@@ -925,7 +949,7 @@ impl McpServer {
             text.push_str("no decks available\n");
         }
         let _ = writeln!(text, "\ndecks are looked up in: {}", cards::deck_dirs_text());
-        if self.session.is_none() {
+        if self.session().is_none() {
             match open_editor() {
                 Ok(Some(e)) => {
                     let _ = writeln!(
@@ -952,7 +976,7 @@ impl McpServer {
         description = "Read one deck from list_decks (or a file path): its full decklist text plus the same analysis deck_stats gives."
     )]
     pub async fn get_deck(&self, Parameters(p): Parameters<GetDeckParams>) -> Result<CallToolResult, ErrorData> {
-        if let Some(session) = &self.session {
+        if let Some(session) = self.session() {
             session.begin_call();
         }
         let name = p.name;
@@ -977,7 +1001,7 @@ impl McpServer {
         description = "Choose the deck you will play and ready up: the `name` of a deck from list_decks (played as-is), or a full decklist in the standard text format. Only needed if the game has not started and no deck was given for you."
     )]
     pub async fn submit_deck(&self, Parameters(p): Parameters<SubmitDeckParams>) -> Result<CallToolResult, ErrorData> {
-        let Some(session) = self.session.as_ref() else {
+        let Some(session) = self.session() else {
             return Ok(no_game());
         };
         if session.started() {
@@ -1031,7 +1055,7 @@ impl McpServer {
         description = "The recommended loop for playing a game of Magic at this table."
     )]
     pub async fn play_a_game(&self) -> Vec<PromptMessage> {
-        let Some(session) = &self.session else {
+        let Some(session) = self.session() else {
             let text = format!(
                 "This manaline server has no game connected: it serves card data (search_cards, deck_stats, get_card, `{CUBE_URI}`) for deckbuilding. \
                  To play, start a game with `manaline play --vs claude` and connect to the URL it prints."
@@ -1066,7 +1090,7 @@ impl ServerHandler for McpServer {
             .protocol_version()
             .is_some_and(|version| version >= rmcp::model::ProtocolVersion::V_2026_07_28);
         let mut tools = Self::tool_router().list_all();
-        if self.session.is_some() {
+        if self.session().is_some() {
             tools.retain(|t| !DECKBUILDING_ONLY_TOOLS.contains(&t.name.as_ref()));
         }
         Ok(rmcp::model::ListToolsResult {
@@ -1088,7 +1112,7 @@ impl ServerHandler for McpServer {
                 .build(),
         );
         info.server_info = Implementation::new("manaline", env!("CARGO_PKG_VERSION")).with_title("manaline");
-        match &self.session {
+        match self.session() {
             Some(session) => info.with_instructions(format!(
                 "manaline: you are seat {} in a game of Magic: The Gathering. Read `{PRIMER_URI}` for the rules, then loop wait_for_turn → take_action. Use `say` to talk to the table.",
                 session.me.0
@@ -1167,6 +1191,6 @@ pub fn cube_text(db: &engine::CardDb) -> String {
 impl McpServer {
     /// For tests and the CLI: the outcome as this seat sees it.
     pub fn outcome(&self) -> Option<Outcome> {
-        self.session.as_ref().and_then(|s| s.outcome())
+        self.session().and_then(|s| s.outcome())
     }
 }

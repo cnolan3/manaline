@@ -214,15 +214,47 @@ pub async fn mcp(args: McpArgs) -> Result<()> {
         Ok(h) => h,
         Err(e) if addr.ends_with(":7454") => {
             tracing::warn!("{e:#}; falling back to a free port");
-            mcp::serve_http(server, "127.0.0.1:0").await?
+            mcp::serve_http(server.clone(), "127.0.0.1:0").await?
         }
         Err(e) => return Err(e),
     };
     println!("{}", serde_json::json!({ "url": http.url(), "addr": http.addr.to_string() }));
-    tokio::select! {
+    // Advertise for `status`, `play`, and `deck edit`, and take control requests.
+    let control_socket = mcp::control::control_socket_path();
+    let _ = std::fs::remove_file(&control_socket);
+    let advertised = match tokio::net::UnixListener::bind(&control_socket) {
+        Ok(listener) => {
+            let marker = mcp::control::Marker {
+                pid: std::process::id(),
+                url: http.url(),
+                control_socket: control_socket.clone(),
+                mode: server.mode(),
+            };
+            match mcp::control::Advertised::write(&mcp::control::marker_path(), &marker) {
+                Ok(a) => {
+                    let a = std::sync::Arc::new(a);
+                    tokio::spawn(mcp::control::serve(listener, server.clone(), http.url(), a.clone()));
+                    Some(a)
+                }
+                Err(e) => {
+                    tracing::warn!("could not advertise the MCP server: {e}");
+                    None
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!("could not open the control socket: {e}");
+            None
+        }
+    };
+    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
+    let result = tokio::select! {
         r = http.wait() => r,
         _ = tokio::signal::ctrl_c() => Ok(()),
-    }
+        _ = async { match term.as_mut() { Some(t) => { t.recv().await; } None => std::future::pending::<()>().await } } => Ok(()),
+    };
+    drop(advertised);
+    result
 }
 
 #[derive(clap::Args)]
@@ -337,6 +369,9 @@ pub async fn status(clean: bool) -> Result<()> {
         }
     }
 
+    if let Some(m) = mcp::control::running() {
+        println!("\nmcp server: {} ({}), pid {}", m.url, m.mode, m.pid);
+    }
     // MCP servers: the default port plus whatever the processes named.
     if !mcp_addrs.iter().any(|a| a == "127.0.0.1:7454") {
         mcp_addrs.push("127.0.0.1:7454".into());
@@ -522,6 +557,32 @@ pub async fn stop_processes(kind: &str, game: Option<&str>, http: Option<&str>) 
         }
     }
     Ok(())
+}
+
+/// The machine's MCP server, starting one if none is running. Returns its
+/// marker and whether this call started it.
+pub async fn ensure_mcp_server() -> Result<(mcp::control::Marker, bool)> {
+    if let Some(m) = mcp::control::running() {
+        return Ok((m, false));
+    }
+    let exe = std::env::current_exe().context("locating the manaline binary")?;
+    let log_dir = protocol::endpoint::data_dir().join("logs");
+    std::fs::create_dir_all(&log_dir).ok();
+    let log = std::fs::File::create(log_dir.join("mcp.log")).context("creating the MCP log file")?;
+    std::process::Command::new(exe)
+        .args(["mcp", "--http", "127.0.0.1:7454"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::from(log.try_clone()?))
+        .stderr(std::process::Stdio::from(log))
+        .spawn()
+        .context("starting the MCP server")?;
+    for _ in 0..40 {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        if let Some(m) = mcp::control::running() {
+            return Ok((m, true));
+        }
+    }
+    bail!("the MCP server did not start (see {})", log_dir.join("mcp.log").display())
 }
 
 #[cfg(test)]

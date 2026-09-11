@@ -127,6 +127,10 @@ pub struct GameView {
     pub phase: Phase,
     pub priority: Option<Seat>,
     pub must_act: BTreeMap<Seat, ActReason>,
+    /// What the pending choice is asking the viewer, when the viewer is the
+    /// seat that must decide: "Cruel Edict: Sacrifice — choose 1".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
     pub state_version: u64,
     pub outcome: Option<Outcome>,
     /// Bottom to top.

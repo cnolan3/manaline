@@ -37,6 +37,7 @@ fn setup(path: Option<std::path::PathBuf>, text: &str) -> Editor {
     let db = Arc::new(cards::core());
     let index = Arc::new(cardsearch::Index::from_db(&db));
     Editor::new(EditorSetup {
+        banner: None,
         path,
         text: text.into(),
         format: engine::Format::cube(),
