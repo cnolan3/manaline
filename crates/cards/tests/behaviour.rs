@@ -564,6 +564,65 @@ fn etb(name: &str, target: Option<&str>, check: impl Fn(&Game, ObjectId)) {
     check(&game, id);
 }
 
+/// "When ~ enters, exile target creature ... until ~ leaves the battlefield."
+/// One linked ability: the exiled card comes back by itself, no trigger, as
+/// soon as `removal` takes the source off the battlefield.
+fn exiles_until_it_leaves(name: &str, removal: &str) {
+    let mut game = base().hand(ME, name).hand(ME, removal).build();
+    let bear = bf(&game, OPP, "Grizzly Bears");
+    cast(&mut game, name, &[]);
+    choose(&mut game, ME, Target::Object(bear));
+    let id = bf(&game, ME, name);
+    assert_eq!(game.objects[bear].zone, Zone::Exile, "{name} exiles the bear");
+    assert_eq!(game.objects[bear].exiled_by, Some(id), "{name} is linked to what it exiled");
+    assert!(game.objects[bear].until_source_leaves, "{name}: only until it leaves");
+    assert_eq!(count_bf(&game, OPP, "Grizzly Bears"), 0);
+
+    cast(&mut game, removal, &[Target::Object(id)]);
+    assert_ne!(game.objects[id].zone, Zone::Battlefield, "{name} left the battlefield");
+    assert_eq!(game.objects[bear].zone, Zone::Battlefield, "{name} gives the bear back");
+    assert_eq!(game.objects[bear].controller, OPP, "under its owner's control");
+    assert!(game.players[OPP.index()].battlefield.contains(&bear));
+    assert_eq!(game.objects[bear].exiled_by, None, "the link is gone");
+}
+
+/// "When ~ enters, (you may) exile another target permanent. When ~ leaves
+/// the battlefield, return the exiled card to the battlefield under its
+/// owner's control." Two linked triggers rather than a duration.
+fn exiles_with_a_leaves_trigger(name: &str, removal: &str, may: bool) {
+    let mut game = base().hand(ME, name).hand(ME, removal).build();
+    let bear = bf(&game, OPP, "Grizzly Bears");
+    cast(&mut game, name, &[]);
+    if may {
+        // The target is chosen as the trigger goes on the stack; the "you
+        // may" is answered when it resolves.
+        let a = game
+            .legal_actions(ME)
+            .into_iter()
+            .find(|a| matches!(a, Action::ChooseTargets { targets } if targets.contains(&Target::Object(bear))))
+            .expect("the bear is choosable");
+        game.apply(ME, &a).unwrap();
+        advance_until(&mut game, |g| matches!(g.pending, Some(PendingChoice::ChooseOption { .. }))).unwrap();
+        game.apply(ME, &Action::ChooseMode { mode: 0 }).unwrap();
+        settle(&mut game);
+    } else {
+        choose(&mut game, ME, Target::Object(bear));
+    }
+    let id = bf(&game, ME, name);
+    assert_eq!(game.objects[bear].zone, Zone::Exile, "{name} exiles the bear");
+    assert_eq!(game.objects[bear].exiled_by, Some(id), "{name} remembers the exiled card");
+    assert!(
+        !game.objects[bear].until_source_leaves,
+        "{name} returns it with a trigger, not on its own"
+    );
+
+    cast(&mut game, removal, &[Target::Object(id)]);
+    assert_ne!(game.objects[id].zone, Zone::Battlefield, "{name} left the battlefield");
+    assert_eq!(game.objects[bear].zone, Zone::Battlefield, "{name} returns the exiled card");
+    assert_eq!(game.objects[bear].controller, OPP, "under its owner's control");
+    assert!(game.players[OPP.index()].battlefield.contains(&bear));
+}
+
 /// A creature with a dies trigger: it dies to a Doom Blade from the opponent.
 fn dies(name: &str, target: Option<Target>, check: impl Fn(&Game)) {
     let mut game = base()
@@ -954,6 +1013,38 @@ fn registry() -> BTreeMap<&'static str, Check> {
         assert_eq!(game.objects[bear].controller, OPP, "under its owner's control");
         assert!(game.players[1].battlefield.contains(&bear));
     });
+    check!("Banisher Priest", || exiles_until_it_leaves("Banisher Priest", "Murder"));
+    check!("Fairgrounds Warden", || exiles_until_it_leaves("Fairgrounds Warden", "Murder"));
+    check!("Silkwrap", || {
+        exiles_until_it_leaves("Silkwrap", "Disenchant");
+        // Mana value 3 or less: a five-mana angel is not a legal target.
+        let mut game = base().battlefield(OPP, "Serra Angel").hand(ME, "Silkwrap").build();
+        let bear = bf(&game, OPP, "Grizzly Bears");
+        cast(&mut game, "Silkwrap", &[]);
+        let picks: Vec<Action> = game
+            .legal_actions(ME)
+            .into_iter()
+            .filter(|a| matches!(a, Action::ChooseTargets { .. }))
+            .collect();
+        assert_eq!(
+            picks,
+            vec![Action::ChooseTargets {
+                targets: vec![Target::Object(bear)]
+            }],
+            "only the cheap creature"
+        );
+    });
+    check!("Oblivion Ring", || exiles_with_a_leaves_trigger(
+        "Oblivion Ring",
+        "Disenchant",
+        false
+    ));
+    check!("Journey to Nowhere", || exiles_with_a_leaves_trigger(
+        "Journey to Nowhere",
+        "Disenchant",
+        false
+    ));
+    check!("Fiend Hunter", || exiles_with_a_leaves_trigger("Fiend Hunter", "Murder", true));
     check!("Tandem Tactics", || {
         let mut game = base()
             .battlefield(ME, "Grizzly Bears")

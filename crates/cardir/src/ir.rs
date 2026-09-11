@@ -142,8 +142,13 @@ pub enum Effect {
     Destroy {
         target: Ref,
     },
+    /// "exile target creature", or with `until`, "exile target creature
+    /// until ~ leaves the battlefield": the card comes back on its own when
+    /// the exiling permanent leaves.
     Exile {
         target: Ref,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        until: Option<Duration>,
     },
     Draw {
         player: PlayerRef,
@@ -342,6 +347,9 @@ pub enum Ref {
     },
     /// What an earlier `Chosen` with this `bind` picked ("it", "that creature").
     Named(String),
+    /// "the exiled card": whatever this permanent's abilities exiled while it
+    /// was on the battlefield (linked abilities, rule 607).
+    ExiledWithThis,
 }
 
 /// How many things a `Chosen` picks.
@@ -402,6 +410,7 @@ pub enum Filter {
     Blocking,
     PowerAtLeast(i32),
     PowerAtMost(i32),
+    ManaValueAtMost(i32),
     HasKeyword(Keyword),
     And(Vec<Filter>),
     Or(Vec<Filter>),
@@ -430,6 +439,8 @@ pub enum EventPattern {
     ThisEnters,
     /// "When ~ dies"
     ThisDies,
+    /// "When ~ leaves the battlefield": any zone change off the battlefield.
+    ThisLeaves,
     /// "Whenever ~ attacks"
     ThisAttacks,
     /// "Whenever ~ blocks"
@@ -467,6 +478,7 @@ impl EventPattern {
         match self {
             EventPattern::ThisEnters
             | EventPattern::ThisDies
+            | EventPattern::ThisLeaves
             | EventPattern::ThisAttacks
             | EventPattern::ThisBlocks
             | EventPattern::ThisBecomesBlocked
@@ -513,6 +525,9 @@ pub enum Duration {
     EndOfTurn,
     /// "until your next turn": ends as the controller's next turn begins.
     UntilYourNextTurn,
+    /// "until ~ leaves the battlefield" / "for as long as ~ remains on the
+    /// battlefield": ends when the permanent that made the effect leaves.
+    UntilThisLeaves,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

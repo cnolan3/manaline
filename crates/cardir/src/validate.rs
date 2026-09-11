@@ -52,9 +52,20 @@ impl Ctx<'_> {
         }
     }
 
+    fn duration(&mut self, d: &Duration) {
+        if *d == Duration::UntilThisLeaves && !self.card.is_permanent() {
+            self.err("UntilThisLeaves on a card that is never on the battlefield");
+        }
+    }
+
     fn reference(&mut self, r: &Ref) {
         match r {
             Ref::Target(i) => self.target(*i),
+            Ref::ExiledWithThis => {
+                if !self.card.is_permanent() {
+                    self.err("Ref::ExiledWithThis on a card that is never on the battlefield");
+                }
+            }
             Ref::Triggering => {
                 if !self.in_trigger {
                     self.err("Ref::Triggering outside a trigger");
@@ -173,9 +184,16 @@ impl Ctx<'_> {
                 self.amount(amount);
                 self.direct_ref(to);
             }
-            Effect::Destroy { target } | Effect::Exile { target } | Effect::Tap { target } | Effect::Untap { target } => {
-                self.direct_ref(target)
+            Effect::Exile { target, until } => {
+                self.direct_ref(target);
+                if let Some(d) = until {
+                    if *d != Duration::UntilThisLeaves {
+                        self.err("an exile lasts until this leaves the battlefield or for good");
+                    }
+                    self.duration(d);
+                }
             }
+            Effect::Destroy { target } | Effect::Tap { target } | Effect::Untap { target } => self.direct_ref(target),
             Effect::ReturnToHand { target } | Effect::CounterSpell { target } => self.direct_ref(target),
             Effect::Draw { player, count } => {
                 self.player_ref(player);
@@ -190,13 +208,21 @@ impl Ctx<'_> {
                 self.amount(amount);
             }
             Effect::ModifyPt {
-                target, power, toughness, ..
+                target,
+                power,
+                toughness,
+                until,
+                ..
             } => {
                 self.direct_ref(target);
                 self.amount(power);
                 self.amount(toughness);
+                self.duration(until);
             }
-            Effect::GrantKeyword { target, .. } => self.direct_ref(target),
+            Effect::GrantKeyword { target, until, .. } => {
+                self.direct_ref(target);
+                self.duration(until);
+            }
             Effect::CreateToken { spec, count } => {
                 self.amount(count);
                 if spec.types.contains(&CardType::Creature) != spec.pt.is_some() {
@@ -217,10 +243,13 @@ impl Ctx<'_> {
                 self.player_ref(player);
                 self.amount(count);
             }
-            Effect::ReturnFromGraveyard { target, .. }
-            | Effect::ReturnExiled { target, .. }
-            | Effect::Restrict { target, .. }
-            | Effect::SkipUntap { target } => self.direct_ref(target),
+            Effect::ReturnFromGraveyard { target, .. } | Effect::ReturnExiled { target, .. } | Effect::SkipUntap { target } => {
+                self.direct_ref(target)
+            }
+            Effect::Restrict { target, until, .. } => {
+                self.direct_ref(target);
+                self.duration(until);
+            }
             Effect::Delayed { effects, .. } => {
                 if effects.is_empty() {
                     self.err("a delayed trigger needs at least one effect");

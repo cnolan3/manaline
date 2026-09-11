@@ -43,6 +43,7 @@ fn db_with_extras() -> Arc<engine::CardDb> {
         r#"Card(name: "Test Tribute", cost: "{B}", types: [Sorcery], text: "Each opponent may discard a card. If they don't, they lose 2 life.", spell: Spell(effects: [May(who: EachOpponent, effect: Discard(player: EachOpponent, count: Const(1)), otherwise: [LoseLife(player: EachOpponent, amount: Const(2))])]))"#,
         r#"Card(name: "Test Tithe", cost: "{B}", types: [Sorcery], text: "You may pay 2 life. If you do, draw a card.", spell: Spell(effects: [May(effect: PayLife(player: You, amount: Const(2)), then: [Draw(player: You, count: Const(1))])]))"#,
         r#"Card(name: "Test Rouse", cost: "{G}", types: [Instant], text: "Tap a creature you control, then it gets +2/+2 until end of turn.", spell: Spell(effects: [Sequence([Tap(target: Chosen(who: You, filter: And([Creature, ControlledBy(You)]), count: Exactly(1), bind: "c")), ModifyPt(target: Named("c"), power: Const(2), toughness: Const(2), until: EndOfTurn)])]))"#,
+        r#"Card(name: "Test Bodyguard", cost: "{1}{W}", types: [Creature], subtypes: ["Human", "Soldier"], pt: (1, 1), text: "When this creature enters, target creature gets +2/+2 for as long as this creature remains on the battlefield.", triggers: [Trigger(event: ThisEnters, targets: [Creature], effects: [ModifyPt(target: Target(0), power: Const(2), toughness: Const(2), until: UntilThisLeaves)])])"#,
     ];
     let mut all = cards::core_ir();
     for text in extras {
@@ -1627,4 +1628,282 @@ fn paying_life_is_only_offered_when_affordable() {
     assert!(game.pending.is_none(), "can't pay: no question");
     assert_eq!(game.players[0].life, 1);
     assert_eq!(game.players[0].hand.len(), 0);
+}
+
+// ----- linked durations: "until ~ leaves the battlefield" -----
+
+#[test]
+fn banisher_priest_exiles_until_it_leaves() {
+    let mut game = TestGame::new(db_with_extras(), 2)
+        .battlefield(Seat(0), "Plains")
+        .battlefield(Seat(0), "Plains")
+        .battlefield(Seat(0), "Plains")
+        .battlefield(Seat(0), "Plains")
+        .hand(Seat(0), "Banisher Priest")
+        .hand(Seat(0), "Test Exile")
+        .battlefield(Seat(1), "Grizzly Bears")
+        .build();
+    let bears = bf(&game, Seat(1), "Grizzly Bears");
+    cast(&mut game, Seat(0), "Banisher Priest", &[]);
+    resolve_top(&mut game);
+    let priest = bf(&game, Seat(0), "Banisher Priest");
+    // The ETB targets a creature an opponent controls: the bear is the only one,
+    // and the engine still asks rather than picking for us.
+    assert!(
+        matches!(game.pending, Some(PendingChoice::ChooseTargets { seat: Seat(0), .. })),
+        "{:?}",
+        game.pending
+    );
+    let picks: Vec<Action> = game
+        .legal_actions(Seat(0))
+        .into_iter()
+        .filter(|a| matches!(a, Action::ChooseTargets { .. }))
+        .collect();
+    assert_eq!(
+        picks,
+        vec![Action::ChooseTargets {
+            targets: vec![Target::Object(bears)]
+        }],
+        "only the opponent's creature"
+    );
+    game.apply(Seat(0), &picks[0]).unwrap();
+    resolve_top(&mut game);
+    assert_eq!(game.objects[bears].zone, Zone::Exile);
+    assert_eq!(game.objects[bears].exiled_by, Some(priest));
+    assert!(game.objects[bears].until_source_leaves);
+    assert!(game.players[1].exile.contains(&bears));
+
+    // The priest leaves and the bear comes straight back, no trigger needed.
+    cast(&mut game, Seat(0), "Test Exile", &[Target::Object(priest)]);
+    resolve_top(&mut game);
+    assert_eq!(game.objects[priest].zone, Zone::Exile);
+    assert_eq!(game.objects[bears].zone, Zone::Battlefield);
+    assert_eq!(game.objects[bears].controller, Seat(1), "under its owner's control");
+    assert!(game.players[1].battlefield.contains(&bears));
+    assert!(game.objects[bears].summoning_sick);
+    assert_eq!(game.objects[bears].exiled_by, None);
+    assert!(!game.objects[bears].until_source_leaves);
+}
+
+#[test]
+fn an_exile_until_leaves_does_nothing_if_the_source_already_left() {
+    let mut game = TestGame::new(db_with_extras(), 2)
+        .battlefield(Seat(0), "Plains")
+        .battlefield(Seat(0), "Plains")
+        .battlefield(Seat(0), "Plains")
+        .battlefield(Seat(0), "Plains")
+        .hand(Seat(0), "Banisher Priest")
+        .hand(Seat(0), "Test Exile")
+        .battlefield(Seat(1), "Grizzly Bears")
+        .build();
+    let bears = bf(&game, Seat(1), "Grizzly Bears");
+    cast(&mut game, Seat(0), "Banisher Priest", &[]);
+    resolve_top(&mut game);
+    let priest = bf(&game, Seat(0), "Banisher Priest");
+    game.apply(
+        Seat(0),
+        &Action::ChooseTargets {
+            targets: vec![Target::Object(bears)],
+        },
+    )
+    .unwrap();
+    assert_eq!(game.stack.len(), 1, "the ETB trigger is waiting to resolve");
+
+    // Kill the priest with the trigger still on the stack.
+    cast(&mut game, Seat(0), "Test Exile", &[Target::Object(priest)]);
+    assert_eq!(game.stack.len(), 2);
+    assert!(matches!(game.stack[0].kind, engine::StackKind::Trigger { .. }));
+    assert_eq!(game.stack[1].kind, engine::StackKind::Spell, "the removal is on top");
+    resolve_top(&mut game);
+    assert_eq!(game.objects[priest].zone, Zone::Exile);
+    assert_eq!(game.stack.len(), 1, "the ETB trigger is still there");
+
+    // Its source is gone, so it exiles nothing at all.
+    resolve_top(&mut game);
+    assert_eq!(game.objects[bears].zone, Zone::Battlefield);
+    assert_eq!(game.objects[bears].exiled_by, None);
+    assert!(game.players[1].exile.is_empty(), "{:?}", game.players[1].exile);
+}
+
+#[test]
+fn oblivion_ring_returns_the_exiled_card_when_it_leaves() {
+    let mut game = TestGame::new(db(), 2)
+        .battlefield(Seat(0), "Plains")
+        .battlefield(Seat(0), "Plains")
+        .battlefield(Seat(0), "Plains")
+        .battlefield(Seat(0), "Plains")
+        .hand(Seat(0), "Oblivion Ring")
+        .hand(Seat(0), "Demystify")
+        .battlefield(Seat(1), "Grizzly Bears")
+        .build();
+    let bears = bf(&game, Seat(1), "Grizzly Bears");
+    cast(&mut game, Seat(0), "Oblivion Ring", &[]);
+    resolve_top(&mut game);
+    let ring = bf(&game, Seat(0), "Oblivion Ring");
+    // "another target nonland permanent": not the ring, not a land.
+    let picks: Vec<Action> = game
+        .legal_actions(Seat(0))
+        .into_iter()
+        .filter(|a| matches!(a, Action::ChooseTargets { .. }))
+        .collect();
+    assert_eq!(
+        picks,
+        vec![Action::ChooseTargets {
+            targets: vec![Target::Object(bears)]
+        }],
+        "{picks:?}"
+    );
+    game.apply(Seat(0), &picks[0]).unwrap();
+    resolve_top(&mut game);
+    assert_eq!(game.objects[bears].zone, Zone::Exile);
+    assert_eq!(game.objects[bears].exiled_by, Some(ring));
+    assert!(
+        !game.objects[bears].until_source_leaves,
+        "Oblivion Ring brings it back with a trigger, not on its own"
+    );
+
+    // Destroying the ring puts its leaves trigger on the stack.
+    cast(&mut game, Seat(0), "Demystify", &[Target::Object(ring)]);
+    pass_both(&mut game);
+    assert_eq!(game.objects[ring].zone, Zone::Graveyard);
+    assert_eq!(game.objects[bears].zone, Zone::Exile, "not back until the trigger resolves");
+    assert_eq!(game.stack.len(), 1, "{:?}", game.stack);
+    assert!(matches!(game.stack[0].kind, engine::StackKind::Trigger { .. }));
+    let text = game.describe_stack_object(&game.stack[0]);
+    assert!(text.contains("leaves the battlefield"), "{text}");
+    assert!(text.contains("the exiled card"), "{text}");
+
+    resolve_top(&mut game);
+    assert_eq!(
+        game.objects[bears].zone,
+        Zone::Battlefield,
+        "the leaves trigger returns the exiled card"
+    );
+    assert_eq!(game.objects[bears].controller, Seat(1), "under its owner's control");
+    assert!(game.players[1].battlefield.contains(&bears));
+    assert!(game.objects[bears].summoning_sick);
+}
+
+#[test]
+fn an_exiled_token_does_not_come_back() {
+    let mut game = TestGame::new(db_with_extras(), 2)
+        .battlefield(Seat(0), "Plains")
+        .battlefield(Seat(0), "Plains")
+        .battlefield(Seat(0), "Plains")
+        .battlefield(Seat(0), "Plains")
+        .hand(Seat(0), "Banisher Priest")
+        .hand(Seat(0), "Test Exile")
+        .battlefield(Seat(1), "Plains")
+        .battlefield(Seat(1), "Plains")
+        .hand(Seat(1), "Raise the Alarm")
+        .build();
+    // Seat 1 makes two Soldier tokens in response to nothing in particular.
+    game.apply(Seat(0), &Action::PassPriority).unwrap();
+    cast(&mut game, Seat(1), "Raise the Alarm", &[]);
+    resolve_top(&mut game);
+    let tokens = bfs(&game, Seat(1), "Soldier");
+    assert_eq!(tokens.len(), 2);
+    let (doomed, other) = (tokens[0], tokens[1]);
+
+    cast(&mut game, Seat(0), "Banisher Priest", &[]);
+    resolve_top(&mut game);
+    let priest = bf(&game, Seat(0), "Banisher Priest");
+    game.apply(
+        Seat(0),
+        &Action::ChooseTargets {
+            targets: vec![Target::Object(doomed)],
+        },
+    )
+    .unwrap();
+    resolve_top(&mut game);
+    assert_eq!(
+        game.objects[doomed].zone,
+        Zone::OutOfGame,
+        "a token in exile ceases to exist (704.5d)"
+    );
+    assert!(!game.players[1].battlefield.contains(&doomed));
+
+    cast(&mut game, Seat(0), "Test Exile", &[Target::Object(priest)]);
+    resolve_top(&mut game);
+    assert_eq!(game.objects[priest].zone, Zone::Exile);
+    assert_eq!(game.objects[doomed].zone, Zone::OutOfGame, "and it stays gone");
+    assert!(!game.players[1].battlefield.contains(&doomed));
+    assert_eq!(game.objects[other].zone, Zone::Battlefield, "the other token is untouched");
+}
+
+#[test]
+fn a_modifier_for_as_long_as_the_source_remains_ends_when_it_leaves() {
+    let mut game = TestGame::new(db_with_extras(), 2)
+        .battlefield(Seat(0), "Plains")
+        .battlefield(Seat(0), "Plains")
+        .battlefield(Seat(0), "Plains")
+        .battlefield(Seat(0), "Grizzly Bears")
+        .hand(Seat(0), "Test Bodyguard")
+        .hand(Seat(0), "Test Exile")
+        .build();
+    let bears = bf(&game, Seat(0), "Grizzly Bears");
+    cast(&mut game, Seat(0), "Test Bodyguard", &[]);
+    resolve_top(&mut game);
+    let guard = bf(&game, Seat(0), "Test Bodyguard");
+    game.apply(
+        Seat(0),
+        &Action::ChooseTargets {
+            targets: vec![Target::Object(bears)],
+        },
+    )
+    .unwrap();
+    resolve_top(&mut game);
+    assert_eq!(game.effective_stats(bears), Some((4, 4)));
+
+    // Not "until end of turn": the pump survives the turn boundary.
+    advance_until(&mut game, |g| {
+        g.turn == 3 && g.phase == Phase::Main1 && g.pending.is_none() && g.priority == Some(Seat(0))
+    })
+    .unwrap();
+    assert_eq!(game.effective_stats(bears), Some((4, 4)), "for as long as the guard remains");
+
+    cast(&mut game, Seat(0), "Test Exile", &[Target::Object(guard)]);
+    resolve_top(&mut game);
+    assert_eq!(game.objects[guard].zone, Zone::Exile);
+    assert_eq!(game.effective_stats(bears), Some((2, 2)), "the guard left, so the pump ends");
+    assert!(game.objects[bears].modifiers.is_empty());
+}
+
+#[test]
+fn silkwrap_only_hits_small_creatures() {
+    let mut game = TestGame::new(db(), 2)
+        .battlefield(Seat(0), "Plains")
+        .battlefield(Seat(0), "Plains")
+        .hand(Seat(0), "Silkwrap")
+        .battlefield(Seat(1), "Grizzly Bears")
+        .battlefield(Seat(1), "Serra Angel")
+        .build();
+    let bears = bf(&game, Seat(1), "Grizzly Bears");
+    let angel = bf(&game, Seat(1), "Serra Angel");
+    cast(&mut game, Seat(0), "Silkwrap", &[]);
+    resolve_top(&mut game);
+    assert!(
+        matches!(game.pending, Some(PendingChoice::ChooseTargets { seat: Seat(0), .. })),
+        "{:?}",
+        game.pending
+    );
+    let picks: Vec<Action> = game
+        .legal_actions(Seat(0))
+        .into_iter()
+        .filter(|a| matches!(a, Action::ChooseTargets { .. }))
+        .collect();
+    assert_eq!(
+        picks,
+        vec![Action::ChooseTargets {
+            targets: vec![Target::Object(bears)]
+        }],
+        "mana value 3 or less: the 2/2 bear, not the five-mana angel"
+    );
+    game.apply(Seat(0), &picks[0]).unwrap();
+    resolve_top(&mut game);
+    let wrap = bf(&game, Seat(0), "Silkwrap");
+    assert_eq!(game.objects[bears].zone, Zone::Exile);
+    assert_eq!(game.objects[bears].exiled_by, Some(wrap));
+    assert!(game.objects[bears].until_source_leaves);
+    assert_eq!(game.objects[angel].zone, Zone::Battlefield);
 }

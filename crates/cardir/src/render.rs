@@ -335,6 +335,7 @@ impl R<'_> {
             Filter::Blocking => adjectives.push("blocking".into()),
             Filter::PowerAtLeast(n) => postfixes.push(format!("with power {n} or greater")),
             Filter::PowerAtMost(n) => postfixes.push(format!("with power {n} or less")),
+            Filter::ManaValueAtMost(n) => postfixes.push(format!("with mana value {n} or less")),
             Filter::HasKeyword(k) => postfixes.push(format!("with {}", k.word())),
             Filter::Not(inner) => match &**inner {
                 Filter::HasKeyword(k) => postfixes.push(format!("without {}", k.word())),
@@ -383,7 +384,9 @@ impl R<'_> {
             Filter::Any => "any target".to_string(),
             f if has_other(f) => format!("another target {}", self.noun(&without_other(f), Number::Singular)),
             f => format!("target {}", self.noun(f, Number::Singular)),
-        };
+        }
+        // One target of theirs is "a creature an opponent controls".
+        .replace(" your opponents control", " an opponent controls");
         let many = |r: &Self| match f {
             Filter::Any => "any targets".to_string(),
             f => format!("target {}", r.noun(f, Number::Plural)),
@@ -433,6 +436,7 @@ impl R<'_> {
                 }
             }
             Ref::This => self.this(),
+            Ref::ExiledWithThis => "the exiled card".into(),
             Ref::Triggering => "that creature".into(),
             Ref::Each(f) => format!("each {}", self.noun(f, Number::Singular)),
             Ref::Player(p) => self.player_object(p),
@@ -630,9 +634,18 @@ impl R<'_> {
                 }
             }
             Effect::Destroy { target: Ref::Each(f) } => format!("destroy all {}", self.noun(f, Number::Plural)),
-            Effect::Exile { target: Ref::Each(f) } => format!("exile all {}", self.noun(f, Number::Plural)),
+            Effect::Exile {
+                target: Ref::Each(f),
+                until: None,
+            } => format!("exile all {}", self.noun(f, Number::Plural)),
             Effect::Destroy { target } => format!("destroy {}", self.object(target)),
-            Effect::Exile { target } => format!("exile {}", self.object(target)),
+            Effect::Exile { target, until } => {
+                let obj = self.object(target);
+                match until {
+                    Some(Duration::UntilThisLeaves) => format!("exile {obj} until ~ leaves the battlefield"),
+                    _ => format!("exile {obj}"),
+                }
+            }
             Effect::Draw { player, count } => {
                 let (subj, second) = self.player_subject(player);
                 let what = counted(count, "card");
@@ -816,6 +829,7 @@ impl R<'_> {
                 let when = match until {
                     Duration::EndOfTurn => " this turn",
                     Duration::UntilYourNextTurn => " until your next turn",
+                    Duration::UntilThisLeaves => " for as long as ~ remains on the battlefield",
                 };
                 format!("{subj} {what}{when}")
             }
@@ -890,6 +904,7 @@ impl R<'_> {
         match d {
             Duration::EndOfTurn => " until end of turn",
             Duration::UntilYourNextTurn => " until your next turn",
+            Duration::UntilThisLeaves => " for as long as ~ remains on the battlefield",
         }
     }
 
@@ -1216,6 +1231,7 @@ fn this_verb(e: &EventPattern) -> Option<(&'static str, &'static str)> {
     Some(match e {
         EventPattern::ThisEnters => ("When", "enters"),
         EventPattern::ThisDies => ("When", "dies"),
+        EventPattern::ThisLeaves => ("When", "leaves the battlefield"),
         EventPattern::ThisAttacks => ("Whenever", "attacks"),
         EventPattern::ThisBlocks => ("Whenever", "blocks"),
         EventPattern::ThisBecomesBlocked => ("Whenever", "becomes blocked"),

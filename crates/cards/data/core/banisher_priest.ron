@@ -1,0 +1,15 @@
+Card(
+    name: "Banisher Priest",
+    cost: "{1}{W}{W}",
+    types: [Creature],
+    subtypes: ["Human", "Cleric"],
+    pt: (2, 2),
+    text: "When this creature enters, exile target creature an opponent controls until this creature leaves the battlefield.",
+    triggers: [
+        Trigger(
+            event: ThisEnters,
+            targets: [And([Creature, ControlledBy(EachOpponent)])],
+            effects: [Exile(target: Target(0), until: Some(UntilThisLeaves))],
+        ),
+    ],
+)

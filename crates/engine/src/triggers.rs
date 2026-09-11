@@ -5,7 +5,7 @@
 
 use crate::action::{DamageTarget, Target};
 use crate::event::{Event, EventBase};
-use crate::filter::Ctx;
+use crate::filter::{Ctx, EXILED_BIND};
 use crate::game::{Game, PendingChoice, StackKind, StackObject};
 use crate::types::{Keyword, ObjectId, Phase, Seat, Zone};
 use cardir::{DelayedAt, Effect, EventPattern, Filter};
@@ -30,6 +30,10 @@ pub struct FiredTrigger {
     pub controller: Seat,
     pub kind: FiredKind,
     pub triggering: Option<Target>,
+    /// Names bound as the trigger fired ("the exiled card" of a leaves
+    /// trigger), which the resolution reads.
+    #[serde(default)]
+    pub bindings: std::collections::BTreeMap<String, Vec<Target>>,
 }
 
 /// A trigger an effect set up for later.
@@ -46,6 +50,7 @@ pub struct DelayedTrigger {
 enum Occurred {
     Enters(ObjectId),
     Dies(ObjectId),
+    Leaves(ObjectId),
     Attacks(ObjectId),
     Blocks { blocker: ObjectId, attacker: ObjectId },
     BecomesBlocked { attacker: ObjectId, blocker: ObjectId },
@@ -61,7 +66,9 @@ impl Occurred {
     /// What `Triggering` refers to for this occurrence.
     fn triggering(&self) -> Target {
         match self {
-            Occurred::Enters(id) | Occurred::Dies(id) | Occurred::Attacks(id) | Occurred::Tapped(id) => Target::Object(*id),
+            Occurred::Enters(id) | Occurred::Dies(id) | Occurred::Leaves(id) | Occurred::Attacks(id) | Occurred::Tapped(id) => {
+                Target::Object(*id)
+            }
             Occurred::Blocks { attacker, .. } => Target::Object(*attacker),
             Occurred::BecomesBlocked { blocker, .. } => Target::Object(*blocker),
             Occurred::CombatDamageToPlayer { player, .. } => Target::Player(*player),
@@ -75,7 +82,7 @@ impl Occurred {
     /// battlefield (a dying creature's own "when ~ dies").
     fn extra_watcher(&self) -> Option<ObjectId> {
         match self {
-            Occurred::Dies(id) => Some(*id),
+            Occurred::Dies(id) | Occurred::Leaves(id) => Some(*id),
             _ => None,
         }
     }
@@ -102,8 +109,14 @@ impl Game {
             EventBase::ZoneChange {
                 object,
                 from: Zone::Battlefield,
-                to: Zone::Graveyard,
-            } => self.fire(Occurred::Dies(*object)),
+                to,
+            } => {
+                if *to == Zone::Graveyard {
+                    self.fire(Occurred::Dies(*object));
+                }
+                self.fire(Occurred::Leaves(*object));
+                self.source_left(*object);
+            }
             EventBase::Attacked { attackers, .. } => {
                 for (a, _) in attackers {
                     self.fire(Occurred::Attacks(*a));
@@ -154,6 +167,7 @@ impl Game {
                                 controller: *seat,
                                 kind: FiredKind::Prowess,
                                 triggering: Some(Target::Object(*object)),
+                                bindings: Default::default(),
                             });
                         }
                     }
@@ -187,7 +201,13 @@ impl Game {
             let controller = self.objects[id].controller;
             let def = self.card_def(id).clone();
             for (i, t) in def.ir.triggers.iter().enumerate() {
-                let ctx = Ctx::new(controller, Some(id), Vec::new(), Some(triggering));
+                let mut ctx = Ctx::new(controller, Some(id), Vec::new(), Some(triggering));
+                if let Occurred::Leaves(left) = o {
+                    if left == id {
+                        let exiled: Vec<Target> = self.exiled_by(id).into_iter().map(Target::Object).collect();
+                        ctx.bindings.insert(EXILED_BIND.into(), exiled);
+                    }
+                }
                 if !self.event_matches(&t.event, &o, id, &ctx) {
                     continue;
                 }
@@ -201,6 +221,7 @@ impl Game {
                     controller,
                     kind: FiredKind::Card(i as u8),
                     triggering: Some(triggering),
+                    bindings: ctx.bindings,
                 });
             }
         }
@@ -210,6 +231,7 @@ impl Game {
         match (pattern, o) {
             (EventPattern::ThisEnters, Occurred::Enters(id))
             | (EventPattern::ThisDies, Occurred::Dies(id))
+            | (EventPattern::ThisLeaves, Occurred::Leaves(id))
             | (EventPattern::ThisAttacks, Occurred::Attacks(id))
             | (EventPattern::ThisBecomesTapped, Occurred::Tapped(id)) => *id == watcher,
             (EventPattern::ThisBlocks, Occurred::Blocks { blocker, .. }) => *blocker == watcher,
@@ -244,6 +266,31 @@ impl Game {
         }
     }
 
+    /// Cards in exile that `source`'s abilities put there.
+    pub(crate) fn exiled_by(&self, source: ObjectId) -> Vec<ObjectId> {
+        self.objects
+            .iter()
+            .filter(|(_, o)| o.zone == Zone::Exile && o.exiled_by == Some(source))
+            .map(|(id, _)| id)
+            .collect()
+    }
+
+    /// A permanent left the battlefield: whatever it exiled "until ~ leaves"
+    /// comes back, its other exiles forget it (the leaves trigger already has
+    /// them bound), and effects it made "for as long as ~ remains" end.
+    fn source_left(&mut self, source: ObjectId) {
+        for id in self.exiled_by(source) {
+            if self.objects[id].until_source_leaves {
+                self.return_exiled_to_battlefield(id);
+            } else {
+                self.objects[id].exiled_by = None;
+            }
+        }
+        for (_, o) in self.objects.iter_mut() {
+            o.modifiers.retain(|m| m.expires != crate::game::Expiry::LeavesOf(source));
+        }
+    }
+
     /// Fire every delayed trigger whose moment this is.
     fn fire_delayed(&mut self, at: DelayedAt) {
         let due: Vec<DelayedTrigger> = {
@@ -260,6 +307,7 @@ impl Game {
                     ctx: d.ctx,
                 },
                 triggering: None,
+                bindings: Default::default(),
             });
         }
     }
@@ -308,6 +356,7 @@ impl Game {
                 source: f.source,
                 index: *i,
                 triggering: f.triggering,
+                bindings: f.bindings.clone(),
             },
             FiredKind::Prowess => StackKind::Prowess { source: f.source },
             FiredKind::Delayed { effects, ctx } => StackKind::Delayed {

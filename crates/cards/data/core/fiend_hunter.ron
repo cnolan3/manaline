@@ -1,0 +1,12 @@
+Card(
+    name: "Fiend Hunter",
+    cost: "{1}{W}{W}",
+    types: [Creature],
+    subtypes: ["Human", "Cleric"],
+    pt: (1, 3),
+    text: "When this creature enters, you may exile another target creature.\nWhen this creature leaves the battlefield, return the exiled card to the battlefield under its owner's control.",
+    triggers: [
+        Trigger(event: ThisEnters, targets: [And([Other, Creature])], effects: [May(effect: Exile(target: Target(0)))]),
+        Trigger(event: ThisLeaves, effects: [ReturnExiled(target: ExiledWithThis, to: Battlefield)]),
+    ],
+)

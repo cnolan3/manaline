@@ -1,0 +1,13 @@
+Card(
+    name: "Silkwrap",
+    cost: "{1}{W}",
+    types: [Enchantment],
+    text: "When this enchantment enters, exile target creature with mana value 3 or less an opponent controls until this enchantment leaves the battlefield.",
+    triggers: [
+        Trigger(
+            event: ThisEnters,
+            targets: [And([Creature, ManaValueAtMost(3), ControlledBy(EachOpponent)])],
+            effects: [Exile(target: Target(0), until: Some(UntilThisLeaves))],
+        ),
+    ],
+)

@@ -1,0 +1,10 @@
+Card(
+    name: "Oblivion Ring",
+    cost: "{2}{W}",
+    types: [Enchantment],
+    text: "When this enchantment enters, exile another target nonland permanent.\nWhen this enchantment leaves the battlefield, return the exiled card to the battlefield under its owner's control.",
+    triggers: [
+        Trigger(event: ThisEnters, targets: [And([Other, Not(Land), Permanent])], effects: [Exile(target: Target(0))]),
+        Trigger(event: ThisLeaves, effects: [ReturnExiled(target: ExiledWithThis, to: Battlefield)]),
+    ],
+)

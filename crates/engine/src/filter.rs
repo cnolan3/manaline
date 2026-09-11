@@ -6,6 +6,10 @@ use crate::types::{CardType, Keyword, ObjectId, Seat, Zone};
 use cardir::{Amount, Filter, PlayerRef, Ref};
 use std::collections::BTreeMap;
 
+/// The binding a "when ~ leaves the battlefield" trigger gets for the cards
+/// its source had exiled, since the link is cut as it leaves.
+pub const EXILED_BIND: &str = "$exiled";
+
 /// What a filter is evaluated relative to.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Ctx {
@@ -91,6 +95,7 @@ impl Game {
             Filter::Blocking => !obj.blocking.is_empty(),
             Filter::PowerAtLeast(n) => self.effective_stats(id).map(|(p, _)| p >= *n).unwrap_or(false),
             Filter::PowerAtMost(n) => self.effective_stats(id).map(|(p, _)| p <= *n).unwrap_or(false),
+            Filter::ManaValueAtMost(n) => self.card_def(id).ir.cost.mana_value() as i32 <= *n,
             Filter::HasKeyword(k) => self.has_keyword(id, *k),
             Filter::And(fs) => fs.iter().all(|f| self.object_matches(id, f, ctx)),
             Filter::Or(fs) => fs.iter().any(|f| self.object_matches(id, f, ctx)),
@@ -285,6 +290,18 @@ impl Game {
                 })
                 .unwrap_or_default(),
             Ref::This => ctx.this.into_iter().collect(),
+            // Bound when the source left the battlefield (its "when ~ leaves"
+            // trigger fires after the link is gone); live before that.
+            Ref::ExiledWithThis => match ctx.bindings.get(EXILED_BIND) {
+                Some(ts) => ts
+                    .iter()
+                    .filter_map(|t| match t {
+                        Target::Object(id) => Some(*id),
+                        _ => None,
+                    })
+                    .collect(),
+                None => ctx.this.map(|s| self.exiled_by(s)).unwrap_or_default(),
+            },
             Ref::Triggering => match ctx.triggering {
                 Some(Target::Object(id)) => vec![id],
                 _ => Vec::new(),

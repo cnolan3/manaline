@@ -349,13 +349,19 @@ impl Game {
                 }
                 true
             }
-            StackKind::Trigger { source, index, triggering } => {
+            StackKind::Trigger {
+                source,
+                index,
+                triggering,
+                bindings,
+            } => {
                 let def = self.card_def(source).clone();
                 let trigger = def.ir.triggers[index as usize].clone();
                 let Some(groups) = self.legal_target_groups(controller, source, &trigger.targets, &targets, triggering) else {
                     return true;
                 };
-                let ctx = Ctx::new(controller, Some(source), groups, triggering);
+                let mut ctx = Ctx::new(controller, Some(source), groups, triggering);
+                ctx.bindings = bindings;
                 // An intervening "if" is checked again on resolution (rule 603.4).
                 if let Some(c) = &trigger.condition {
                     if !self.condition_holds(c, &ctx) {

@@ -233,6 +233,28 @@ Card(
     }
 
     #[test]
+    fn linked_durations_render_like_oracle() {
+        let cases = [
+            r#"Card(name: "Warden", cost: "{1}{W}", types: [Creature], pt: (1, 3), text: "When this creature enters, exile target creature an opponent controls until this creature leaves the battlefield.", triggers: [Trigger(event: ThisEnters, targets: [And([Creature, ControlledBy(EachOpponent)])], effects: [Exile(target: Target(0), until: Some(UntilThisLeaves))])])"#,
+            r#"Card(name: "Ring", cost: "{2}{W}", types: [Enchantment], text: "When this enchantment enters, exile another target nonland permanent.\nWhen this enchantment leaves the battlefield, return the exiled card to the battlefield under its owner's control.", triggers: [Trigger(event: ThisEnters, targets: [And([Other, Not(Land), Permanent])], effects: [Exile(target: Target(0))]), Trigger(event: ThisLeaves, effects: [ReturnExiled(target: ExiledWithThis, to: Battlefield)])])"#,
+            r#"Card(name: "Wrap", cost: "{1}{W}", types: [Enchantment], text: "When this enchantment enters, exile target creature with mana value 3 or less an opponent controls until this enchantment leaves the battlefield.", triggers: [Trigger(event: ThisEnters, targets: [And([Creature, ManaValueAtMost(3), ControlledBy(EachOpponent)])], effects: [Exile(target: Target(0), until: Some(UntilThisLeaves))])])"#,
+            r#"Card(name: "Bodyguard", cost: "{1}{W}", types: [Creature], pt: (1, 1), text: "When this creature enters, target creature gets +2/+2 for as long as this creature remains on the battlefield.", triggers: [Trigger(event: ThisEnters, targets: [Creature], effects: [ModifyPt(target: Target(0), power: Const(2), toughness: Const(2), until: UntilThisLeaves)])])"#,
+        ];
+        for text in cases {
+            let card = load(text).unwrap_or_else(|e| panic!("{e}"));
+            if let Err((want, got)) = round_trips(&card) {
+                panic!("{}:\n  oracle:   {want}\n  rendered: {got}", card.name);
+            }
+        }
+        let bad = r#"Card(name: "Bolt", cost: "{R}", types: [Instant], text: "", spell: Spell(targets: [Creature], effects: [ModifyPt(target: Target(0), power: Const(2), toughness: Const(2), until: UntilThisLeaves)]))"#;
+        assert!(load(bad).unwrap_err().contains("never on the battlefield"));
+        let bad = r#"Card(name: "Bolt", cost: "{R}", types: [Instant], text: "", spell: Spell(targets: [Creature], effects: [ReturnExiled(target: ExiledWithThis, to: Battlefield)]))"#;
+        assert!(load(bad).unwrap_err().contains("never on the battlefield"));
+        let bad = r#"Card(name: "Bear", cost: "{G}", types: [Creature], pt: (2, 2), text: "", triggers: [Trigger(event: ThisEnters, targets: [Creature], effects: [Exile(target: Target(0), until: Some(EndOfTurn))])])"#;
+        assert!(load(bad).unwrap_err().contains("for good"));
+    }
+
+    #[test]
     fn chosen_is_only_a_direct_target_and_named_needs_its_binding() {
         let bad = r#"Card(name: "B", cost: "{R}", types: [Instant], text: "", spell: Spell(effects: [DealDamage(amount: PowerOf(Chosen(who: You, filter: Creature, count: Exactly(1))), to: Player(You))]))"#;
         assert!(load(bad).unwrap_err().contains("direct target"), "{}", load(bad).unwrap_err());

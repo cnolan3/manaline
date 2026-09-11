@@ -21,7 +21,7 @@ fn direct_refs_mut(e: &mut Effect) -> Vec<&mut Ref> {
     match e {
         Effect::DealDamage { to, .. } => vec![to],
         Effect::Destroy { target }
-        | Effect::Exile { target }
+        | Effect::Exile { target, .. }
         | Effect::Tap { target }
         | Effect::Untap { target }
         | Effect::ReturnToHand { target }
@@ -111,10 +111,22 @@ impl Game {
                     self.destroy(id);
                 }
             }
-            Effect::Exile { target } => {
+            Effect::Exile { target, until } => {
+                // A permanent's ability remembers what it exiled (rule 607);
+                // "until ~ leaves" needs the source still there, else nothing
+                // is exiled at all.
+                let source = ctx
+                    .this
+                    .filter(|t| self.objects.get(*t).is_some_and(|o| o.zone == Zone::Battlefield));
+                let linked = until.is_some();
+                if linked && source.is_none() {
+                    return Vec::new();
+                }
                 for id in self.objects_of(target, ctx) {
                     if self.objects[id].zone == Zone::Battlefield {
                         self.move_object(id, Zone::Exile);
+                        self.objects[id].exiled_by = source;
+                        self.objects[id].until_source_leaves = linked;
                     }
                 }
             }
@@ -154,7 +166,7 @@ impl Game {
             } => {
                 let p = self.eval_amount(power, ctx);
                 let t = self.eval_amount(toughness, ctx);
-                let expires = Expiry::from_duration(until, ctx.you);
+                let expires = Expiry::from_duration(until, ctx.you, ctx.this);
                 for id in self.objects_of(target, ctx) {
                     if self.objects[id].zone != Zone::Battlefield {
                         continue;
@@ -173,7 +185,7 @@ impl Game {
                 }
             }
             Effect::GrantKeyword { target, keyword, until } => {
-                let expires = Expiry::from_duration(until, ctx.you);
+                let expires = Expiry::from_duration(until, ctx.you, ctx.this);
                 for id in self.objects_of(target, ctx) {
                     if self.objects[id].zone == Zone::Battlefield {
                         self.objects[id].modifiers.push(Modifier {
@@ -293,12 +305,7 @@ impl Game {
                     }
                     match to {
                         cardir::ReturnZone::Hand => self.move_object(id, Zone::Hand),
-                        cardir::ReturnZone::Battlefield => {
-                            let owner = self.objects[id].owner;
-                            self.objects[id].controller = owner;
-                            self.move_object(id, Zone::Battlefield);
-                            self.objects[id].summoning_sick = true;
-                        }
+                        cardir::ReturnZone::Battlefield => self.return_exiled_to_battlefield(id),
                     }
                 }
             }
@@ -307,7 +314,7 @@ impl Game {
                 restriction,
                 until,
             } => {
-                let expires = Expiry::from_duration(until, ctx.you);
+                let expires = Expiry::from_duration(until, ctx.you, ctx.this);
                 for id in self.objects_of(target, ctx) {
                     if self.objects[id].zone == Zone::Battlefield {
                         self.objects[id].modifiers.push(Modifier {
@@ -511,6 +518,17 @@ impl Game {
     }
 
     /// Destroy a permanent: to the graveyard unless indestructible.
+    /// "Return the exiled card to the battlefield under its owner's control."
+    pub(crate) fn return_exiled_to_battlefield(&mut self, id: ObjectId) {
+        if self.objects[id].zone != Zone::Exile {
+            return;
+        }
+        let owner = self.objects[id].owner;
+        self.objects[id].controller = owner;
+        self.move_object(id, Zone::Battlefield);
+        self.objects[id].summoning_sick = true;
+    }
+
     pub(crate) fn destroy(&mut self, id: ObjectId) {
         let Some(obj) = self.objects.get(id) else {
             return;

@@ -387,7 +387,7 @@ Combat is the hairiest part. Sequence: `BeginCombat` → `DeclareAttackers` (act
 The full layers system is out of scope. The cube is chosen so that only these forms of continuous effect exist:
 
 - **Static P/T or keyword buffs from the object itself** (e.g., a lord: "other Elves you control get +1/+1") — computed on read by `Game::effective_stats(id)`, which walks the battlefield for applicable statics. Recomputed every time it's asked, never cached, so a static gated on a condition (`AsLongAs`) is simply re-evaluated on every read. Correct by construction, and fast enough at two-player cube scale.
-- **Timed modifiers** from spells and abilities — stored as `Modifier { kind, expires }` on the object: `Expiry::EndOfTurn` is cleared in cleanup, `Expiry::TurnOf(seat)` ("until your next turn") ends as that seat's next turn begins, and `Expiry::NextUntapOf(seat)` ("doesn't untap during its controller's next untap step") is consumed by that seat's untap step.
+- **Timed modifiers** from spells and abilities — stored as `Modifier { kind, expires }` on the object: `Expiry::EndOfTurn` is cleared in cleanup, `Expiry::TurnOf(seat)` ("until your next turn") ends as that seat's next turn begins, `Expiry::NextUntapOf(seat)` ("doesn't untap during its controller's next untap step") is consumed by that seat's untap step, and `Expiry::LeavesOf(object)` ("for as long as ~ remains on the battlefield") is dropped the moment that permanent leaves.
 - **Auras and Equipment** granting P/T or keywords — treated as statics on the attached object, resolved through the same `effective_stats` walk.
 
 Order of application inside `effective_stats`: base → copy (none in v1) → control (none) → text-changing (none) → type-changing (none) → P/T setting → P/T modifying (statics, modifiers, counters) → P/T switching (none). That's layer 7 and nothing else, which is honest about what the cube needs.
@@ -563,7 +563,7 @@ pub enum Cost { Mana(ManaCost), Tap, SacrificeThis, Sacrifice(Filter), PayLife(i
 pub enum Effect {
     DealDamage { amount: Amount, to: Ref },
     Destroy { target: Ref },
-    Exile { target: Ref },
+    Exile { target: Ref, until: Option<Duration> },      // Some(UntilThisLeaves): "until ~ leaves the battlefield"
     Draw { player: PlayerRef, count: Amount },
     Discard { player: PlayerRef, count: Amount, random: bool },
     GainLife { player: PlayerRef, amount: Amount },
@@ -595,7 +595,8 @@ pub enum Effect {
 pub enum Amount { Const(i32), Count(Filter), LifeOf(PlayerRef), PowerOf(Ref), X, Neg(Box<Amount>) }
 pub enum Ref { Target(u8), This, Triggering, Each(Filter), Player(PlayerRef), Attached,
                Chosen { who: PlayerRef, filter: Filter, count: Quantity, bind: Option<String> },
-               Named(String) }
+               Named(String),
+               ExiledWithThis }                        // "the exiled card" (linked abilities, rule 607)
 pub enum Quantity { Exactly(i32), UpTo(i32), AnyNumber }
 pub enum PlayerRef { You, TargetPlayer(u8), TargetOpponent(u8), EachOpponent, EachPlayer, Triggering,
                      Controller(Box<Ref>), Owner(Box<Ref>) }
@@ -605,14 +606,15 @@ pub enum Filter {
     Any, Creature, Land, Artifact, Enchantment, Instant, Sorcery, Permanent, Player, Opponent, Spell,
     Other, This, Attached, InGraveyard(PlayerRef), Token,
     Subtype(String), Color(Color), ControlledBy(PlayerRef),
-    Tapped, Untapped, Attacking, Blocking, PowerAtLeast(i32), PowerAtMost(i32), HasKeyword(Keyword),
+    Tapped, Untapped, Attacking, Blocking, PowerAtLeast(i32), PowerAtMost(i32), ManaValueAtMost(i32),
+    HasKeyword(Keyword),
     And(Vec<Filter>), Or(Vec<Filter>), Not(Box<Filter>),
 }
 
 pub struct Trigger { pub event: EventPattern, pub condition: Option<Condition>,   // intervening "if"
                      pub targets: Vec<Filter>, pub effects: Vec<Effect> }
 pub enum EventPattern {
-    ThisEnters, ThisDies, ThisAttacks, ThisBlocks, ThisBecomesBlocked,
+    ThisEnters, ThisDies, ThisLeaves, ThisAttacks, ThisBlocks, ThisBecomesBlocked,
     ThisDealsCombatDamageToPlayer, ThisBecomesTapped,
     Enters(Filter), Dies(Filter),
     Upkeep(PlayerRef), EndStep(PlayerRef), BeginCombat(PlayerRef),
@@ -634,7 +636,7 @@ pub enum Condition {
     LifeAtMost { player: PlayerRef, amount: i32 },
 }
 
-pub enum Duration { EndOfTurn, UntilYourNextTurn }
+pub enum Duration { EndOfTurn, UntilYourNextTurn, UntilThisLeaves }
 pub enum ReturnZone { Hand, Battlefield }
 pub enum Restriction { CantAttack, CantBlock, CantAttackOrBlock }
 pub enum DelayedAt { NextEndStep }
@@ -674,7 +676,7 @@ The answer is bound **by name** in the context — picks into `ctx.bindings`, op
 
 A `May` asks whichever player the IR names in `who`, and for `EachOpponent` / `EachPlayer` each of them in turn — frames go on in reverse so the first named decides first, and while one of them is deciding, `ctx.chooser` narrows the effects to that player alone, so "each opponent may sacrifice a creature" runs once per opponent and names them alone. The label they see is rendered from the card (`cardir::render_option`) in the imperative they would read. With `unless: true` the question is the payment: the engine enumerates the ways that player can pay the `PayMana` and offers them plus "Don't pay", and runs `otherwise` when they decline — or immediately, without asking, when they cannot pay at all.
 
-X is announced with the payment (`ManaPayment::x`) when the spell is cast or the ability activated, and `ManaCost::with_x` turns each `{X}` into that much generic mana for the actual payment. The announced value rides on the stack object and is read at resolution through `Ctx::x`, which is what `Amount::X` evaluates to — so "Blaze deals X damage to any target" needs no machinery beyond that. Durations become an `Expiry` on whatever modifier the effect created: `EndOfTurn` is cleared in cleanup, `UntilYourNextTurn` becomes `Expiry::TurnOf(seat)` for the controller and ends as that player's next turn begins, and `SkipUntap` hangs an `Expiry::NextUntapOf(controller)` modifier that their next untap step consumes. `Delayed` effects never touch the stack when they are created: they wait in `Game::delayed` together with the context they resolved in — targets, bindings and all — and are put on the stack when their `DelayedAt` comes round (`crates/engine/src/triggers.rs`).
+X is announced with the payment (`ManaPayment::x`) when the spell is cast or the ability activated, and `ManaCost::with_x` turns each `{X}` into that much generic mana for the actual payment. The announced value rides on the stack object and is read at resolution through `Ctx::x`, which is what `Amount::X` evaluates to — so "Blaze deals X damage to any target" needs no machinery beyond that. Durations become an `Expiry` on whatever modifier the effect created: `EndOfTurn` is cleared in cleanup, `UntilYourNextTurn` becomes `Expiry::TurnOf(seat)` for the controller and ends as that player's next turn begins, and `SkipUntap` hangs an `Expiry::NextUntapOf(controller)` modifier that their next untap step consumes. `UntilThisLeaves` links the effect to the permanent that made it: a modifier gets `Expiry::LeavesOf(source)`, and an `Exile { until: Some(UntilThisLeaves) }` marks the exiled card with the source that took it, so that when the source leaves the battlefield (any zone change off it, which is also when `ThisLeaves` triggers fire) the card comes straight back under its owner's control — or, if the source had already left before the exile resolved, nothing is exiled at all. A plain exile from a permanent's ability records the source too, which is what `Ref::ExiledWithThis` reads: the two-trigger cards ("When ~ leaves the battlefield, return the exiled card") get those cards bound into the leaves trigger's context as the link is cut. `Delayed` effects never touch the stack when they are created: they wait in `Game::delayed` together with the context they resolved in — targets, bindings and all — and are put on the stack when their `DelayedAt` comes round (`crates/engine/src/triggers.rs`).
 
 ### 4.2 The starter cube
 

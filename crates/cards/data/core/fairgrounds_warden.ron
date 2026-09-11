@@ -1,0 +1,15 @@
+Card(
+    name: "Fairgrounds Warden",
+    cost: "{1}{W}",
+    types: [Creature],
+    subtypes: ["Dwarf", "Soldier"],
+    pt: (1, 3),
+    text: "When this creature enters, exile target creature an opponent controls until this creature leaves the battlefield.",
+    triggers: [
+        Trigger(
+            event: ThisEnters,
+            targets: [And([Creature, ControlledBy(EachOpponent)])],
+            effects: [Exile(target: Target(0), until: Some(UntilThisLeaves))],
+        ),
+    ],
+)

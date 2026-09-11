@@ -197,6 +197,9 @@ pub enum StackKind {
         source: ObjectId,
         index: u8,
         triggering: Option<Target>,
+        /// Names bound as it fired ("the exiled card").
+        #[serde(default)]
+        bindings: BTreeMap<String, Vec<Target>>,
     },
     /// The prowess trigger.
     Prowess { source: ObjectId },
@@ -251,14 +254,21 @@ pub enum Expiry {
     TurnOf(Seat),
     /// Consumed by this seat's next untap step.
     NextUntapOf(Seat),
+    /// Ends when this permanent leaves the battlefield ("for as long as ~
+    /// remains on the battlefield").
+    LeavesOf(ObjectId),
 }
 
 impl Expiry {
     /// The expiry for an effect `you` created with this duration.
-    pub fn from_duration(d: &cardir::Duration, you: Seat) -> Expiry {
+    pub fn from_duration(d: &cardir::Duration, you: Seat, this: Option<ObjectId>) -> Expiry {
         match d {
             cardir::Duration::EndOfTurn => Expiry::EndOfTurn,
             cardir::Duration::UntilYourNextTurn => Expiry::TurnOf(you),
+            cardir::Duration::UntilThisLeaves => match this {
+                Some(id) => Expiry::LeavesOf(id),
+                None => Expiry::EndOfTurn,
+            },
         }
     }
 }
@@ -293,6 +303,13 @@ pub struct GameObject {
     /// Took damage from a deathtouch source this turn (rule 704.5h).
     #[serde(default)]
     pub deathtouch_damaged: bool,
+    /// The permanent whose ability exiled this card, while it is in exile
+    /// ("the exiled card" of a linked ability).
+    #[serde(default)]
+    pub exiled_by: Option<ObjectId>,
+    /// Exiled "until ~ leaves the battlefield": comes back when `exiled_by` leaves.
+    #[serde(default)]
+    pub until_source_leaves: bool,
 }
 
 impl GameObject {
@@ -314,6 +331,8 @@ impl GameObject {
             blocked_by: Vec::new(),
             modifiers: Vec::new(),
             deathtouch_damaged: false,
+            exiled_by: None,
+            until_source_leaves: false,
         }
     }
 
@@ -330,6 +349,8 @@ impl GameObject {
         self.blocked_by.clear();
         self.modifiers.clear();
         self.deathtouch_damaged = false;
+        self.exiled_by = None;
+        self.until_source_leaves = false;
     }
 }
 

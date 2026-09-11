@@ -103,7 +103,7 @@ fn is_interaction(card: &cardir::Card) -> bool {
         !matches!(r, Ref::Player(_))
     }
     effects_of(card).into_iter().any(|e| match e {
-        Effect::Destroy { target } | Effect::Exile { target } | Effect::ReturnToHand { target } | Effect::CounterSpell { target } => {
+        Effect::Destroy { target } | Effect::Exile { target, .. } | Effect::ReturnToHand { target } | Effect::CounterSpell { target } => {
             targets_object(target)
         }
         Effect::DealDamage { to, .. } => targets_object(to) || matches!(to, Ref::Target(_)),
