@@ -1,13 +1,12 @@
 //! The manaline MCP server (docs/SPEC.md §7): a thin proxy that lets any
 //! MCP-capable agent play a seat. Speaks stdio and streamable HTTP.
 
-pub mod control;
 pub mod primer;
 pub mod render;
 pub mod server;
 pub mod session;
 
-pub use server::McpServer;
+pub use server::{McpServer, Shared};
 pub use session::{Session, SessionConfig};
 
 use anyhow::{Context, Result};
@@ -23,14 +22,15 @@ pub async fn connect(config: SessionConfig) -> Result<McpServer> {
     Ok(McpServer::new(session))
 }
 
-/// A server with no game behind it: card search, deck analysis, and the
-/// resources, for deckbuilding between games.
+/// A server with no seat of its own: card search, deck analysis and the
+/// resources for deckbuilding, and a seat at whatever game the human has
+/// published as soon as a session calls a game tool.
 pub fn standalone(format: engine::Format) -> McpServer {
     McpServer::standalone(format)
 }
 
-/// Serve over stdin/stdout until the client goes away. Nothing else may
-/// write to stdout in this mode.
+/// Serve over stdin/stdout until the client goes away: one session, so one
+/// seat. Nothing else may write to stdout in this mode.
 pub async fn serve_stdio(server: McpServer) -> Result<()> {
     let running = server.serve(rmcp::transport::stdio()).await.context("MCP stdio handshake")?;
     running.waiting().await.context("MCP stdio session")?;
@@ -60,7 +60,8 @@ impl HttpServer {
     }
 }
 
-/// Serve streamable HTTP at `/mcp` on `addr`. `127.0.0.1:0` picks a free port.
+/// Serve streamable HTTP at `/mcp` on `addr`, one session per connecting
+/// client and one seat per session. `127.0.0.1:0` picks a free port.
 pub async fn serve_http(server: McpServer, addr: &str) -> Result<HttpServer> {
     let listener = tokio::net::TcpListener::bind(addr)
         .await
@@ -70,7 +71,9 @@ pub async fn serve_http(server: McpServer, addr: &str) -> Result<HttpServer> {
     let config = StreamableHttpServerConfig::default()
         .with_json_response(true)
         .with_cancellation_token(cancel.child_token());
-    let service = StreamableHttpService::new(move || Ok(server.clone()), Arc::new(LocalSessionManager::default()), config);
+    // One handler per MCP session, all over the same cards and runtime
+    // directory: each session takes its own seat at the table.
+    let service = StreamableHttpService::new(move || Ok(server.new_session()), Arc::new(LocalSessionManager::default()), config);
     let router = axum::Router::new().nest_service("/mcp", service);
     let ct = cancel.clone();
     let task = tokio::spawn(async move {

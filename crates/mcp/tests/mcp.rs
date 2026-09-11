@@ -5,9 +5,10 @@ use daemon::{CreateGame, Daemon, DaemonConfig, DaemonHandle};
 use engine::{Action, Outcome, Seat};
 use mcp::server::{
     DeckStatsParams, EditorCardParams, EditorRemoveParams, EditorReplaceParams, EditorSetCountParams, GetCardParams, GetDeckParams,
-    GetLogParams, SayParams, SearchParams, SubmitDeckParams, TakeActionParams, WaitParams,
+    GetLogParams, SayParams, SearchParams, SitDownParams, SubmitDeckParams, TakeActionParams, WaitParams,
 };
 use mcp::SessionConfig;
+use protocol::endpoint::{GameMarker, Runtime, SeatKind, SeatSlot};
 use protocol::{Client, ClientError, Endpoint, ServerMessage, Token};
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
@@ -22,10 +23,16 @@ struct Running {
     endpoint: Endpoint,
     tokens: Vec<Token>,
     task: tokio::task::JoinHandle<()>,
+    /// This test's own runtime directory, so published games and seat claims
+    /// are invisible to the other tests (and to the real machine).
+    runtime: Runtime,
+    socket: std::path::PathBuf,
+    game_id: String,
 }
 
 async fn start(seed: u64) -> Running {
     let dir = std::env::temp_dir().join(format!("manaline-mcp-test-{}-{seed}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let config = DaemonConfig {
         socket: Some(dir.join("game.sock")),
@@ -45,12 +52,46 @@ async fn start(seed: u64) -> Running {
     let info = d.info().clone();
     let handle = d.handle();
     let task = tokio::spawn(async move { d.run().await.unwrap() });
+    let socket = info.socket.unwrap();
     Running {
         handle,
-        endpoint: Endpoint::Unix(info.socket.unwrap()),
+        endpoint: Endpoint::Unix(socket.clone()),
         tokens: info.seat_tokens,
         task,
+        runtime: Runtime::at(dir.join("runtime")),
+        socket,
+        game_id: info.game_id.map(|g| g.0).unwrap_or_else(|| "game".into()),
     }
+}
+
+/// Publish this daemon in `rt` for agents to find, as `play` does: one seat
+/// slot per entry, agent seats carrying that seat's real token.
+fn publish(rt: &Runtime, r: &Running, seats: &[(SeatKind, Option<&str>)]) -> GameMarker {
+    let slots: Vec<SeatSlot> = seats
+        .iter()
+        .enumerate()
+        .map(|(i, (kind, deck))| SeatSlot {
+            seat: i as u8,
+            kind: *kind,
+            name: match kind {
+                SeatKind::Human => "Connor".into(),
+                _ => format!("Claude {i}"),
+            },
+            deck: deck.map(str::to_string),
+            token: (*kind == SeatKind::Agent).then(|| r.tokens[i].clone()),
+        })
+        .collect();
+    let marker = GameMarker {
+        game_id: r.game_id.clone(),
+        pid: std::process::id(),
+        socket: Some(r.socket.clone()),
+        tcp: None,
+        format: "cube".into(),
+        spectator_token: None,
+        seats: slots,
+        dir: std::path::PathBuf::new(),
+    };
+    rt.publish_game(&marker).unwrap()
 }
 
 fn text_of(r: &CallToolResult) -> String {
@@ -106,6 +147,72 @@ async fn human_loop(mut c: Client, seed: u64) -> Client {
             }) => return c,
             Ok(_) => continue,
             Err(_) => return c,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct Played {
+    outcome: Option<Outcome>,
+    actions: u32,
+    auto_passed: u64,
+    /// Times the agent was woken with nothing but pass/concede to choose from.
+    pass_only_wakeups: u32,
+}
+
+/// Play a seat to the end through the tools, the way the prompt tells an agent
+/// to: `wait_for_turn`, then the first action that does something.
+async fn agent_loop(server: &mcp::McpServer, timeout_seconds: u32) -> Played {
+    let mut played = Played::default();
+    loop {
+        let res = server
+            .wait_for_turn(Parameters(WaitParams {
+                timeout_seconds: Some(timeout_seconds),
+                auto_pass: None,
+            }))
+            .await
+            .unwrap();
+        let sc = res.structured_content.clone().unwrap();
+        played.auto_passed += sc.get("auto_passed").and_then(|n| n.as_u64()).unwrap_or(0);
+        if sc.get("game_over").and_then(|g| g.as_bool()).unwrap_or(false) {
+            played.outcome = Some(serde_json::from_value::<Outcome>(sc["outcome"].clone()).unwrap());
+            return played;
+        }
+        if sc.get("timed_out").and_then(|t| t.as_bool()).unwrap_or(false) {
+            panic!("agent waited {timeout_seconds}s without a turn");
+        }
+        assert!(text_of(&res).contains("IT IS YOUR TURN TO ACT"), "{}", text_of(&res));
+        let mut ids = legal_ids(&res);
+        if ids.iter().all(|(_, d)| d == "Pass priority" || d == "Concede") {
+            played.pass_only_wakeups += 1;
+        }
+        loop {
+            let (id, _) = ids
+                .iter()
+                .find(|(_, d)| d.starts_with("Keep") || d.starts_with("Play ") || d.starts_with("Cast "))
+                .or_else(|| ids.iter().find(|(_, d)| d != "Concede"))
+                .cloned()
+                .expect("a non-concede action");
+            let res = server
+                .take_action(Parameters(TakeActionParams {
+                    action_id: Some(id),
+                    action: None,
+                    state_version: None,
+                }))
+                .await
+                .unwrap();
+            assert!(!is_error(&res), "{}", text_of(&res));
+            played.actions += 1;
+            let sc = res.structured_content.clone().unwrap();
+            if sc["state"]["outcome"].is_null() && sc["still_your_turn"].as_bool().unwrap() {
+                ids = legal_ids(&res);
+                continue;
+            }
+            break;
+        }
+        if let Some(o) = server.outcome() {
+            played.outcome = Some(o);
+            return played;
         }
     }
 }
@@ -180,65 +287,18 @@ async fn an_agent_plays_a_whole_game_through_the_tools() {
 
     // Play the game out: the human at random, the agent through wait_for_turn / take_action.
     let human_task = tokio::spawn(human_loop(human, 3));
-    let mut turns_taken = 0;
-    let mut auto_passes = 0u64;
-    let mut pass_only_wakeups = 0;
-    let outcome = loop {
-        let res = server
-            .wait_for_turn(Parameters(WaitParams {
-                timeout_seconds: Some(20),
-                auto_pass: None,
-            }))
-            .await
-            .unwrap();
-        let sc = res.structured_content.clone().unwrap();
-        auto_passes += sc.get("auto_passed").and_then(|n| n.as_u64()).unwrap_or(0);
-        if sc.get("game_over").and_then(|g| g.as_bool()).unwrap_or(false) {
-            break serde_json::from_value::<Outcome>(sc["outcome"].clone()).unwrap();
-        }
-        if sc.get("timed_out").and_then(|t| t.as_bool()).unwrap_or(false) {
-            panic!("agent waited 20s without a turn");
-        }
-        assert!(text_of(&res).contains("IT IS YOUR TURN TO ACT"), "{}", text_of(&res));
-        let mut ids = legal_ids(&res);
-        if ids.iter().all(|(_, d)| d == "Pass priority" || d == "Concede") {
-            pass_only_wakeups += 1;
-        }
-        loop {
-            let (id, _) = ids
-                .iter()
-                .find(|(_, d)| d.starts_with("Keep") || d.starts_with("Play ") || d.starts_with("Cast "))
-                .or_else(|| ids.iter().find(|(_, d)| d != "Concede"))
-                .cloned()
-                .expect("a non-concede action");
-            let res = server
-                .take_action(Parameters(TakeActionParams {
-                    action_id: Some(id),
-                    action: None,
-                    state_version: None,
-                }))
-                .await
-                .unwrap();
-            assert!(!is_error(&res), "{}", text_of(&res));
-            turns_taken += 1;
-            let sc = res.structured_content.clone().unwrap();
-            if sc["state"]["outcome"].is_null() && sc["still_your_turn"].as_bool().unwrap() {
-                ids = legal_ids(&res);
-                continue;
-            }
-            break;
-        }
-        if let Some(o) = server.outcome() {
-            break o;
-        }
-    };
+    let played = agent_loop(&server, 20).await;
     human_task.await.unwrap();
-    assert!(turns_taken > 20, "the agent took {turns_taken} actions");
-    assert!(matches!(outcome, Outcome::Winner(_)));
-    assert!(auto_passes > 0, "wait_for_turn never passed a nothing-to-do moment for the agent");
+    assert!(played.actions > 20, "the agent took {} actions", played.actions);
+    assert!(matches!(played.outcome, Some(Outcome::Winner(_))));
     assert!(
-        pass_only_wakeups == 0,
-        "woken {pass_only_wakeups} times with only pass/concede available"
+        played.auto_passed > 0,
+        "wait_for_turn never passed a nothing-to-do moment for the agent"
+    );
+    assert!(
+        played.pass_only_wakeups == 0,
+        "woken {} times with only pass/concede available",
+        played.pass_only_wakeups
     );
 
     // Once over, tools say so instead of erroring.
@@ -735,7 +795,7 @@ async fn search_and_deck_stats_tools_work_before_the_game_starts() {
 async fn a_standalone_server_serves_card_data_without_a_game() {
     let rt = std::env::temp_dir().join(format!("manaline-standalone-rt-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&rt);
-    let server = mcp::standalone(engine::Format::cube()).with_runtime(protocol::endpoint::Runtime::at(&rt));
+    let server = mcp::standalone(engine::Format::cube()).with_runtime(Runtime::at(&rt));
     let res = server
         .search_cards(Parameters(SearchParams {
             query: "t:creature kw:flying c:w mv<=3".into(),
@@ -778,7 +838,7 @@ async fn a_standalone_server_serves_card_data_without_a_game() {
         .await
         .unwrap();
     assert!(is_error(&res));
-    assert!(mcp::server::cube_text(&server.cards).contains("Serra Angel"));
+    assert!(mcp::server::cube_text(server.cards()).contains("Serra Angel"));
 
     // With no deckbuilder open, the editor tools say so.
     let res = server.editor_status().await.unwrap();
@@ -814,7 +874,7 @@ async fn a_standalone_server_serves_card_data_without_a_game() {
     let socket = dir.join("editor.sock");
     let listener = tokio::net::UnixListener::bind(&socket).unwrap();
     let service = tokio::spawn(tui::editor_service(listener, editor.clone()));
-    let announced = server.runtime.announce_editor(&file, "cube", Some(&socket)).unwrap();
+    let announced = server.runtime().announce_editor(&file, "cube", Some(&socket)).unwrap();
 
     let res = server.editor_status().await.unwrap();
     assert!(!is_error(&res) && text_of(&res).contains("17 cards"), "{}", text_of(&res));
@@ -913,103 +973,284 @@ async fn a_standalone_server_serves_card_data_without_a_game() {
 }
 
 #[tokio::test]
-async fn play_can_seat_a_running_server_through_its_control_socket() {
-    use mcp::control::{running_at, Advertised, ControlReply, ControlRequest, Marker};
-    let r = start(14).await;
-    let dir = std::env::temp_dir().join(format!("manaline-control-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    let socket = dir.join("mcp.sock");
-    let marker_path = dir.join("mcp.json");
+async fn a_session_seats_itself_from_the_published_game() {
+    let r = start(21).await;
+    let game = publish(&r.runtime, &r, &[(SeatKind::Human, None), (SeatKind::Agent, Some("red"))]);
+    let server = mcp::standalone(engine::Format::cube()).with_runtime(r.runtime.clone());
+    assert!(server.session().is_none(), "a fresh session holds no seat");
 
-    // A standalone server advertising itself, as `manaline mcp` does.
-    let server = mcp::standalone(engine::Format::cube()).with_runtime(protocol::endpoint::Runtime::at(&dir));
-    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
-    let marker = Marker {
-        pid: std::process::id(),
-        url: "http://127.0.0.1:7454/mcp".into(),
-        control_socket: socket.clone(),
-        mode: server.mode(),
-    };
-    let advertised = std::sync::Arc::new(Advertised::write(&marker_path, &marker).unwrap());
-    let service = tokio::spawn(mcp::control::serve(
-        listener,
-        server.clone(),
-        marker.url.clone(),
-        advertised.clone(),
-    ));
-    assert_eq!(running_at(&marker_path).unwrap().mode, "card data only");
-    assert!(is_error(&server.get_game_state().await.unwrap()));
-
-    // `play` seats it: it joins the daemon with the seat token and submits the deck.
-    let req = ControlRequest::Attach {
-        endpoint: r.endpoint.to_string(),
-        token: r.tokens[1].0.clone(),
-        name: "Agent".into(),
-        decklist: Some(cards::deck_text("red").unwrap()),
-    };
-    match mcp::control::request(&socket, &req).await.unwrap() {
-        ControlReply::Ok { mode, .. } => assert!(mode.starts_with("game "), "{mode}"),
-        ControlReply::Error { message } => panic!("{message}"),
-    }
+    // The first game tool call sits the session down in the one agent seat,
+    // with the deck the marker named for it.
+    let res = server.get_game_state().await.unwrap();
+    assert!(is_error(&res) && text_of(&res).contains("has not started"), "{}", text_of(&res));
+    assert_eq!(server.seat(), Some(Seat(1)));
+    assert_eq!(server.mode(), format!("game {}, seat 1", r.game_id));
+    assert_eq!(game.claims(), vec![(1, std::process::id())], "the claim names this process");
     assert!(
-        running_at(&marker_path).unwrap().mode.starts_with("game "),
-        "the marker follows the mode"
+        server.session().unwrap().lobby().seats[1].deck_ok,
+        "the deck from the marker was submitted"
     );
-    assert!(server.session().is_some());
-    let res = server.editor_status().await.unwrap();
-    assert!(
-        is_error(&res) && text_of(&res).contains("only available"),
-        "seated: no deckbuilder tools"
-    );
-    match mcp::control::request(&socket, &req).await.unwrap() {
-        ControlReply::Error { message } => assert!(message.contains("already seated"), "{message}"),
-        other => panic!("{other:?}"),
-    }
 
-    // The human sits down: the game starts and the seated server sees it.
+    // The human's seat is not on offer to another agent, and the agent seat is taken.
+    let nosy = server.new_session();
+    let res = nosy.sit_down(Parameters(SitDownParams { seat: Some(0) })).await.unwrap();
+    assert!(
+        is_error(&res) && text_of(&res).contains("not a free agent seat"),
+        "{}",
+        text_of(&res)
+    );
+    let res = nosy.sit_down(Parameters(SitDownParams::default())).await.unwrap();
+    assert!(is_error(&res) && text_of(&res).contains("every agent seat"), "{}", text_of(&res));
+    assert!(nosy.session().is_none());
+
+    // The human sits down for real and the game plays out through the tools.
     let mut human = Client::connect(&r.endpoint).await.unwrap();
     human.hello(&r.tokens[0], Some("Connor")).await.unwrap();
+    human.subscribe().await.unwrap();
     human.set_deck(&cards::deck_text("green").unwrap()).await.unwrap().unwrap();
     human.ready().await.unwrap();
     let mut status = r.handle.status();
     status.wait_for(|s| !s.must_act.is_empty()).await.unwrap();
+    let human_task = tokio::spawn(human_loop(human, 4));
+    let played = agent_loop(&server, 20).await;
+    human_task.await.unwrap();
+    assert!(matches!(played.outcome, Some(Outcome::Winner(_))), "{played:?}");
+
+    // The seat is kept after the game ends, so the final state is still readable.
     let res = server.get_game_state().await.unwrap();
+    assert!(text_of(&res).contains("GAME OVER"), "{}", text_of(&res));
+    assert_eq!(game.claims(), vec![(1, std::process::id())]);
+
+    // A newer game is published: sit_down moves to it and gives the old seat back.
+    let r2 = start(22).await;
+    let newer = publish(&r.runtime, &r2, &[(SeatKind::Human, None), (SeatKind::Agent, Some("blue"))]);
+    let res = server.sit_down(Parameters(SitDownParams::default())).await.unwrap();
+    assert!(!is_error(&res) && text_of(&res).contains(&r2.game_id), "{}", text_of(&res));
+    assert_eq!(server.seat(), Some(Seat(1)));
+    assert!(game.claims().is_empty(), "the finished game's seat was released");
+    assert_eq!(newer.claims(), vec![(1, std::process::id())]);
+
+    // Leaving gives the claim back and drops to card data only.
+    let res = server.leave().await.unwrap();
+    assert!(
+        !is_error(&res) && text_of(&res).contains("free for another agent"),
+        "{}",
+        text_of(&res)
+    );
+    assert!(server.session().is_none());
+    assert_eq!(server.mode(), "card data only");
+    assert!(newer.claims().is_empty());
+    let res = server.leave().await.unwrap();
+    assert!(text_of(&res).contains("not seated"), "{}", text_of(&res));
+
+    r2.handle.shutdown();
+    r2.task.await.unwrap();
+    r.handle.shutdown();
+    r.task.await.unwrap();
+}
+
+/// One MCP session over streamable HTTP: initialize once, then one tool call
+/// per request, carrying this session's id.
+struct HttpSession {
+    addr: std::net::SocketAddr,
+    sid: Option<String>,
+    next_id: u64,
+}
+
+impl HttpSession {
+    async fn open(addr: std::net::SocketAddr) -> HttpSession {
+        let (sid, init) = rpc(
+            &addr,
+            &None,
+            serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"0"}}}),
+        )
+        .await;
+        assert_eq!(init["result"]["serverInfo"]["name"], "manaline", "{init}");
+        assert!(sid.is_some(), "the server hands out a session id: {init}");
+        let _ = rpc(
+            &addr,
+            &sid,
+            serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+        )
+        .await;
+        HttpSession { addr, sid, next_id: 2 }
+    }
+
+    async fn call(&mut self, name: &str, args: serde_json::Value) -> serde_json::Value {
+        let id = self.next_id;
+        self.next_id += 1;
+        let (_, res) = rpc(
+            &self.addr,
+            &self.sid,
+            serde_json::json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":name,"arguments":args}}),
+        )
+        .await;
+        assert!(res["result"].is_object(), "{name}: {res}");
+        res["result"].clone()
+    }
+}
+
+/// The first legal action worth taking: something that develops the board, or
+/// anything at all as long as it is not conceding.
+fn pick_action(legal: &serde_json::Value) -> Option<u64> {
+    let list = legal.as_array()?;
+    let starting = |prefix: &str| {
+        list.iter()
+            .find(|a| a["description"].as_str().is_some_and(|d| d.starts_with(prefix)))
+            .cloned()
+    };
+    starting("Keep")
+        .or_else(|| starting("Play "))
+        .or_else(|| starting("Cast "))
+        .or_else(|| list.iter().find(|a| a["description"] != "Concede").cloned())
+        .and_then(|a| a["id"].as_u64())
+}
+
+/// An agent playing one seat over its own HTTP session: sit down, then
+/// wait_for_turn / take_action until the game is over. Returns its seat and
+/// the outcome it was told about.
+async fn http_agent(addr: std::net::SocketAddr) -> (u64, serde_json::Value) {
+    let mut s = HttpSession::open(addr).await;
+    let sat = s.call("sit_down", serde_json::json!({})).await;
+    assert_ne!(sat["isError"], serde_json::Value::Bool(true), "sit_down: {sat}");
+    let seat = sat["structuredContent"]["seat"].as_u64().expect("a seat number");
+    loop {
+        let res = s.call("wait_for_turn", serde_json::json!({ "timeout_seconds": 20 })).await;
+        let sc = res["structuredContent"].clone();
+        if sc["game_over"].as_bool().unwrap_or(false) {
+            return (seat, sc["outcome"].clone());
+        }
+        if sc["timed_out"].as_bool().unwrap_or(false) {
+            continue;
+        }
+        assert_ne!(res["isError"], serde_json::Value::Bool(true), "wait_for_turn: {res}");
+        let mut legal = sc["legal_actions"].clone();
+        let mut version = sc["state_version"].as_u64();
+        while let Some(id) = pick_action(&legal) {
+            let mut args = serde_json::json!({ "action_id": id });
+            if let Some(v) = version {
+                args["state_version"] = v.into();
+            }
+            let res = s.call("take_action", args).await;
+            if res["isError"] == serde_json::Value::Bool(true) {
+                break; // the game moved on; wait for a fresh list
+            }
+            let sc = res["structuredContent"].clone();
+            if !sc["still_your_turn"].as_bool().unwrap_or(false) || !sc["state"]["outcome"].is_null() {
+                break;
+            }
+            legal = sc["legal_actions"].clone();
+            version = sc["state_version"].as_u64();
+        }
+    }
+}
+
+#[tokio::test]
+async fn two_http_sessions_take_two_seats_and_play_each_other() {
+    let r = start(23).await;
+    let game = publish(&r.runtime, &r, &[(SeatKind::Agent, Some("red")), (SeatKind::Agent, Some("green"))]);
+    // One process, one set of cards, two MCP sessions: two seats.
+    let server = mcp::standalone(engine::Format::cube()).with_runtime(r.runtime.clone());
+    let http = mcp::serve_http(server, "127.0.0.1:0").await.unwrap();
+    let addr = http.addr;
+    let one = tokio::spawn(http_agent(addr));
+    let two = tokio::spawn(http_agent(addr));
+    let limit = std::time::Duration::from_secs(180);
+    let (seat_one, outcome_one) = tokio::time::timeout(limit, one).await.expect("agent one finished").unwrap();
+    let (seat_two, outcome_two) = tokio::time::timeout(limit, two).await.expect("agent two finished").unwrap();
+
+    let mut seats = [seat_one, seat_two];
+    seats.sort();
+    assert_eq!(seats, [0, 1], "the two sessions took different seats");
+    assert!(!outcome_one.is_null() && !outcome_two.is_null(), "{outcome_one} {outcome_two}");
+    assert_eq!(outcome_one, outcome_two, "both agents saw the same outcome");
+    assert_eq!(game.claims().len(), 2, "both seats were claimed by this process");
+
+    http.shutdown().await;
+    r.handle.shutdown();
+    r.task.await.unwrap();
+}
+
+#[tokio::test]
+async fn a_third_session_finds_every_seat_taken() {
+    let r = start(24).await;
+    let game = publish(&r.runtime, &r, &[(SeatKind::Agent, Some("red")), (SeatKind::Agent, Some("green"))]);
+    let server = mcp::standalone(engine::Format::cube()).with_runtime(r.runtime.clone());
+    let first = server.new_session();
+    let second = server.new_session();
+    let third = server.new_session();
+
+    let res = first.sit_down(Parameters(SitDownParams::default())).await.unwrap();
+    assert!(!is_error(&res), "{}", text_of(&res));
+    assert_eq!(first.seat(), Some(Seat(0)));
+    let res = second.sit_down(Parameters(SitDownParams::default())).await.unwrap();
+    assert!(!is_error(&res), "{}", text_of(&res));
+    assert_eq!(second.seat(), Some(Seat(1)));
+
+    // The third agent is told what is wrong, both through sit_down and through
+    // a game tool that would have seated it.
+    let res = third.sit_down(Parameters(SitDownParams::default())).await.unwrap();
+    assert!(is_error(&res) && text_of(&res).contains("every agent seat"), "{}", text_of(&res));
+    let res = third.get_game_state().await.unwrap();
+    assert!(is_error(&res) && text_of(&res).contains("every agent seat"), "{}", text_of(&res));
+    assert!(third.session().is_none());
+    // It can still do card work without a seat.
+    let res = third.get_deck(Parameters(GetDeckParams { name: "red".into() })).await.unwrap();
     assert!(!is_error(&res), "{}", text_of(&res));
 
-    // When the game is over, `play` detaches it: card data only again, and the
-    // deckbuilder tools come back.
-    match mcp::control::request(&socket, &ControlRequest::Detach).await.unwrap() {
-        ControlReply::Ok { mode, .. } => assert_eq!(mode, "card data only"),
-        other => panic!("{other:?}"),
-    }
-    assert!(server.session().is_none());
-    assert!(is_error(&server.get_game_state().await.unwrap()));
-    let res = server.editor_status().await.unwrap();
+    // When the first agent leaves, its seat is free for the third.
+    let res = first.leave().await.unwrap();
+    assert!(!is_error(&res), "{}", text_of(&res));
+    assert_eq!(game.claims(), vec![(1, std::process::id())]);
+    let res = third.sit_down(Parameters(SitDownParams::default())).await.unwrap();
+    assert!(!is_error(&res), "{}", text_of(&res));
+    assert_eq!(third.seat(), Some(Seat(0)));
+    assert_eq!(game.claims(), vec![(0, std::process::id()), (1, std::process::id())]);
+
+    r.handle.shutdown();
+    r.task.await.unwrap();
+}
+
+#[tokio::test]
+async fn sit_down_picks_a_specific_seat() {
+    let r = start(25).await;
+    let game = publish(&r.runtime, &r, &[(SeatKind::Agent, Some("red")), (SeatKind::Agent, Some("green"))]);
+    let server = mcp::standalone(engine::Format::cube()).with_runtime(r.runtime.clone());
+    let picky = server.new_session();
+    let res = picky.sit_down(Parameters(SitDownParams { seat: Some(1) })).await.unwrap();
+    assert!(!is_error(&res), "{}", text_of(&res));
+    let sc = res.structured_content.clone().unwrap();
+    assert_eq!(sc["seat"], 1);
+    assert_eq!(sc["deck"], "green");
+    assert_eq!(picky.seat(), Some(Seat(1)));
+
+    // Already seated at a live game: sit_down says so instead of moving.
+    let res = picky.sit_down(Parameters(SitDownParams { seat: Some(0) })).await.unwrap();
+    assert!(is_error(&res) && text_of(&res).contains("already seated"), "{}", text_of(&res));
+    assert_eq!(picky.seat(), Some(Seat(1)));
+
+    // Another session is refused that seat and takes the other one.
+    let other = server.new_session();
+    let res = other.sit_down(Parameters(SitDownParams { seat: Some(1) })).await.unwrap();
     assert!(
-        is_error(&res) && text_of(&res).contains("no deckbuilder is open"),
+        is_error(&res) && text_of(&res).contains("not a free agent seat"),
+        "{}",
+        text_of(&res)
+    );
+    let res = other.sit_down(Parameters(SitDownParams { seat: Some(0) })).await.unwrap();
+    assert!(!is_error(&res), "{}", text_of(&res));
+    assert_eq!(other.seat(), Some(Seat(0)));
+    assert_eq!(game.claims(), vec![(0, std::process::id()), (1, std::process::id())]);
+
+    // A seat that does not exist is refused too.
+    let late = server.new_session();
+    let res = late.sit_down(Parameters(SitDownParams { seat: Some(7) })).await.unwrap();
+    assert!(
+        is_error(&res) && text_of(&res).contains("not a free agent seat"),
         "{}",
         text_of(&res)
     );
 
-    // A marker whose process is gone is not "running", and is cleaned up.
-    let stale = dir.join("stale.json");
-    std::fs::write(
-        &stale,
-        serde_json::to_vec(&Marker {
-            pid: 4_000_000_000,
-            ..marker.clone()
-        })
-        .unwrap(),
-    )
-    .unwrap();
-    assert!(running_at(&stale).is_none());
-    assert!(!stale.exists());
-
-    service.abort();
-    let _ = service.await;
-    drop(advertised);
-    assert!(!marker_path.exists(), "dropping the advertisement removes the marker");
     r.handle.shutdown();
     r.task.await.unwrap();
 }

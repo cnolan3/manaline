@@ -23,17 +23,50 @@ pub const CUBE_URI: &str = "manaline://cube";
 /// Short enough to come back before any MCP client gives up on the call.
 pub const DEFAULT_WAIT_SECS: u64 = 45;
 
+/// What every MCP session in this process shares: the card database, the
+/// format, the search index, and the runtime directory games and
+/// deckbuilders announce themselves in. Seats are *not* in here — one
+/// session, one seat (§7).
 #[derive(Clone)]
-pub struct McpServer {
-    /// The seat's connection, or `None` when serving card data only
-    /// (`manaline mcp` with no game: search, deck stats, the resources).
-    /// `play` attaches and detaches it at runtime through the control socket.
-    session: Arc<std::sync::RwLock<Option<Arc<Session>>>>,
+pub struct Shared {
     pub cards: Arc<engine::CardDb>,
     pub format: engine::Format,
-    index: Arc<std::sync::OnceLock<Arc<cardsearch::Index>>>,
-    /// Where deckbuilders announce themselves (and, later, games).
+    index: std::sync::OnceLock<Arc<cardsearch::Index>>,
     pub runtime: protocol::endpoint::Runtime,
+    /// The seat handed to this process on the command line (`manaline mcp
+    /// --connect --token`): every session on it plays that one seat instead
+    /// of claiming its own from the runtime directory.
+    fixed_seat: Option<Arc<Session>>,
+}
+
+/// The seat one MCP session holds: the daemon connection, and the claim in
+/// the runtime directory that keeps other agents out of it. Dropping it
+/// releases the claim.
+struct Seated {
+    session: Arc<Session>,
+    /// The claim this seat was taken with; `None` for a seat given on the
+    /// command line, which no other agent could take anyway.
+    claim: Option<protocol::endpoint::SeatClaim>,
+}
+
+/// The handler rmcp serves. One of these per MCP session: over stdio that is
+/// one per process, over streamable HTTP one per client session, each with
+/// its own seat at the table over the one set of shared card data.
+pub struct McpServer {
+    shared: Arc<Shared>,
+    /// This session's seat, or `None` while it is serving card data only.
+    seat: std::sync::RwLock<Option<Seated>>,
+    /// Held while seating, so two tool calls racing in one session cannot
+    /// claim two seats.
+    seating: tokio::sync::Mutex<()>,
+}
+
+impl Clone for McpServer {
+    /// A clone is a *new session* over the same shared state: it never shares
+    /// this session's seat, so a cloned handler cannot act for it.
+    fn clone(&self) -> McpServer {
+        self.new_session()
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -122,6 +155,13 @@ pub struct GetDeckParams {
     pub name: String,
 }
 
+#[derive(Debug, Default, Deserialize, Serialize, JsonSchema)]
+pub struct SitDownParams {
+    /// The seat number to take. Omit to take the next free agent seat.
+    #[serde(default)]
+    pub seat: Option<u8>,
+}
+
 /// A deck reachable by name (any of the deck directories) or by path.
 struct DeckSource {
     name: String,
@@ -172,6 +212,21 @@ fn open_editor_in(runtime: &protocol::endpoint::Runtime) -> Result<Option<protoc
             "several deckbuilders are open ({}); name the file with `path`",
             live.iter().map(|e| e.path.display().to_string()).collect::<Vec<_>>().join(", ")
         )),
+    }
+}
+
+/// The agent seats a game publishes, as "1, 2" (for an error message).
+fn agent_seats(game: &protocol::endpoint::GameMarker) -> String {
+    let seats: Vec<String> = game
+        .seats
+        .iter()
+        .filter(|s| s.kind == protocol::endpoint::SeatKind::Agent)
+        .map(|s| s.seat.to_string())
+        .collect();
+    if seats.is_empty() {
+        "none".into()
+    } else {
+        seats.join(", ")
     }
 }
 
@@ -241,11 +296,12 @@ fn nothing_to_do(legal: &[LegalAction]) -> bool {
     !legal.is_empty() && legal.iter().all(|l| matches!(l.action, Action::PassPriority | Action::Concede))
 }
 
-/// The reply for game tools when this server has no game.
+/// The reply for game tools when no game is published to sit down at.
 fn no_game() -> CallToolResult {
     tool_error(
-        "No game is connected: this server is serving card data only (search_cards, deck_stats, get_card, and the resources). \
-         Start a game with `manaline play --vs claude` and point your client at the URL it prints to play.",
+        "No game is connected: no game is published for agents right now, so this session is serving card data only \
+         (search_cards, deck_stats, get_card, list_decks, and the resources). Ask the human to start a game with \
+         `manaline play --vs claude`; your next game tool call (or `sit_down`) will take a seat at it.",
     )
 }
 
@@ -284,50 +340,83 @@ fn tool_error(msg: impl Into<String>) -> CallToolResult {
 }
 
 impl McpServer {
+    /// A server already holding a seat: `manaline mcp --connect --token`.
+    /// Every session it serves plays that seat.
     pub fn new(session: Arc<Session>) -> McpServer {
-        McpServer {
+        let shared = Shared {
             cards: Arc::new(session.cards.clone()),
             format: session.format.clone(),
-            session: Arc::new(std::sync::RwLock::new(Some(session))),
-            index: Arc::new(std::sync::OnceLock::new()),
+            index: std::sync::OnceLock::new(),
             runtime: protocol::endpoint::Runtime::default(),
-        }
+            fixed_seat: Some(session),
+        };
+        McpServer::from_shared(Arc::new(shared))
     }
 
-    /// A server with no game: card data, search, and deck analysis only.
+    /// A server with no seat: card data, search, and deck analysis, plus a
+    /// seat at whatever game is published when a game tool is first called.
     pub fn standalone(format: engine::Format) -> McpServer {
-        McpServer {
-            session: Arc::new(std::sync::RwLock::new(None)),
+        let shared = Shared {
             cards: Arc::new(cards::core()),
             format,
-            index: Arc::new(std::sync::OnceLock::new()),
+            index: std::sync::OnceLock::new(),
             runtime: protocol::endpoint::Runtime::default(),
+            fixed_seat: None,
+        };
+        McpServer::from_shared(Arc::new(shared))
+    }
+
+    fn from_shared(shared: Arc<Shared>) -> McpServer {
+        let seat = shared.fixed_seat.clone().map(|session| Seated { session, claim: None });
+        McpServer {
+            shared,
+            seat: std::sync::RwLock::new(seat),
+            seating: tokio::sync::Mutex::new(()),
         }
     }
 
-    /// Look for deckbuilders (and games) under this runtime directory instead
+    /// A handler for one new MCP session: the same cards, index and runtime
+    /// directory, its own seat. `serve_http` makes one per client session so
+    /// several agents can play each other through one process.
+    pub fn new_session(&self) -> McpServer {
+        McpServer::from_shared(self.shared.clone())
+    }
+
+    /// Look for games and deckbuilders under this runtime directory instead
     /// of the user's.
     pub fn with_runtime(mut self, runtime: protocol::endpoint::Runtime) -> McpServer {
-        self.runtime = runtime;
+        Arc::make_mut(&mut self.shared).runtime = runtime;
         self
     }
 
-    /// The seat this server plays, if it is in a game.
+    pub fn shared(&self) -> &Arc<Shared> {
+        &self.shared
+    }
+
+    pub fn cards(&self) -> &Arc<engine::CardDb> {
+        &self.shared.cards
+    }
+
+    pub fn format(&self) -> &engine::Format {
+        &self.shared.format
+    }
+
+    /// Where games and deckbuilders announce themselves.
+    pub fn runtime(&self) -> &protocol::endpoint::Runtime {
+        &self.shared.runtime
+    }
+
+    /// The seat this session plays, if it has sat down.
     pub fn session(&self) -> Option<Arc<Session>> {
-        self.session.read().unwrap().clone()
+        self.seat.read().unwrap().as_ref().map(|s| s.session.clone())
     }
 
-    /// Seat this server in a game (from `play`, over the control socket).
-    pub fn attach(&self, session: Arc<Session>) {
-        *self.session.write().unwrap() = Some(session);
+    /// The seat number this session holds, if any.
+    pub fn seat(&self) -> Option<engine::Seat> {
+        self.session().map(|s| s.me)
     }
 
-    /// Back to card data only.
-    pub fn detach(&self) {
-        *self.session.write().unwrap() = None;
-    }
-
-    /// "card data only" or "game <id>, seat <n>".
+    /// "card data only" or "game <id>, seat <n>", for this session.
     pub fn mode(&self) -> String {
         match self.session() {
             Some(s) => format!("game {}, seat {}", s.game_id, s.me.0),
@@ -335,8 +424,113 @@ impl McpServer {
         }
     }
 
+    /// This session's seat, sitting down at the published game if it has none.
+    /// Every game tool goes through here, so an agent that simply starts
+    /// playing ends up at the table without being told where it is.
+    async fn ensure_seated(&self) -> Result<Arc<Session>, CallToolResult> {
+        if let Some(session) = self.session() {
+            return Ok(session);
+        }
+        self.take_seat(None).await
+    }
+
+    /// The published seat this session is sitting in, as the marker described
+    /// it (`None` for a seat given on the command line).
+    fn claimed_slot(&self) -> Option<protocol::endpoint::SeatSlot> {
+        let seat = self.seat.read().unwrap();
+        seat.as_ref()?.claim.as_ref().map(|c| c.slot.clone())
+    }
+
+    /// Claim a seat at the newest published game and connect to it. The
+    /// session keeps the claim until it `leave`s, so the final state is still
+    /// readable after the game ends.
+    async fn take_seat(&self, want: Option<u8>) -> Result<Arc<Session>, CallToolResult> {
+        let _seating = self.seating.lock().await;
+        if let Some(session) = self.session() {
+            // Another call in this session sat down while we waited for the lock.
+            return Ok(session);
+        }
+        let runtime = self.runtime();
+        let Some(game) = runtime.newest_game() else {
+            return Err(no_game());
+        };
+        let claim = match runtime.claim_seat(&game, want) {
+            Ok(Some(c)) => c,
+            Ok(None) => {
+                let taken: Vec<String> = game.claims().iter().map(|(s, pid)| format!("seat {s} (pid {pid})")).collect();
+                return Err(tool_error(match want {
+                    Some(n) => format!(
+                        "seat {n} at {} is not a free agent seat (agent seats: {}; claimed: {}). \
+                         Call sit_down with no seat to take the next free one.",
+                        game.game_id,
+                        agent_seats(&game),
+                        if taken.is_empty() { "none".into() } else { taken.join(", ") }
+                    ),
+                    None => format!(
+                        "every agent seat at {} is taken ({}); ask the human to start a game with an agent seat.",
+                        game.game_id,
+                        if taken.is_empty() {
+                            "the game has no agent seats".into()
+                        } else {
+                            taken.join(", ")
+                        }
+                    ),
+                }));
+            }
+            Err(e) => return Err(tool_error(format!("could not claim a seat at {}: {e}", game.game_id))),
+        };
+        let Some(endpoint) = game.endpoint() else {
+            return Err(tool_error(format!("game {} publishes no address to connect to", game.game_id)));
+        };
+        let Some(token) = claim.slot.token.clone() else {
+            return Err(tool_error(format!(
+                "seat {} at {} publishes no token, so it cannot be played by an agent",
+                claim.seat(),
+                game.game_id
+            )));
+        };
+        let decklist = claim.slot.deck.as_deref().and_then(|d| match find_deck(d) {
+            Some(found) => Some(found.text),
+            None => {
+                tracing::warn!("seat {} names deck {d:?}, which could not be read", claim.seat());
+                None
+            }
+        });
+        let config = crate::SessionConfig {
+            endpoint,
+            token,
+            name: claim.slot.name.clone(),
+            decklist,
+        };
+        let session = match Session::connect(config).await {
+            Ok(s) => s,
+            Err(e) => {
+                claim.release();
+                return Err(tool_error(format!("could not sit down at {}: {e:#}", game.game_id)));
+            }
+        };
+        *self.seat.write().unwrap() = Some(Seated {
+            session: session.clone(),
+            claim: Some(claim),
+        });
+        Ok(session)
+    }
+
+    /// Give up this session's seat: the claim goes back so another agent may
+    /// take it, and the daemon connection is dropped.
+    fn give_up_seat(&self) -> Option<Arc<Session>> {
+        let seated = self.seat.write().unwrap().take()?;
+        if let Some(claim) = seated.claim {
+            claim.release();
+        }
+        Some(seated.session)
+    }
+
     pub fn card_index(&self) -> Arc<cardsearch::Index> {
-        self.index.get_or_init(|| Arc::new(cardsearch::Index::load(&self.cards))).clone()
+        self.shared
+            .index
+            .get_or_init(|| Arc::new(cardsearch::Index::load(self.cards())))
+            .clone()
     }
 
     /// Card count, colour letters, legality, and problems for a decklist.
@@ -344,9 +538,9 @@ impl McpServer {
         let Ok(list) = deckstats::parse(text) else {
             return (0, String::new(), false, vec!["unreadable decklist".into()]);
         };
-        let res = list.resolve(&self.cards);
-        let stats = deckstats::Stats::compute(&res.deck, &self.cards);
-        let report = deckstats::check::check(&list, &self.format, &self.cards, None);
+        let res = list.resolve(self.cards());
+        let stats = deckstats::Stats::compute(&res.deck, self.cards());
+        let report = deckstats::check::check(&list, self.format(), self.cards(), None);
         let colours: String = stats.pips.keys().map(|c| c.symbol()).collect();
         (list.main_count(), colours, report.is_legal(), problems_of(&report))
     }
@@ -357,11 +551,11 @@ impl McpServer {
             Ok(l) => l,
             Err(e) => return tool_error(format!("could not read the decklist: {e}")),
         };
-        let db = self.cards.clone();
+        let db = self.cards().clone();
         let res = list.resolve(&db);
         let stats = deckstats::Stats::compute(&res.deck, &db);
-        let report = deckstats::check::check(&list, &self.format, &db, None);
-        let mut text = deckstats::stats::render(&stats, &self.format.name);
+        let report = deckstats::check::check(&list, self.format(), &db, None);
+        let mut text = deckstats::stats::render(&stats, &self.format().name);
         if report.is_legal() {
             text.push_str("\nlegal in this format\n");
         } else {
@@ -392,7 +586,7 @@ impl McpServer {
         if self.session().is_some() {
             return tool_error("the deckbuilder tools are only available when helping a human (no game connected)");
         }
-        let editor = match open_editor_in(&self.runtime) {
+        let editor = match open_editor_in(self.runtime()) {
             Ok(Some(e)) => e,
             Ok(None) => return tool_error("no deckbuilder is open; ask the human to run `manaline deck edit <file>` and try again"),
             Err(e) => return tool_error(e),
@@ -491,8 +685,9 @@ impl McpServer {
         description = "The current game from your seat: every player's life and zones, the battlefield, your hand, whose turn it is to act, and your legal actions if it is yours. Returns a text rendering and structured JSON."
     )]
     pub async fn get_game_state(&self) -> Result<CallToolResult, ErrorData> {
-        let Some(session) = self.session() else {
-            return Ok(no_game());
+        let session = match self.ensure_seated().await {
+            Ok(s) => s,
+            Err(e) => return Ok(e),
         };
         session.begin_call();
         session.refresh().await;
@@ -512,8 +707,9 @@ impl McpServer {
         description = "The numbered list of actions you may take right now, with descriptions. Empty if it is not your turn to act. Pass an id to take_action."
     )]
     pub async fn get_legal_actions(&self) -> Result<CallToolResult, ErrorData> {
-        let Some(session) = self.session() else {
-            return Ok(no_game());
+        let session = match self.ensure_seated().await {
+            Ok(s) => s,
+            Err(e) => return Ok(e),
         };
         session.begin_call();
         if !session.started() {
@@ -547,8 +743,9 @@ impl McpServer {
         description = "Take one of your legal actions, by id from the last list (pass the list's state_version too, so a stale id is refused rather than applied to a different situation), or pass a full `action` object. For a cast or activation you may edit `payment.tap` to any set of your untapped mana sources that covers the cost (e.g. tap a big mana creature instead of lands); the listed payments are just the common choices. The reply says whether you still must act and lists the next legal actions if so."
     )]
     pub async fn take_action(&self, Parameters(p): Parameters<TakeActionParams>) -> Result<CallToolResult, ErrorData> {
-        let Some(session) = self.session() else {
-            return Ok(no_game());
+        let session = match self.ensure_seated().await {
+            Ok(s) => s,
+            Err(e) => return Ok(e),
         };
         session.begin_call();
         let (action, version) = match (p.action_id, p.action) {
@@ -605,8 +802,9 @@ impl McpServer {
         description = "Block until you have a real decision to make (a spell or ability you can afford, a land drop, attackers, blockers, a mulligan, a choice) or the game ends. Priority moments where passing is your only option are passed for you while you wait (set auto_pass=false to be woken at every one). Returns the state, its state_version, why you must act, and your legal actions; `auto_passed` counts the passes made for you. A { \"timed_out\": true } reply means the opponent is still thinking: the game is NOT over and you must call wait_for_turn again straight away, without stopping or asking anyone."
     )]
     pub async fn wait_for_turn(&self, Parameters(p): Parameters<WaitParams>) -> Result<CallToolResult, ErrorData> {
-        let Some(session) = self.session() else {
-            return Ok(no_game());
+        let session = match self.ensure_seated().await {
+            Ok(s) => s,
+            Err(e) => return Ok(e),
         };
         let generation = session.begin_call();
         let secs = p.timeout_seconds.map(u64::from).unwrap_or(DEFAULT_WAIT_SECS).max(1);
@@ -687,7 +885,7 @@ impl McpServer {
             let Some(o) = view.as_ref().and_then(|v| v.object(id).cloned()) else {
                 return Ok(tool_error(format!("{id} is not visible to you (or does not exist)")));
             };
-            let def = self.cards.lookup(&o.name).map(|c| self.cards.get(c).clone());
+            let def = self.cards().lookup(&o.name).map(|c| self.cards().get(c).clone());
             let mut text = card_text(&o.name, &o.cost.to_string(), &o.types, &o.subtypes, o.pt, &o.text);
             let mut state = vec![
                 format!("{:?}", o.zone).to_lowercase(),
@@ -728,10 +926,10 @@ impl McpServer {
         let Some(name) = p.name else {
             return Ok(tool_error("pass name or object_id"));
         };
-        let Some(id) = self.cards.lookup(&name) else {
+        let Some(id) = self.cards().lookup(&name) else {
             return Ok(tool_error(format!("no card named {name:?} in this game's card set")));
         };
-        let def = self.cards.get(id);
+        let def = self.cards().get(id);
         let text = card_text(&def.name, &def.cost.to_string(), &def.types, &def.subtypes, def.pt, &def.text);
         let mut json = serde_json::json!({ "card": { "name": def.name, "cost": def.cost.to_string(), "types": def.types, "subtypes": def.subtypes, "pt": def.pt, "text": def.text } });
         if p.include_ir.unwrap_or(false) {
@@ -883,8 +1081,9 @@ impl McpServer {
         description = "The game log including table chat, seat-filtered, one line per event."
     )]
     pub async fn get_log(&self, Parameters(p): Parameters<GetLogParams>) -> Result<CallToolResult, ErrorData> {
-        let Some(session) = self.session() else {
-            return Ok(no_game());
+        let session = match self.ensure_seated().await {
+            Ok(s) => s,
+            Err(e) => return Ok(e),
         };
         session.begin_call();
         let lines = session.log_since(p.since_turn);
@@ -905,8 +1104,9 @@ impl McpServer {
         description = "Say something to the table (parameter: text). It appears in the other players' logs."
     )]
     pub async fn say(&self, Parameters(p): Parameters<SayParams>) -> Result<CallToolResult, ErrorData> {
-        let Some(session) = self.session() else {
-            return Ok(no_game());
+        let session = match self.ensure_seated().await {
+            Ok(s) => s,
+            Err(e) => return Ok(e),
         };
         match session.client.chat(&p.text, None).await {
             Ok(()) => Ok(CallToolResult::success(vec![ContentBlock::text("said")])),
@@ -916,8 +1116,9 @@ impl McpServer {
 
     #[tool(name = "concede", description = "Concede the game. This ends it for you immediately.")]
     pub async fn concede(&self) -> Result<CallToolResult, ErrorData> {
-        let Some(session) = self.session() else {
-            return Ok(no_game());
+        let session = match self.ensure_seated().await {
+            Ok(s) => s,
+            Err(e) => return Ok(e),
         };
         session.begin_call();
         let version = session.current_version();
@@ -961,7 +1162,7 @@ impl McpServer {
         }
         let _ = writeln!(text, "\ndecks are looked up in: {}", cards::deck_dirs_text());
         if self.session().is_none() {
-            match open_editor_in(&self.runtime) {
+            match open_editor_in(self.runtime()) {
                 Ok(Some(e)) => {
                     let _ = writeln!(
                         text,
@@ -978,7 +1179,7 @@ impl McpServer {
         }
         Ok(text_and_json(
             text,
-            serde_json::json!({ "decks": json, "format": self.format.name }),
+            serde_json::json!({ "decks": json, "format": self.format().name }),
         ))
     }
 
@@ -1012,8 +1213,9 @@ impl McpServer {
         description = "Choose the deck you will play and ready up: the `name` of a deck from list_decks (played as-is), or a full decklist in the standard text format. Only needed if the game has not started and no deck was given for you."
     )]
     pub async fn submit_deck(&self, Parameters(p): Parameters<SubmitDeckParams>) -> Result<CallToolResult, ErrorData> {
-        let Some(session) = self.session() else {
-            return Ok(no_game());
+        let session = match self.ensure_seated().await {
+            Ok(s) => s,
+            Err(e) => return Ok(e),
         };
         if session.started() {
             return Ok(tool_error("the game has already started"));
@@ -1041,6 +1243,85 @@ impl McpServer {
             Err(e) => Ok(tool_error(describe_client_error(e).to_string())),
         }
     }
+
+    #[tool(
+        name = "sit_down",
+        description = "Take a seat at the game the human has published, optionally a particular one (`seat`). You do not have to call this: the first game tool you use seats you in the next free agent seat. Call it to choose your seat, to see where you are sitting, or to move to a new game once the last one is over. Other agents may be at the same table, each in their own MCP session."
+    )]
+    pub async fn sit_down(&self, Parameters(p): Parameters<SitDownParams>) -> Result<CallToolResult, ErrorData> {
+        if self.shared.fixed_seat.is_some() {
+            return Ok(tool_error(
+                "this session plays the seat it was given on the command line (--connect), so it cannot choose another",
+            ));
+        }
+        if let Some(session) = self.session() {
+            if session.outcome().is_none() {
+                return Ok(tool_error(format!(
+                    "you are already seated in game {} as seat {}; call leave first if you want a different seat",
+                    session.game_id, session.me.0
+                )));
+            }
+            // That game is over: give its seat back and look for a newer one.
+            self.give_up_seat();
+        }
+        let session = match self.take_seat(p.seat).await {
+            Ok(s) => s,
+            Err(e) => return Ok(e),
+        };
+        let lobby = session.lobby();
+        let slot = self.claimed_slot();
+        let deck = slot.as_ref().and_then(|s| s.deck.clone());
+        let name = slot.map(|s| s.name).unwrap_or_else(|| session.seat_name(session.me));
+        let text = format!(
+            "Seated at game {} as seat {} ({name}).{} {}",
+            session.game_id,
+            session.me.0,
+            match &deck {
+                Some(d) => format!(" Your deck is {d}."),
+                None => " No deck was chosen for you: pick one with list_decks and submit_deck.".to_string(),
+            },
+            if lobby.started {
+                "The game is under way: call wait_for_turn."
+            } else {
+                "Call wait_for_turn once you are ready; it returns when the game starts and you must act."
+            }
+        );
+        Ok(text_and_json(
+            text,
+            serde_json::json!({
+                "game_id": session.game_id,
+                "seat": session.me,
+                "name": name,
+                "deck": deck,
+                "started": lobby.started,
+            }),
+        ))
+    }
+
+    #[tool(
+        name = "leave",
+        description = "Give up your seat when you are done playing: the claim goes back so another agent can take it, and this session drops to card data only. Use it after a game is over, or to free a seat you took by mistake."
+    )]
+    pub async fn leave(&self) -> Result<CallToolResult, ErrorData> {
+        if self.shared.fixed_seat.is_some() {
+            return Ok(tool_error(
+                "this server was given its seat on the command line (--connect); stop the server to leave the table",
+            ));
+        }
+        let Some(session) = self.give_up_seat() else {
+            return Ok(text_and_json(
+                "You are not seated at a game; this session is serving card data only.".to_string(),
+                serde_json::json!({ "seated": false }),
+            ));
+        };
+        Ok(text_and_json(
+            format!(
+                "Left game {} (seat {}); the seat is free for another agent and this session is back to card data only.",
+                session.game_id, session.me.0
+            ),
+            serde_json::json!({ "seated": false, "left_game": session.game_id, "seat": session.me }),
+        ))
+    }
 }
 
 fn card_text(name: &str, cost: &str, types: &[engine::CardType], subtypes: &[String], pt: Option<(i32, i32)>, text: &str) -> String {
@@ -1066,23 +1347,30 @@ impl McpServer {
         description = "The recommended loop for playing a game of Magic at this table."
     )]
     pub async fn play_a_game(&self) -> Vec<PromptMessage> {
-        let Some(session) = self.session() else {
-            let text = format!(
-                "This manaline server has no game connected: it serves card data (search_cards, deck_stats, get_card, `{CUBE_URI}`) for deckbuilding. \
-                 To play, start a game with `manaline play --vs claude` and connect to the URL it prints."
-            );
-            return vec![PromptMessage::new_text(Role::User, text)];
+        let seated = match self.session() {
+            Some(session) => format!("as seat {}", session.me.0),
+            None if self.runtime().newest_game().is_some() => {
+                "at the game the human has published — your first game tool call takes the next free agent seat, \
+                 or call `sit_down` to choose one"
+                    .to_string()
+            }
+            None => {
+                let text = format!(
+                    "No game is published for agents right now: this manaline session serves card data (search_cards, deck_stats, get_card, `{CUBE_URI}`) for deckbuilding. \
+                     To play, ask the human to start a game with `manaline play --vs claude`; your first game tool call will seat you at it."
+                );
+                return vec![PromptMessage::new_text(Role::User, text)];
+            }
         };
-        let me = session.me;
         let text = format!(
-            "You are playing Magic: The Gathering as seat {} at a manaline table. Read the resource `{PRIMER_URI}` first if you have not played before.\n\n\
+            "You are playing Magic: The Gathering {seated} at a manaline table. Read the resource `{PRIMER_URI}` first if you have not played before.\n\n\
              Then loop:\n\
              1. Call `wait_for_turn`. It blocks until you must act. If it returns timed_out, the game is still on and the opponent is thinking: call it again immediately. Never stop looping or ask the user what to do while the game is in progress; only a reply with game_over: true ends the loop.\n\
              2. Read the state and the numbered legal actions it returns. Think about the board.\n\
              3. Call `take_action` with the id you chose and the state_version the list came from. If the reply says it is still your turn, choose again from the new list; when you have nothing worth doing, take the `Pass priority` action.\n\
              4. Go back to step 1.\n\n\
-             Use `say` to greet your opponent and comment on the game now and then. Play to win: develop your mana, cast your best creatures, attack when it is profitable, block to survive. Do not concede unless the game is clearly lost.",
-            me.0
+             Use `say` to greet your opponent and comment on the game now and then. Play to win: develop your mana, cast your best creatures, attack when it is profitable, block to survive. Do not concede unless the game is clearly lost. \
+             When the game is over, `leave` frees your seat for another agent."
         );
         vec![PromptMessage::new_text(Role::User, text)]
     }
@@ -1091,7 +1379,7 @@ impl McpServer {
 #[tool_handler]
 #[prompt_handler]
 impl ServerHandler for McpServer {
-    /// The generated list, minus tools that only make sense with no game attached.
+    /// The generated list, minus the deckbuilder tools once this session holds a seat.
     async fn list_tools(
         &self,
         _request: Option<PaginatedRequestParams>,
@@ -1125,16 +1413,19 @@ impl ServerHandler for McpServer {
         info.server_info = Implementation::new("manaline", env!("CARGO_PKG_VERSION")).with_title("manaline");
         match self.session() {
             Some(session) => info.with_instructions(format!(
-                "manaline: you are seat {} in a game of Magic: The Gathering. Read `{PRIMER_URI}` for the rules, then loop wait_for_turn → take_action. Use `say` to talk to the table.",
+                "manaline: you are seat {} in a game of Magic: The Gathering. Read `{PRIMER_URI}` for the rules, then loop wait_for_turn → take_action. Use `say` to talk to the table, and `leave` when you are done.",
                 session.me.0
             )),
+            None if self.runtime().newest_game().is_some() => info.with_instructions(format!(
+                "manaline: a game is published for agents and you are not seated yet. Your first game tool call (or `sit_down`) takes the next free agent seat; other agents may be at the same table, each with its own MCP session. Read `{PRIMER_URI}` for the rules, then loop wait_for_turn → take_action."
+            )),
             None => {
-                let open = match open_editor_in(&self.runtime) {
+                let open = match open_editor_in(self.runtime()) {
                     Ok(Some(e)) => format!(" The human has {} open in the deckbuilder: the editor_* tools act on it.", e.path.display()),
                     _ => " No deckbuilder is open yet; ask the human to run `manaline deck edit <file>` before changing a deck.".to_string(),
                 };
                 info.with_instructions(format!(
-                    "manaline card data (no game connected): you are helping the human build a deck in their open deckbuilder. Look things up with search_cards, get_card, deck_stats, list_decks, and get_deck; change the deck only through editor_add_card, editor_remove_card, editor_set_count, editor_replace_deck, editor_undo, editor_stats, and editor_save. `{PRIMER_URI}` has the rules.{open}"
+                    "manaline card data (no game published): you are helping the human build a deck in their open deckbuilder. Look things up with search_cards, get_card, deck_stats, list_decks, and get_deck; change the deck only through editor_add_card, editor_remove_card, editor_set_count, editor_replace_deck, editor_undo, editor_stats, and editor_save. `{PRIMER_URI}` has the rules.{open}"
                 ))
             }
         }
@@ -1170,7 +1461,7 @@ impl ServerHandler for McpServer {
     ) -> Result<ReadResourceResponse, ErrorData> {
         let text = match request.uri.as_str() {
             PRIMER_URI => RULES_PRIMER.to_string(),
-            CUBE_URI => cube_text(&self.cards),
+            CUBE_URI => cube_text(self.cards()),
             other => return Err(ErrorData::resource_not_found(format!("no resource {other}"), None)),
         };
         Ok(ReadResourceResult::new(vec![ResourceContents::text(text, request.uri)])

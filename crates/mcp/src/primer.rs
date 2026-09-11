@@ -117,10 +117,20 @@ the table's format, `get_deck` reads one out with its curve and colour
 analysis, and `submit_deck` with that deck's `name` plays it as-is. You cannot
 build a new deck during a game.
 
-Between games, with no game attached, the same server helps a human at the
-deckbuilder (opening the deckbuilder starts or reuses it, and starting a game
-seats it, so your connection stays the same), but only while they have
-`manaline deck edit <file>` open: the
+## Your seat and the other agents
+
+You may be one of several agents at this table. Your first game tool call
+seats you at the newest game the human has published, in the next free agent
+seat; call `sit_down` instead if you want to see or choose your seat (and
+`sit_down` again after a game ends to move to a newer one). The seat is yours
+alone: the daemon checks every action against your seat's token, and your
+`wait_for_turn` only wakes for your own decisions, so you never have to
+coordinate with the others — just play your seat. Each agent needs its own MCP
+session (its own Claude Code session): one session, one seat. Call `leave` when
+you are done, so another agent can have the seat.
+
+Between games, with no seat, the same session helps a human at the
+deckbuilder, but only while they have `manaline deck edit <file>` open: the
 editor listens on a socket and the `editor_*` tools drive it. `editor_status`
 and `editor_deck` read back what the editor holds, `editor_add_card`,
 `editor_remove_card`, `editor_set_count`, and `editor_replace_deck` change it,
