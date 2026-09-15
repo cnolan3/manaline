@@ -5,7 +5,8 @@
 use crate::endpoint::Endpoint;
 use crate::framing::{FrameError, MessageConnection, MessageReader, MessageWriter};
 use crate::messages::{
-    ClientEnvelope, ClientMessage, LegalAction, LobbyView, ProtocolError, Role, ServerEnvelope, ServerMessage, Token, PROTOCOL_VERSION,
+    ClientEnvelope, ClientMessage, GameId, LegalAction, LobbyView, ProtocolError, Role, ServerEnvelope, ServerMessage, Token,
+    PROTOCOL_VERSION,
 };
 use crate::ws::TlsOptions;
 use engine::{Action, EventView, Format, GameView};
@@ -151,6 +152,21 @@ impl Client {
                 seat_tokens,
                 spectator_token,
             } => Ok((game_id, seat_tokens, spectator_token)),
+            other => Err(ClientError::Unexpected(Box::new(other))),
+        }
+    }
+
+    /// Take a free seat at the game with this code. Two steps by design: the
+    /// lobby hands back a token, and `hello` is still the one way a connection
+    /// reaches a game — so the reconnect path, which knows only a token, is
+    /// the same whether the seat came from `create` or from a code.
+    pub async fn join_game(&mut self, code: &str, name: Option<&str>) -> Result<(Token, engine::Seat, GameId), ClientError> {
+        let msg = ClientMessage::JoinGame {
+            code: code.into(),
+            name: name.map(String::from),
+        };
+        match self.request(msg).await? {
+            ServerMessage::Joined { token, seat, game_id } => Ok((token, seat, game_id)),
             other => Err(ClientError::Unexpected(Box::new(other))),
         }
     }

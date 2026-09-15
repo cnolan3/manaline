@@ -76,13 +76,26 @@ pub struct LobbyView {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMessage {
-    /// Create the daemon's one game. Only valid once, before any `hello`.
+    /// Create a game. On a one-game daemon this is valid once, before any
+    /// `hello`; on a server (§2.2 tier 1) it is the lobby's one game-creation
+    /// function and may be sent as often as you like. The reply carries the
+    /// game code and every token.
     CreateGame {
         /// A built-in format name.
         format: String,
         seats: u8,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         seed: Option<u64>,
+    },
+    /// Take the lowest-numbered free seat of the game with this code (§2.2.1,
+    /// "by code"). The reply is a `joined` carrying that seat's token; send it
+    /// straight back in a `hello` to sit down. Server mode only.
+    JoinGame {
+        /// The six-character game code, case-insensitive.
+        code: String,
+        /// Display name for the seat.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
     },
     /// Authenticate this connection as a seat or spectator.
     Hello {
@@ -128,6 +141,15 @@ pub enum ServerMessage {
         game_id: GameId,
         seat_tokens: Vec<Token>,
         spectator_token: Token,
+    },
+    /// Reply to `join_game`: the seat the lobby set aside, and the token that
+    /// claims it. The seat is held from this moment, so nobody else is offered
+    /// it; send the token in a `hello` to sit down, and keep it — it is also
+    /// what reconnects you.
+    Joined {
+        token: Token,
+        seat: Seat,
+        game_id: GameId,
     },
     Welcome {
         role: Role,
@@ -341,6 +363,56 @@ mod tests {
         let push: ServerEnvelope = serde_json::from_str(r#"{"type":"pong"}"#).unwrap();
         assert!(push.is_push());
         assert_eq!(push.msg, ServerMessage::Pong);
+    }
+
+    /// The two lobby messages a server adds (§2.2): `join_game` in, `joined`
+    /// back, and then the ordinary `hello` with the token it carried.
+    #[test]
+    fn lobby_messages_round_trip() {
+        let join = ClientMessage::JoinGame {
+            code: "K7QMPX".into(),
+            name: Some("Ann".into()),
+        };
+        let json = serde_json::to_string(&join).unwrap();
+        assert_eq!(json, r#"{"type":"join_game","code":"K7QMPX","name":"Ann"}"#);
+        assert_eq!(serde_json::from_str::<ClientMessage>(&json).unwrap(), join);
+
+        // The name is optional, and an old client that omits it still parses.
+        let anon: ClientMessage = serde_json::from_str(r#"{"type":"join_game","code":"K7QMPX"}"#).unwrap();
+        assert_eq!(
+            anon,
+            ClientMessage::JoinGame {
+                code: "K7QMPX".into(),
+                name: None
+            }
+        );
+
+        let joined = ServerEnvelope {
+            req: Some(2),
+            msg: ServerMessage::Joined {
+                token: Token("seat-token".into()),
+                seat: Seat(1),
+                game_id: GameId("K7QMPX".into()),
+            },
+        };
+        let json = serde_json::to_string(&joined).unwrap();
+        assert_eq!(
+            json,
+            r#"{"req":2,"type":"joined","token":"seat-token","seat":1,"game_id":"K7QMPX"}"#
+        );
+        assert_eq!(serde_json::from_str::<ServerEnvelope>(&json).unwrap(), joined);
+
+        let created = ServerMessage::GameCreated {
+            game_id: GameId("K7QMPX".into()),
+            seat_tokens: vec![Token("a".into()), Token("b".into())],
+            spectator_token: Token("s".into()),
+        };
+        let json = serde_json::to_string(&created).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"game_created","game_id":"K7QMPX","seat_tokens":["a","b"],"spectator_token":"s"}"#
+        );
+        assert_eq!(serde_json::from_str::<ServerMessage>(&json).unwrap(), created);
     }
 
     #[test]

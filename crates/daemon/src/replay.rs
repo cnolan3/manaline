@@ -17,9 +17,19 @@ pub struct ReplayPlayer {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplayHeader {
     pub game_id: String,
+    /// The built-in format name, which is what `Format::builtin` is given on
+    /// replay and on recovery.
     pub format: String,
     pub seed: u64,
     pub players: Vec<ReplayPlayer>,
+    /// The seat tokens, in seat order. A server that restarts rebuilds the
+    /// game from this log and re-registers these, so the same clients
+    /// reconnect with the tokens they already hold (§2.2). Absent in logs
+    /// written before M8 stage 3; such a game is replayable but not resumable.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub seat_tokens: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spectator_token: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -73,6 +83,16 @@ impl ReplayWriter {
                 action: action.clone(),
             },
         )
+    }
+
+    /// Reopen an existing log to keep appending to it, as a server does for a
+    /// game it recovered on restart. The header is already there.
+    pub fn open_append(path: &Path) -> Result<ReplayWriter, ReplayError> {
+        let file = std::fs::OpenOptions::new().append(true).open(path)?;
+        Ok(ReplayWriter {
+            path: path.to_path_buf(),
+            file,
+        })
     }
 
     pub fn path(&self) -> &Path {
@@ -139,4 +159,32 @@ pub fn rebuild(path: &Path, cards: Arc<CardDb>, up_to: Option<usize>) -> Result<
     let n = up_to.unwrap_or(actions.len()).min(actions.len());
     let game = Game::replay(config, header.seed, &actions[..n])?;
     Ok((header, game))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The tokens a server needs to put a game back in its lobby are new in M8
+    /// stage 3. A log written before them still parses; it is replayable, and
+    /// the server declines to resume it rather than inventing tokens.
+    #[test]
+    fn a_header_without_tokens_still_parses() {
+        let old = r#"{"kind":"header","game_id":"K7QMPX","format":"cube","seed":9,"players":[{"name":"Ann","deck":["Forest"]}]}"#;
+        let line: ReplayLine = serde_json::from_str(old).unwrap();
+        let ReplayLine::Header(header) = line else { panic!("not a header") };
+        assert!(header.seat_tokens.is_empty());
+        assert_eq!(header.spectator_token, None);
+
+        // And a header that has them round-trips.
+        let with = ReplayHeader {
+            seat_tokens: vec!["a".into(), "b".into()],
+            spectator_token: Some("s".into()),
+            ..header
+        };
+        let json = serde_json::to_string(&ReplayLine::Header(with.clone())).unwrap();
+        assert!(json.contains(r#""seat_tokens":["a","b"]"#), "{json}");
+        let back: ReplayLine = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, ReplayLine::Header(with));
+    }
 }

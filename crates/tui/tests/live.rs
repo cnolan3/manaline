@@ -24,6 +24,7 @@ async fn joins_and_plays_the_opening_through_the_protocol() {
             seats: 2,
             seed: Some(4),
         }),
+        serve: false,
         cards: Arc::new(cards::core()),
         legality: None,
         idle: None,

@@ -78,6 +78,7 @@ async fn start_with(seats: u8, seed: u64, transport: Transport, idle: Option<Idl
             seats,
             seed: Some(seed),
         }),
+        serve: false,
         cards: Arc::new(cards::core()),
         legality: None,
         idle,
@@ -928,4 +929,310 @@ async fn four_seats_keep_their_places_through_a_link_that_keeps_dropping() {
     proxy.task.abort();
     r.handle.shutdown();
     r.task.await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Tier 1: `manaline server` — one process, a lobby, many independent games.
+// ---------------------------------------------------------------------------
+
+struct ServerUnderTest {
+    handle: DaemonHandle,
+    endpoint: Endpoint,
+    dir: PathBuf,
+    task: tokio::task::JoinHandle<()>,
+}
+
+/// A server-mode daemon over TCP on `dir`: no game at startup, `create_game`
+/// and `join_game` accepted for as long as it runs, and every unfinished log
+/// under `<dir>/games` recovered before it listens.
+async fn start_server(dir: &std::path::Path, abandon_after: Option<Duration>) -> ServerUnderTest {
+    let config = DaemonConfig {
+        socket: None,
+        no_socket: true,
+        tcp: Some("127.0.0.1:0".to_string()),
+        ws: None,
+        tls: None,
+        parent_pid: None,
+        replay_dir: Some(dir.join("games")),
+        create: None,
+        serve: true,
+        cards: Arc::new(cards::core()),
+        legality: None,
+        idle: None,
+        abandon_after,
+    };
+    let daemon = Daemon::bind(config).await.unwrap();
+    let endpoint = Endpoint::Tcp(daemon.info().tcp.unwrap().to_string());
+    let handle = daemon.handle();
+    let task = tokio::spawn(async move { daemon.run().await.unwrap() });
+    ServerUnderTest {
+        handle,
+        endpoint,
+        dir: dir.to_path_buf(),
+        task,
+    }
+}
+
+impl ServerUnderTest {
+    fn log_of(&self, game: &protocol::GameId) -> PathBuf {
+        self.dir.join("games").join(format!("{game}.jsonl"))
+    }
+
+    async fn stop(self) {
+        self.handle.shutdown();
+        self.task.await.unwrap();
+    }
+}
+
+/// Sit down with a token that is already in hand: `create` handed it out, or a
+/// previous run of the server did.
+async fn sit(endpoint: &Endpoint, token: &Token, name: &str) -> Client {
+    let mut c = Client::connect(endpoint).await.unwrap();
+    c.hello(token, Some(name)).await.unwrap();
+    c.subscribe().await.unwrap();
+    c
+}
+
+async fn sit_with_deck(endpoint: &Endpoint, token: &Token, name: &str, deck: &str) -> Client {
+    let mut c = sit(endpoint, token, name).await;
+    c.set_deck(&cards::deck_text(deck).unwrap()).await.unwrap().unwrap();
+    c
+}
+
+/// Drive every seat round-robin from one task for at most `steps` rounds.
+/// `true` once the game is over. Stops early if nobody can move, which only
+/// happens when the table is waiting on something the caller has not done.
+async fn play_some(clients: &mut [Client], seed: u64, steps: usize) -> bool {
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    for _ in 0..steps {
+        let mut moved = false;
+        for c in clients.iter_mut() {
+            let (acts, version) = c.get_legal_actions().await.unwrap();
+            let playable: Vec<_> = acts.iter().filter(|a| !matches!(a.action, Action::Concede)).collect();
+            let Some(pick) = playable.choose(&mut rng) else { continue };
+            match c.act_by_id(pick.id, version).await {
+                Ok((_, state, _)) => {
+                    moved = true;
+                    if state.outcome.is_some() {
+                        return true;
+                    }
+                }
+                Err(ClientError::Protocol(e)) if e.retryable => moved = true,
+                Err(e) => panic!("{e}"),
+            }
+        }
+        if !moved {
+            return false;
+        }
+    }
+    false
+}
+
+async fn play_out(clients: &mut [Client], seed: u64) {
+    for round in 0..200 {
+        if play_some(clients, seed + round, 200).await {
+            return;
+        }
+    }
+    panic!("the game never finished");
+}
+
+/// Two games on one listener, four clients, both played to the end — and the
+/// games are as independent as §2.2 says: a token for one is not a token for
+/// the other.
+#[tokio::test]
+async fn a_server_hosts_two_games_at_once() {
+    let dir = scratch();
+    let s = start_server(&dir, None).await;
+    let mut admin = Client::connect(&s.endpoint).await.unwrap();
+    let (game_a, tokens_a, _) = admin.create_game("cube", 2, Some(31)).await.unwrap();
+    let (game_b, tokens_b, _) = admin.create_game("cube", 2, Some(32)).await.unwrap();
+    assert_ne!(game_a, game_b);
+    assert_eq!(s.handle.games().await, 2);
+
+    // A connection at game A cannot walk into game B with B's token, and a
+    // token no game here issued is no token at all.
+    let mut stray = Client::connect(&s.endpoint).await.unwrap();
+    stray.hello(&tokens_a[0], None).await.unwrap();
+    let err = stray.hello(&tokens_b[0], None).await.unwrap_err();
+    assert!(matches!(&err, ClientError::Protocol(e) if e.code == ErrorCode::BadToken), "{err}");
+    let err = stray.hello(&Token("not-a-token".into()), None).await.unwrap_err();
+    assert!(matches!(&err, ClientError::Protocol(e) if e.code == ErrorCode::BadToken), "{err}");
+    drop(stray);
+
+    let mut table_a = vec![
+        sit_with_deck(&s.endpoint, &tokens_a[0], "A0", "green").await,
+        sit_with_deck(&s.endpoint, &tokens_a[1], "A1", "red").await,
+    ];
+    let mut table_b = vec![
+        sit_with_deck(&s.endpoint, &tokens_b[0], "B0", "white").await,
+        sit_with_deck(&s.endpoint, &tokens_b[1], "B1", "blue").await,
+    ];
+    for c in table_a.iter_mut().chain(table_b.iter_mut()) {
+        c.ready().await.unwrap();
+    }
+
+    play_out(&mut table_a, 100).await;
+    play_out(&mut table_b, 200).await;
+
+    // Both logs stand on their own and replay to the state their table sees.
+    for (game, clients) in [(&game_a, &mut table_a), (&game_b, &mut table_b)] {
+        let live = clients[0].get_state().await.unwrap();
+        assert!(live.outcome.is_some());
+        let (header, rebuilt) = daemon::replay::rebuild(&s.log_of(game), Arc::new(cards::core()), None).unwrap();
+        assert_eq!(&header.game_id, &game.0);
+        assert_eq!(rebuilt.view(Seat(0)), live);
+    }
+    assert_eq!(s.handle.games().await, 2, "both games are still held while their clients are here");
+    s.stop().await;
+}
+
+/// `join <code>`: seats go out lowest-numbered first, and a game that is full
+/// or already under way says so.
+#[tokio::test]
+async fn joining_by_code_fills_seats_in_order_and_then_refuses() {
+    let dir = scratch();
+    let s = start_server(&dir, None).await;
+    let mut admin = Client::connect(&s.endpoint).await.unwrap();
+    let (code, _, _) = admin.create_game("free-for-all", 3, Some(19)).await.unwrap();
+
+    let mut clients = Vec::new();
+    for (i, deck) in ["green", "red", "blue"].iter().enumerate() {
+        let mut c = Client::connect(&s.endpoint).await.unwrap();
+        let name = format!("P{i}");
+        // The code is what a person types, so case does not matter.
+        let (token, seat, id) = c.join_game(&code.0.to_lowercase(), Some(&name)).await.unwrap();
+        assert_eq!(seat, Seat(i as u8), "seats fill in order");
+        assert_eq!(id, code);
+        let w = c.hello(&token, Some(&name)).await.unwrap();
+        assert_eq!(w.role, protocol::Role::Seat(Seat(i as u8)));
+        assert_eq!(w.lobby.seats[i].name.as_deref(), Some(name.as_str()));
+        c.set_deck(&cards::deck_text(deck).unwrap()).await.unwrap().unwrap();
+        clients.push(c);
+    }
+
+    let mut late = Client::connect(&s.endpoint).await.unwrap();
+    let err = late.join_game(&code.0, Some("Late")).await.unwrap_err();
+    assert!(
+        matches!(&err, ClientError::Protocol(e) if e.code == ErrorCode::BadRequest && e.message.contains("full")),
+        "{err}"
+    );
+    let err = late.join_game("ZZZZZZ", None).await.unwrap_err();
+    assert!(
+        matches!(&err, ClientError::Protocol(e) if e.code == ErrorCode::BadRequest && e.message.contains("no game")),
+        "{err}"
+    );
+
+    // The last `ready` starts the game before it replies, so the refusal
+    // changes the moment it returns.
+    for c in clients.iter_mut() {
+        c.ready().await.unwrap();
+    }
+    let err = late.join_game(&code.0, None).await.unwrap_err();
+    assert!(
+        matches!(&err, ClientError::Protocol(e) if e.code == ErrorCode::BadRequest && e.message.contains("already started")),
+        "{err}"
+    );
+    assert!(clients[0].get_state().await.unwrap().outcome.is_none());
+    s.stop().await;
+}
+
+/// Durability falls out of determinism (§2.2): stop the server mid-game, start
+/// another one on the same data directory, and the same clients finish the
+/// same game with the tokens they already held.
+#[tokio::test]
+async fn a_restarted_server_resumes_its_games_from_the_log() {
+    let dir = scratch();
+    let s = start_server(&dir, None).await;
+    let mut admin = Client::connect(&s.endpoint).await.unwrap();
+    let (code, tokens, spectator) = admin.create_game("cube", 2, Some(13)).await.unwrap();
+    let mut clients = vec![
+        sit_with_deck(&s.endpoint, &tokens[0], "Ann", "green").await,
+        sit_with_deck(&s.endpoint, &tokens[1], "Bob", "red").await,
+    ];
+    for c in clients.iter_mut() {
+        c.ready().await.unwrap();
+    }
+    assert!(!play_some(&mut clients, 5, 40).await, "half a game, not a whole one");
+
+    let log = s.log_of(&code);
+    let (header, before) = daemon::replay::read(&log).unwrap();
+    assert!(before.len() >= 20, "only {} actions logged", before.len());
+    assert_eq!(header.seat_tokens, tokens.iter().map(|t| t.0.clone()).collect::<Vec<_>>());
+    assert_eq!(header.spectator_token.as_deref(), Some(spectator.0.as_str()));
+
+    // The server goes away mid-game; the data directory does not.
+    drop(clients);
+    drop(admin);
+    s.stop().await;
+
+    let s = start_server(&dir, None).await;
+    assert_eq!(s.handle.games().await, 1, "the unfinished game came back");
+    assert!(s.handle.has_game(&code).await);
+
+    let mut clients = vec![sit(&s.endpoint, &tokens[0], "Ann").await, sit(&s.endpoint, &tokens[1], "Bob").await];
+    let resumed = clients[0].get_state().await.unwrap();
+    assert_eq!(resumed.you, Some(Seat(0)));
+    assert_eq!(resumed.players[0].name, "Ann");
+    assert!(resumed.outcome.is_none());
+
+    play_out(&mut clients, 6).await;
+    let final_state = clients[0].get_state().await.unwrap();
+    assert!(final_state.outcome.is_some());
+
+    // One log, one game: the actions from both runs replay as one history.
+    let (_, after) = daemon::replay::read(&log).unwrap();
+    assert!(after.len() > before.len(), "the second run appended nothing");
+    let (_, rebuilt) = daemon::replay::rebuild(&log, Arc::new(cards::core()), None).unwrap();
+    assert_eq!(rebuilt.view(Seat(0)), final_state);
+
+    // The spectator token survived the restart too.
+    let mut spec = Client::connect(&s.endpoint).await.unwrap();
+    assert_eq!(spec.hello(&spectator, None).await.unwrap().role, protocol::Role::Spectator);
+    s.stop().await;
+}
+
+/// The lobby is not a graveyard: a finished game whose clients have gone, and
+/// a game nobody ever came to, are both dropped — and the server keeps serving.
+#[tokio::test]
+async fn a_server_forgets_finished_and_abandoned_games_but_keeps_running() {
+    let dir = scratch();
+    let s = start_server(&dir, Some(Duration::from_millis(250))).await;
+    let mut admin = Client::connect(&s.endpoint).await.unwrap();
+    let (ghost, _, _) = admin.create_game("cube", 2, Some(41)).await.unwrap();
+    let (code, tokens, _) = admin.create_game("cube", 2, Some(42)).await.unwrap();
+    let mut clients = vec![
+        sit_with_deck(&s.endpoint, &tokens[0], "A", "green").await,
+        sit_with_deck(&s.endpoint, &tokens[1], "B", "red").await,
+    ];
+    for c in clients.iter_mut() {
+        c.ready().await.unwrap();
+    }
+
+    // Nobody ever sat down at the ghost, so it expires; the live table does not.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while s.handle.has_game(&ghost).await {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the abandoned game expires");
+    assert!(s.handle.has_game(&code).await, "a table with people at it is not abandoned");
+
+    play_out(&mut clients, 7).await;
+    assert!(s.handle.has_game(&code).await, "a finished game is kept while its clients are here");
+    drop(clients);
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while s.handle.games().await > 0 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the finished game is dropped once its clients leave");
+
+    // The process is still a server: it makes new games as if nothing happened.
+    let (again, _, _) = admin.create_game("cube", 2, Some(43)).await.unwrap();
+    assert!(s.handle.has_game(&again).await);
+    s.stop().await;
 }

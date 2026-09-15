@@ -35,6 +35,8 @@ enum Command {
     Sim(SimArgs),
     /// Run a game daemon (advanced; `play` does this for you).
     Daemon(commands::DaemonArgs),
+    /// Run a lobby server: one process, many games, joined by code.
+    Server(commands::ServerArgs),
     /// Join a daemon as the built-in random bot.
     Bot(commands::BotArgs),
     /// Run the MCP server an agent plays through (agents launch this themselves: `manaline mcp --stdio`).
@@ -125,6 +127,7 @@ fn main() -> Result<()> {
         Command::Sim(args) => sim(args),
         Command::List { what } => list(what),
         Command::Daemon(args) => runtime()?.block_on(commands::daemon(args)),
+        Command::Server(args) => runtime()?.block_on(commands::server(args)),
         Command::Bot(args) => runtime()?.block_on(commands::bot(args)),
         Command::Mcp(args) => runtime()?.block_on(commands::mcp(args)),
         Command::Replay(args) => commands::replay(args),

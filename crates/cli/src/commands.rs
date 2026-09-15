@@ -140,6 +140,7 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
         parent_pid: args.parent_pid,
         replay_dir: args.replay_dir,
         create,
+        serve: false,
         cards: Arc::new(cards::core()),
         legality: crate::deck::legality_source(),
         idle: idle_policy(args.idle_warn, args.idle_concede)?,
@@ -147,6 +148,99 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
     };
     let daemon = Daemon::bind(config).await?;
     println!("{}", serde_json::to_string(daemon.info())?);
+    let handle = daemon.handle();
+    tokio::spawn(async move {
+        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = async { match term.as_mut() { Some(t) => { t.recv().await; } None => std::future::pending::<()>().await } } => {}
+        }
+        handle.shutdown();
+    });
+    daemon.run().await?;
+    Ok(())
+}
+
+#[derive(clap::Args)]
+pub struct ServerArgs {
+    /// Plain TCP address to listen on, e.g. `0.0.0.0:7454`.
+    #[arg(long, default_value = "0.0.0.0:7454")]
+    pub listen: String,
+    /// Also serve the WebSocket transport here, e.g. `0.0.0.0:443`. With
+    /// --tls-cert and --tls-key that listener is `wss://`, which is the one
+    /// transport every home firewall and hotel network passes (§2.2).
+    #[arg(long)]
+    pub ws: Option<String>,
+    /// PEM certificate chain for the --ws listener. The binary never obtains a
+    /// certificate; point it at one certbot, lego, or a proxy wrote.
+    #[arg(long, requires = "tls_key")]
+    pub tls_cert: Option<PathBuf>,
+    /// PEM private key for --tls-cert.
+    #[arg(long, requires = "tls_cert")]
+    pub tls_key: Option<PathBuf>,
+    /// Where the action logs live. Every unfinished game under `<dir>/games`
+    /// is rebuilt and re-hosted at startup, so a restart costs nothing but the
+    /// replay and clients resume with the tokens they already hold.
+    #[arg(long)]
+    pub data_dir: Option<PathBuf>,
+    /// Tell a table when a seat the game is waiting on has been gone this many
+    /// seconds.
+    #[arg(long, value_name = "SECS")]
+    pub idle_warn: Option<u64>,
+    /// Concede for a seat the game is waiting on once it has been gone this
+    /// many seconds, so everyone else can finish.
+    #[arg(long, value_name = "SECS")]
+    pub idle_concede: Option<u64>,
+    /// Drop a game once every seat has been gone this many seconds. The server
+    /// itself keeps running.
+    #[arg(long, value_name = "SECS", default_value_t = 3600)]
+    pub abandon_after: u64,
+}
+
+/// `manaline server`: the daemon pluralised (§2.2 tier 1). One process, a
+/// lobby, and as many independent games as clients create — a thin wrapper
+/// over the same `DaemonConfig` a one-game daemon uses.
+pub async fn server(args: ServerArgs) -> Result<()> {
+    let tls = match (args.tls_cert, args.tls_key) {
+        (Some(cert), Some(key)) => Some(daemon::TlsConfig { cert, key }),
+        (None, None) => None,
+        _ => bail!("--tls-cert and --tls-key go together"),
+    };
+    if tls.is_some() && args.ws.is_none() {
+        bail!("--tls-cert and --tls-key only apply to the --ws listener");
+    }
+    let data_dir = args.data_dir.unwrap_or_else(protocol::endpoint::data_dir);
+    let config = DaemonConfig {
+        socket: None,
+        no_socket: true,
+        tcp: Some(args.listen),
+        ws: args.ws,
+        tls,
+        parent_pid: None,
+        replay_dir: Some(data_dir.join("games")),
+        create: None,
+        serve: true,
+        cards: Arc::new(cards::core()),
+        legality: crate::deck::legality_source(),
+        idle: idle_policy(args.idle_warn, args.idle_concede)?,
+        abandon_after: Some(std::time::Duration::from_secs(args.abandon_after)),
+    };
+    let daemon = Daemon::bind(config).await?;
+    let info = daemon.info();
+    if let Some(addr) = info.tcp {
+        println!("listening on {addr}");
+    }
+    if let Some(url) = &info.ws {
+        println!("listening on {url}");
+    }
+    println!("data directory {}", data_dir.display());
+    match info.recovered.len() {
+        0 => println!("no unfinished games to recover"),
+        n => println!(
+            "recovered {n} unfinished game(s): {}",
+            info.recovered.iter().map(|g| g.0.clone()).collect::<Vec<_>>().join(", ")
+        ),
+    }
     let handle = daemon.handle();
     tokio::spawn(async move {
         let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();

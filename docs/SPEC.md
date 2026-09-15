@@ -932,6 +932,26 @@ Concurrency is intentionally boring: a single `tokio::sync::Mutex<Game>` and a `
 
 **Remote seats** differ from local ones in exactly two ways: the token is the only authentication (no filesystem permissions to lean on), and disconnects are expected rather than fatal. Both are handled in the transport layer, not the game loop.
 
+**One game or many is a flag, not a fork in the code.** `DaemonConfig` has two modes and one code path (§2.2's tiers 0 and 1):
+
+```
+server.rs     the process: listeners, connection routing, the away-from-the-table sweeper
+              ├── mode: create=Some(..)   one game, socket named after it, exits when abandoned
+              └── mode: serve=true        many games, recovery at startup, never exits on game over
+registry.rs   the lobby, and the only state any two games share
+              ├── games   game id (the six-character code) → Arc<GameShared>
+              ├── tokens  seat/spectator token → (game id, role)
+              └── create(format, seats, seed) → the one internal game-creation function
+game_task.rs  GameShared: one table, and nothing about any other
+              └── Mutex<{ Lobby, Game, ReplayWriter }> + watch<Status> + broadcast + client count
+```
+
+A connection starts bound to nothing. `create_game` and `join_game` are the process's business; `hello { token }` looks the token up in the registry, binds the connection to that game and role, and every message after it is that game's, handled exactly as a one-game daemon handles it. `join_game { code }` hands back the lowest-numbered **unclaimed** seat's token and holds that seat — a seat is claimed by the `join_game` that issues it or by the first `hello` on a token `create_game` returned, whichever comes first — and the client then sends an ordinary `hello`, so the reconnect path, which knows only a token, never learns there was a lobby. Unknown code, full game, and started game are all `bad_request` with a message that says which.
+
+A game leaves the registry when it is over and its last client has gone, or when every seat has been away for `abandon_after`. In single-game mode that second case ends the process instead; on a server it drops one game and nothing else notices, because the registry is touched at create and join time and never during play.
+
+**Restart recovery.** In server mode the replay log is not a by-product, it is the database: the action is written and flushed before the `ack` is built, and a write that fails fails the action rather than warning. The log header therefore also records the format name, the seat tokens and the spectator token, as `#[serde(default)]` fields so older logs still parse. At startup the server scans `<data dir>/games/*.jsonl`, replays each log, drops the ones whose game is over, and puts the rest back in the registry with their tokens — so a crash, a deploy, or a move to another machine costs one replay and the clients resume with the tokens they already hold. A log without tokens in its header is replayable but not resumable, and is skipped.
+
 ### 5.1 Transports
 
 A connection is a stream of whole protocol messages (`protocol::framing::MessageTransport`). Two framings implement it — one JSON message per line over a byte stream, one JSON message per WebSocket text frame — and nothing above the transport can tell them apart. The daemon serves any combination at once; a client picks one by the endpoint it is given.
@@ -1075,7 +1095,8 @@ manaline join      <host:port> --token <t> --deck <file>          # tier 0: dire
 manaline join      <code> [--server wss://…] --deck <file>        # tier 1/2: via a lobby server
 manaline create    --format <name> --seats <n> [--server wss://…] # tier 1/2: prints the game code
 manaline queue     --format <name> [--seats <n>] [--server wss://…] --deck <file>   # matchmaking (future)
-manaline server    --listen <addr> [--tls-cert … --tls-key …] [--state-dir …]   # tier 1: run a lobby
+manaline server    --listen <addr> [--ws <addr>] [--tls-cert … --tls-key …] [--data-dir …]
+                   [--idle-warn <s>] [--idle-concede <s>] [--abandon-after <s>]   # tier 1: run a lobby
 manaline daemon    --game <id> [--socket <path>] [--tcp <addr>] [--idle-warn <s>] [--idle-concede <s>] [--abandon-after <s>]
 manaline tui       --game <id> --seat <n> | --token <t>
 manaline mcp       --game <id> --seat <n> | --token <t> [--http <addr> | --stdio]
@@ -1086,6 +1107,8 @@ manaline ingest    set | card | roundtrip | eval     # dev tool, see §4.3.1
 ```
 
 `play` is the only command most people ever run; it orchestrates the others as child processes and tears them down together (§2.1). `--vs` accepts `random`, `human`, `mcp`, and named presets (`claude`, `codex`, …) that are just `mcp` plus a config snippet tailored to that client. `host` / `join` are the tier-0 networked-play entry points: `host` is `play` with a TCP listener (`--bind`, `0.0.0.0:0` by default), seats defaulting to `me,human`, the idle policy on, and a `manaline join <lan-ip>:<port> --token <t>` line printed per human seat.
+
+`server` is tier 1 (§2.2): the same daemon, holding many games instead of one. It creates no game of its own and never exits when a game ends — clients make games with `create_game` and take seats with `join_game <code>`. It listens on plain TCP (`--listen`, `0.0.0.0:7454` by default) and, with `--ws`, on WebSockets, `wss://` when `--tls-cert` and `--tls-key` are given. `--data-dir` is where the action logs live (`<dir>/games/<code>.jsonl`); every unfinished log there is replayed and re-hosted at startup, so a restart is invisible to a reconnecting client. `--idle-warn` / `--idle-concede` apply the §5 away-from-the-table policy to every table, and `--abandon-after` (an hour by default) drops a game nobody is left at rather than stopping the process.
 
 ---
 

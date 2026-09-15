@@ -1,34 +1,29 @@
-//! One daemon, one game, any number of connections. Concurrency is a single
-//! mutex around the game and a watch channel carrying who must act (§5).
-//! Every connection filters what it forwards through `Event::view` and
-//! `Game::view`; nothing else ever touches the wire.
+//! The process: listeners, connection routing, and the registry of games.
+//!
+//! Two modes, one binary (§2.2). **Single-game mode** is what `play`, `host`
+//! and `manaline daemon` spawn: one game, created at startup or by the one
+//! `create_game` a connection is allowed, a socket named after it, and the
+//! process exits when that game is abandoned. **Server mode** (`serve: true`,
+//! `manaline server`) is the same daemon pluralised: `create_game` and
+//! `join_game` make and find as many games as clients ask for, each an
+//! independent `GameTask`, and nothing but a shutdown ends the process.
+//!
+//! Everything that is about one game lives in `game_task`; everything that is
+//! shared between games lives in `registry`. A connection starts bound to
+//! neither and reaches a game only through `hello`.
 
-use crate::lobby::Lobby;
-use crate::replay::{ReplayHeader, ReplayPlayer, ReplayWriter};
-use engine::text::describe_action;
-use engine::{ActReason, Action, CardDb, Event, Format, Game, GameConfig, PlayerSetup, Seat, Violation};
+use crate::game_task::{self, Broadcast, Conn, Context, Swept};
+use crate::registry::{self, Registry};
 use protocol::messages::{ClientEnvelope, ServerEnvelope};
-use protocol::{ClientMessage, ErrorCode, GameId, LegalAction, LobbyView, ProtocolError, Role, ServerMessage, Token, PROTOCOL_VERSION};
-use std::collections::BTreeMap;
+use protocol::{ClientMessage, ErrorCode, GameId, ProtocolError, ServerMessage, Token, PROTOCOL_VERSION};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::net::{TcpListener, UnixListener};
 use tokio::sync::{broadcast, watch, Mutex};
 use tracing::{debug, info, warn};
 
-/// What the daemon does about a seat that has gone away mid-game (§2.2, M8).
-/// A seat the game is waiting on, with no connection at all, first gets one
-/// warning in the table chat and then, if it still has not come back, has
-/// `Action::Concede` applied for it so the other seats can finish.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct IdlePolicy {
-    /// How long a disconnected seat the game is waiting on may hold everyone
-    /// up before the table is told about it (once).
-    pub warn_after: Duration,
-    /// How long before the daemon concedes for it. Must be at least `warn_after`.
-    pub concede_after: Duration,
-}
+pub use crate::game_task::{IdlePolicy, Status};
 
 /// Ask the daemon to create its game at startup instead of waiting for `create_game`.
 #[derive(Clone, Debug)]
@@ -56,14 +51,20 @@ pub struct DaemonConfig {
     /// Where replay logs go; defaults to the platform data directory.
     pub replay_dir: Option<PathBuf>,
     pub create: Option<CreateGame>,
-    pub cards: Arc<CardDb>,
+    /// Tier 1: host many games. `create_game` and `join_game` are accepted for
+    /// as long as the process runs, unfinished games in `replay_dir` are
+    /// recovered at startup, a log write that fails fails the action, and no
+    /// game ending or being abandoned ever stops the process.
+    pub serve: bool,
+    pub cards: Arc<engine::CardDb>,
     /// Per-format legality for Scryfall-pool formats (the carddb cache), if available.
     pub legality: Option<Arc<dyn engine::LegalitySource + Send + Sync>>,
     /// What to do about a seat that disappears mid-game. `None` (the default
     /// for a daemon `play` spawns locally) waits forever.
     pub idle: Option<IdlePolicy>,
-    /// Shut the daemon down once every seat has been gone this long, in the
-    /// lobby or in a game. `None` never gives up.
+    /// Give a game up once every seat has been gone this long, in the lobby or
+    /// in a game. In single-game mode that shuts the daemon down; on a server
+    /// it drops that one game. `None` never gives up.
     pub abandon_after: Option<Duration>,
 }
 
@@ -97,45 +98,25 @@ pub struct StartupInfo {
     pub seat_tokens: Vec<Token>,
     pub spectator_token: Option<Token>,
     pub replay_path: Option<PathBuf>,
-}
-
-/// What the watch channel carries: enough for a client to block on "my seat must act".
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Status {
-    pub state_version: u64,
-    pub must_act: BTreeMap<Seat, ActReason>,
-    pub game_over: bool,
-}
-
-#[derive(Clone, Debug)]
-enum Broadcast {
-    /// Unfiltered engine events; every connection filters for its own role before sending.
-    Events {
-        events: Arc<Vec<Event>>,
-        state_version: u64,
-    },
-    Lobby(LobbyView),
-}
-
-struct State {
-    lobby: Option<Lobby>,
-    game: Option<Game>,
-    replay: Option<ReplayWriter>,
+    /// Games recovered from the data directory at startup (server mode).
+    #[serde(default)]
+    pub recovered: Vec<GameId>,
 }
 
 pub(crate) struct Shared {
-    cards: Arc<CardDb>,
-    legality: Option<Arc<dyn engine::LegalitySource + Send + Sync>>,
-    state: Mutex<State>,
+    ctx: Arc<Context>,
+    registry: Mutex<Registry>,
+    /// The status watch of the one game in single-game mode, so `DaemonHandle`
+    /// can hand out a receiver without knowing whether a game exists yet.
     status: watch::Sender<Status>,
-    broadcast: broadcast::Sender<Broadcast>,
     shutdown: watch::Sender<bool>,
-    replay_dir: PathBuf,
-    idle: Option<IdlePolicy>,
-    abandon_after: Option<Duration>,
+    serve: bool,
 }
 
-/// A handle that can stop a running daemon and observe its status.
+/// A handle that can stop a running daemon and observe its status. Its
+/// game-shaped questions are about *the* game, which is single-game mode's
+/// whole point; on a server they answer for whichever game the registry hands
+/// back first and `games` is the useful one.
 #[derive(Clone)]
 pub struct DaemonHandle {
     shared: Arc<Shared>,
@@ -146,17 +127,37 @@ impl DaemonHandle {
         self.shared.shutdown.send_replace(true);
     }
 
+    /// The status watch of the daemon's one game. In server mode there is no
+    /// such thing — each game has its own — and this one never changes.
     pub fn status(&self) -> watch::Receiver<Status> {
         self.shared.status.subscribe()
     }
 
     /// The path of the replay log once the game has started.
     pub async fn replay_path(&self) -> Option<PathBuf> {
-        self.shared.state.lock().await.replay.as_ref().map(|r| r.path().to_path_buf())
+        let game = self.shared.registry.lock().await.only()?;
+        game.replay_path().await
     }
 
     pub async fn is_over(&self) -> bool {
-        self.shared.state.lock().await.game.as_ref().and_then(|g| g.is_over()).is_some()
+        let Some(game) = self.shared.registry.lock().await.only() else {
+            return false;
+        };
+        game.is_over().await
+    }
+
+    /// How many games this process is holding.
+    pub async fn games(&self) -> usize {
+        self.shared.registry.lock().await.len()
+    }
+
+    pub async fn game_ids(&self) -> Vec<GameId> {
+        self.shared.registry.lock().await.ids()
+    }
+
+    /// Whether the registry still knows this game.
+    pub async fn has_game(&self, id: &GameId) -> bool {
+        self.shared.registry.lock().await.get(id).is_some()
     }
 }
 
@@ -176,41 +177,17 @@ impl Daemon {
         if config.no_socket && config.tcp.is_none() && config.ws.is_none() {
             return Err(DaemonError::NoListener);
         }
-        let lobby = match config.create {
-            Some(create) => Some(create_lobby(&create.format, create.seats, create.seed)?),
-            None => None,
-        };
-        let socket = if config.no_socket {
-            None
-        } else {
-            match config.socket {
-                Some(p) => Some(p),
-                None => {
-                    let dir = protocol::endpoint::ensure_runtime_dir()?;
-                    let name = lobby.as_ref().map(|l| l.game_id.0.clone()).unwrap_or_else(random_name);
-                    Some(dir.join(format!("{name}.sock")))
-                }
-            }
-        };
-        let (status, _) = watch::channel(Status::default());
-        let (broadcast, _) = broadcast::channel(1024);
-        let (shutdown, _) = watch::channel(false);
         let replay_dir = config.replay_dir.unwrap_or_else(|| protocol::endpoint::data_dir().join("games"));
-        let shared = Arc::new(Shared {
+        let ctx = Arc::new(Context {
             cards: config.cards,
             legality: config.legality,
-            state: Mutex::new(State {
-                lobby: None,
-                game: None,
-                replay: None,
-            }),
-            status,
-            broadcast,
-            shutdown,
             replay_dir,
             idle: config.idle,
             abandon_after: config.abandon_after,
+            durable: config.serve,
         });
+        let (status, _) = watch::channel(Status::default());
+        let (shutdown, _) = watch::channel(false);
 
         let mut info = StartupInfo {
             socket: None,
@@ -220,7 +197,41 @@ impl Daemon {
             seat_tokens: Vec::new(),
             spectator_token: None,
             replay_path: None,
+            recovered: Vec::new(),
         };
+
+        let mut registry = Registry::default();
+        // Durability falls out of determinism (§2.2): every unfinished log in
+        // the data directory is a game this server is still hosting.
+        if config.serve {
+            registry::recover(&mut registry, &ctx, &ctx.replay_dir);
+            info.recovered = registry.ids();
+        }
+        let created = match &config.create {
+            Some(create) => Some(registry.create(&ctx, &create.format, create.seats, create.seed, status.clone())?),
+            None => None,
+        };
+
+        let socket = if config.no_socket {
+            None
+        } else {
+            match config.socket {
+                Some(p) => Some(p),
+                None => {
+                    let dir = protocol::endpoint::ensure_runtime_dir()?;
+                    let name = created.as_ref().map(|g| g.game_id.0.clone()).unwrap_or_else(random_name);
+                    Some(dir.join(format!("{name}.sock")))
+                }
+            }
+        };
+
+        let shared = Arc::new(Shared {
+            ctx,
+            registry: Mutex::new(registry),
+            status,
+            shutdown,
+            serve: config.serve,
+        });
 
         let unix = match &socket {
             Some(path) => {
@@ -258,12 +269,12 @@ impl Daemon {
             None => None,
         };
 
-        if let Some(lobby) = lobby {
-            info.game_id = Some(lobby.game_id.clone());
-            info.seat_tokens = lobby.seat_tokens();
-            info.spectator_token = Some(lobby.spectator_token.clone());
-            info.replay_path = Some(shared.replay_dir.join(format!("{}.jsonl", lobby.game_id)));
-            shared.state.lock().await.lobby = Some(lobby);
+        if let Some(game) = &created {
+            let state = game.state.lock().await;
+            info.game_id = Some(game.game_id.clone());
+            info.seat_tokens = state.lobby.seat_tokens();
+            info.spectator_token = Some(state.lobby.spectator_token.clone());
+            info.replay_path = Some(shared.ctx.replay_dir.join(format!("{}.jsonl", game.game_id)));
         }
 
         Ok(Daemon {
@@ -302,10 +313,10 @@ impl Daemon {
         if let Some(pid) = parent_pid {
             tokio::spawn(watch_parent(pid, shared.clone()));
         }
-        if shared.idle.is_some() || shared.abandon_after.is_some() {
+        if shared.ctx.idle.is_some() || shared.ctx.abandon_after.is_some() || shared.serve {
             tokio::spawn(watch_away(shared.clone()));
         }
-        info!(socket = ?info.socket, tcp = ?info.tcp, ws = ?info.ws, "daemon listening");
+        info!(socket = ?info.socket, tcp = ?info.tcp, ws = ?info.ws, serve = shared.serve, "daemon listening");
         loop {
             tokio::select! {
                 _ = shutdown.changed() => break,
@@ -364,8 +375,9 @@ async fn watch_parent(pid: u32, shared: Arc<Shared>) {
     }
 }
 
-/// The idle and abandonment clocks (§2.2, M8). Spawned only when at least one
-/// of them is configured, so a locally spawned daemon behaves exactly as before.
+/// The idle and abandonment clocks (§2.2, M8), now one pass per game. A server
+/// drops a game the sweep gives up on and keeps running; a single-game daemon
+/// has nothing left to do and stops.
 async fn watch_away(shared: Arc<Shared>) {
     let mut shutdown = shared.shutdown.subscribe();
     let tick = sweep_interval(&shared);
@@ -374,8 +386,28 @@ async fn watch_away(shared: Arc<Shared>) {
             _ = shutdown.changed() => return,
             _ = tokio::time::sleep(tick) => {}
         }
-        if sweep(&shared).await {
-            return;
+        let games = shared.registry.lock().await.games();
+        let mut drop_these = Vec::new();
+        for game in games {
+            match game_task::sweep(&game).await {
+                Swept::Keep => {}
+                // A server forgets the game and carries on; a single-game
+                // daemon has nothing left to serve, so the process ends —
+                // exactly as it did before there was more than one game.
+                swept if shared.serve => drop_these.push((game.game_id.clone(), swept)),
+                Swept::Abandoned => {
+                    shared.shutdown.send_replace(true);
+                    return;
+                }
+                Swept::Finished => {}
+            }
+        }
+        if !drop_these.is_empty() {
+            let mut registry = shared.registry.lock().await;
+            for (id, why) in drop_these {
+                info!(game = %id, "dropping the game from the lobby ({why:?})");
+                registry.remove(&id);
+            }
         }
     }
 }
@@ -384,102 +416,13 @@ async fn watch_away(shared: Arc<Shared>) {
 /// rounded away, slow enough never to be a hot loop.
 fn sweep_interval(shared: &Shared) -> Duration {
     let mut shortest = Duration::from_millis(400);
-    if let Some(p) = shared.idle {
+    if let Some(p) = shared.ctx.idle {
         shortest = shortest.min(p.warn_after).min(p.concede_after);
     }
-    if let Some(a) = shared.abandon_after {
+    if let Some(a) = shared.ctx.abandon_after {
         shortest = shortest.min(a);
     }
     (shortest / 4).clamp(Duration::from_millis(10), Duration::from_millis(100))
-}
-
-/// One pass over the seats. Returns true once the daemon is shutting down.
-/// The lock is held for the whole pass and across no await.
-async fn sweep(shared: &Arc<Shared>) -> bool {
-    let now = Instant::now();
-    let mut state = shared.state.lock().await;
-    let State { lobby, game, replay } = &mut *state;
-    let Some(lobby) = lobby.as_mut() else {
-        return false;
-    };
-    let away = |slot: &crate::lobby::SeatSlot| slot.disconnected_since.map(|t| now.duration_since(t));
-
-    // Nobody is left at the table: give the process up (the Tier 1 server
-    // reuses this per game).
-    if let Some(limit) = shared.abandon_after {
-        if lobby.seats.iter().all(|s| away(s).is_some_and(|d| d >= limit)) {
-            info!(game = %lobby.game_id, "every seat has been gone for {limit:?}; giving up");
-            shared.shutdown.send_replace(true);
-            return true;
-        }
-    }
-
-    let Some(policy) = shared.idle else {
-        return false;
-    };
-    let Some(game) = game.as_mut() else {
-        return false;
-    };
-    if game.is_over().is_some() {
-        return false;
-    }
-    // Decide from one snapshot: a concession changes who must act.
-    let must_act = game.must_act();
-    let mut warn = Vec::new();
-    let mut concede = Vec::new();
-    for (i, slot) in lobby.seats.iter().enumerate() {
-        let seat = Seat(i as u8);
-        let Some(gone) = away(slot) else { continue };
-        if !must_act.contains_key(&seat) {
-            continue;
-        }
-        if gone >= policy.concede_after {
-            concede.push(seat);
-        } else if gone >= policy.warn_after && !slot.idle_warned {
-            warn.push(seat);
-        }
-    }
-
-    for seat in warn {
-        lobby.seats[seat.index()].idle_warned = true;
-        let text = format!(
-            "{} ({seat}) has been away for {} s",
-            lobby.seat_name(seat),
-            policy.warn_after.as_secs()
-        );
-        info!(game = %lobby.game_id, "{text}");
-        let _ = shared.broadcast.send(Broadcast::Events {
-            events: Arc::new(vec![Event::Chat {
-                from: seat,
-                to: None,
-                text,
-            }]),
-            state_version: game.state_version(),
-        });
-    }
-
-    for seat in concede {
-        // The game may have ended on an earlier concession in this same pass.
-        let events = match game.apply(seat, &Action::Concede) {
-            Ok(events) => events,
-            Err(e) => {
-                debug!("could not concede for {seat}: {e}");
-                continue;
-            }
-        };
-        if let Some(w) = replay.as_mut() {
-            if let Err(e) = w.append(seat, &Action::Concede) {
-                warn!("replay log write failed: {e}");
-            }
-        }
-        info!(game = %lobby.game_id, "{} has been away for {:?}; conceding for {seat}", lobby.seat_name(seat), policy.concede_after);
-        shared.status.send_replace(status_of(game));
-        let _ = shared.broadcast.send(Broadcast::Events {
-            events: Arc::new(events),
-            state_version: game.state_version(),
-        });
-    }
-    false
 }
 
 fn random_name() -> String {
@@ -487,30 +430,6 @@ fn random_name() -> String {
     const ALPHABET: &[u8] = b"abcdefghjkmnpqrstuvwxyz23456789";
     let mut rng = rand::thread_rng();
     (0..8).map(|_| ALPHABET[rng.gen_range(0..ALPHABET.len())] as char).collect()
-}
-
-fn create_lobby(format_name: &str, seats: u8, seed: Option<u64>) -> Result<Lobby, DaemonError> {
-    let format = Format::builtin(format_name).ok_or_else(|| DaemonError::Setup(format!("unknown format {format_name:?}")))?;
-    if !format.allows_player_count(seats as usize) {
-        return Err(DaemonError::Setup(format!(
-            "{} needs {}–{} players, not {seats}",
-            format.name, format.players.min, format.players.max
-        )));
-    }
-    let unsupported = format.unsupported_rules();
-    if !unsupported.is_empty() {
-        let list: Vec<String> = unsupported.iter().map(ToString::to_string).collect();
-        return Err(DaemonError::Setup(list.join("; ")));
-    }
-    let seed = seed.unwrap_or_else(rand::random);
-    Ok(Lobby::new(format_name, format, seats, seed))
-}
-
-/// Per-connection state.
-struct Conn {
-    role: Option<Role>,
-    subscribed: Option<broadcast::Receiver<Broadcast>>,
-    peer: String,
 }
 
 /// The TLS handshake (when configured) and then the WebSocket one; after that
@@ -536,11 +455,7 @@ async fn serve_websocket(shared: Arc<Shared>, stream: tokio::net::TcpStream, tls
 async fn serve_connection(shared: Arc<Shared>, transport: protocol::BoxedTransport, peer: String) {
     let conn_io: protocol::MessageConnection<ClientEnvelope, ServerEnvelope> = protocol::MessageConnection::new(transport);
     let (mut reader, mut writer) = conn_io.split();
-    let mut conn = Conn {
-        role: None,
-        subscribed: None,
-        peer,
-    };
+    let mut conn = Conn::new(peer);
     debug!(peer = %conn.peer, "connection opened");
     loop {
         tokio::select! {
@@ -562,7 +477,7 @@ async fn serve_connection(shared: Arc<Shared>, transport: protocol::BoxedTranspo
             pushed = recv_push(&mut conn.subscribed), if conn.subscribed.is_some() => match pushed {
                 Ok(b) => {
                     let mut failed = false;
-                    for msg in filter_broadcast(b, conn.role) {
+                    for msg in game_task::filter_broadcast(b, conn.role) {
                         if writer.send(&msg.into()).await.is_err() {
                             failed = true;
                             break;
@@ -579,59 +494,12 @@ async fn serve_connection(shared: Arc<Shared>, transport: protocol::BoxedTranspo
             },
         }
     }
-    if let Some(Role::Seat(seat)) = conn.role {
-        let mut state = shared.state.lock().await;
-        if let Some(lobby) = state.lobby.as_mut() {
-            lobby.disconnect(seat);
-            let view = lobby.view();
-            let _ = shared.broadcast.send(Broadcast::Lobby(view));
-        }
-    }
+    game_task::detach(&conn).await;
     debug!(peer = %conn.peer, "connection closed");
 }
 
 async fn recv_push(rx: &mut Option<broadcast::Receiver<Broadcast>>) -> Result<Broadcast, broadcast::error::RecvError> {
     rx.as_mut().expect("guarded by select precondition").recv().await
-}
-
-/// The seat-filter boundary: everything pushed to a connection goes through here.
-fn filter_broadcast(b: Broadcast, role: Option<Role>) -> Vec<ServerMessage> {
-    let viewer = role.and_then(Role::seat);
-    match b {
-        Broadcast::Events { events, state_version } => events
-            .iter()
-            .filter_map(|e| e.view(viewer))
-            .map(|event| ServerMessage::Event { event, state_version })
-            .collect(),
-        Broadcast::Lobby(lobby) => vec![ServerMessage::Lobby { lobby }],
-    }
-}
-
-fn legal_actions_for(game: &Game, seat: Seat) -> Vec<LegalAction> {
-    game.legal_actions(seat)
-        .into_iter()
-        .enumerate()
-        .map(|(i, action)| LegalAction {
-            id: i as u32,
-            description: describe_action(game, &action),
-            action,
-        })
-        .collect()
-}
-
-fn status_of(game: &Game) -> Status {
-    Status {
-        state_version: game.state_version(),
-        must_act: game.must_act(),
-        game_over: game.is_over().is_some(),
-    }
-}
-
-fn view_for(game: &Game, role: Role) -> engine::GameView {
-    match role {
-        Role::Seat(s) => game.view(s),
-        Role::Spectator => game.view_spectator(),
-    }
 }
 
 async fn handle(shared: &Arc<Shared>, conn: &mut Conn, msg: ClientMessage) -> ServerMessage {
@@ -641,35 +509,71 @@ async fn handle(shared: &Arc<Shared>, conn: &mut Conn, msg: ClientMessage) -> Se
     }
 }
 
-fn require_role(conn: &Conn) -> Result<Role, ProtocolError> {
-    conn.role.ok_or_else(|| ProtocolError::bad_request("send hello first"))
-}
-
-fn require_seat(conn: &Conn) -> Result<Seat, ProtocolError> {
-    match require_role(conn)? {
-        Role::Seat(s) => Ok(s),
-        Role::Spectator => Err(ProtocolError::bad_request("spectators can't do that")),
-    }
-}
-
+/// Routing. Three messages are the process's business — `ping`, `create_game`
+/// and `join_game` need no game, and `hello` is what finds one; everything
+/// else belongs to the game this connection is bound to.
 async fn handle_inner(shared: &Arc<Shared>, conn: &mut Conn, msg: ClientMessage) -> Result<ServerMessage, ProtocolError> {
     match msg {
         ClientMessage::Ping => Ok(ServerMessage::Pong),
 
         ClientMessage::CreateGame { format, seats, seed } => {
-            let mut state = shared.state.lock().await;
-            if state.lobby.is_some() {
+            let mut registry = shared.registry.lock().await;
+            if !shared.serve && registry.len() > 0 {
                 return Err(ProtocolError::bad_request("this daemon already hosts a game"));
             }
-            let lobby = create_lobby(&format, seats, seed).map_err(|e| ProtocolError::bad_request(e.to_string()))?;
-            let reply = ServerMessage::GameCreated {
-                game_id: lobby.game_id.clone(),
-                seat_tokens: lobby.seat_tokens(),
-                spectator_token: lobby.spectator_token.clone(),
+            // In single-game mode the daemon's one status watch is this game's.
+            let status = if shared.serve {
+                watch::channel(Status::default()).0
+            } else {
+                shared.status.clone()
             };
-            info!(game = %lobby.game_id, seats, "game created");
-            state.lobby = Some(lobby);
-            Ok(reply)
+            let game = registry
+                .create(&shared.ctx, &format, seats, seed, status)
+                .map_err(|e| ProtocolError::bad_request(e.to_string()))?;
+            drop(registry);
+            let state = game.state.lock().await;
+            info!(game = %game.game_id, seats, "game created");
+            Ok(ServerMessage::GameCreated {
+                game_id: game.game_id.clone(),
+                seat_tokens: state.lobby.seat_tokens(),
+                spectator_token: state.lobby.spectator_token.clone(),
+            })
+        }
+
+        ClientMessage::JoinGame { code, name } => {
+            let game = {
+                let registry = shared.registry.lock().await;
+                registry
+                    .get(&GameId(code.to_uppercase()))
+                    .ok_or_else(|| ProtocolError::bad_request(format!("no game here with the code {code:?}")))?
+            };
+            let mut state = game.state.lock().await;
+            if state.lobby.started {
+                return Err(ProtocolError::bad_request(format!(
+                    "game {} has already started; ask for a spectator token instead",
+                    game.game_id
+                )));
+            }
+            let seat = state.lobby.claim_seat().ok_or_else(|| {
+                ProtocolError::bad_request(format!(
+                    "game {} is full: all {} seats are taken",
+                    game.game_id,
+                    state.lobby.seats.len()
+                ))
+            })?;
+            if let Some(n) = name {
+                state.lobby.seats[seat.index()].name = Some(n);
+            }
+            let token = state.lobby.seats[seat.index()].token.clone();
+            let view = state.lobby.view();
+            drop(state);
+            let _ = game.broadcast.send(Broadcast::Lobby(view));
+            info!(game = %game.game_id, "{seat} joined by code");
+            Ok(ServerMessage::Joined {
+                token,
+                seat,
+                game_id: game.game_id.clone(),
+            })
         }
 
         ClientMessage::Hello {
@@ -683,242 +587,34 @@ async fn handle_inner(shared: &Arc<Shared>, conn: &mut Conn, msg: ClientMessage)
                     format!("this daemon speaks protocol version {PROTOCOL_VERSION}, not {protocol_version}"),
                 ));
             }
-            let mut state = shared.state.lock().await;
-            let State { lobby, game, .. } = &mut *state;
-            let lobby = lobby
-                .as_mut()
-                .ok_or_else(|| ProtocolError::bad_request("no game has been created yet"))?;
-            let role = lobby
-                .resolve(&token)
-                .ok_or_else(|| ProtocolError::new(ErrorCode::BadToken, "that token does not belong to this game"))?;
-            if let Some(Role::Seat(old)) = conn.role {
-                lobby.disconnect(old);
-            }
-            if let Role::Seat(seat) = role {
-                lobby.connect(seat);
-                if let Some(n) = name {
-                    lobby.seats[seat.index()].name = Some(n);
-                }
-            }
-            conn.role = Some(role);
-            let _ = shared.broadcast.send(Broadcast::Lobby(lobby.view()));
-            Ok(ServerMessage::Welcome {
-                role,
-                game_id: lobby.game_id.clone(),
-                format: lobby.format.clone(),
-                protocol_version: PROTOCOL_VERSION,
-                lobby: lobby.view(),
-                state: game.as_ref().map(|g| view_for(g, role)),
-            })
-        }
-
-        ClientMessage::GetPool => {
-            require_seat(conn)?;
-            Err(ProtocolError::bad_request("this format has no limited pool"))
-        }
-
-        ClientMessage::SetDeck { decklist, commander } => {
-            let seat = require_seat(conn)?;
-            if commander.is_some() {
-                return Err(ProtocolError::bad_request("commanders are not supported yet"));
-            }
-            let mut state = shared.state.lock().await;
-            let lobby = state.lobby.as_mut().ok_or_else(|| ProtocolError::bad_request("no game"))?;
-            if lobby.started {
-                return Err(ProtocolError::bad_request("the game has already started"));
-            }
-            let deck = match cards::parse_decklist(&decklist, &shared.cards) {
-                Ok(d) => d,
-                Err(reason) => {
-                    return Ok(ServerMessage::DeckRejected {
-                        violations: vec![Violation::Unparsable { reason }],
-                    })
-                }
-            };
-            let legality = shared.legality.as_deref().map(|l| l as &dyn engine::LegalitySource);
-            let violations = lobby.format.check_deck_with(&deck, &shared.cards, legality);
-            if !violations.is_empty() {
-                return Ok(ServerMessage::DeckRejected { violations });
-            }
-            let slot = &mut lobby.seats[seat.index()];
-            slot.deck_names = deck.iter().map(|&c| shared.cards.get(c).name.clone()).collect();
-            slot.deck = Some(deck);
-            slot.ready = false;
-            let _ = shared.broadcast.send(Broadcast::Lobby(lobby.view()));
-            Ok(ServerMessage::DeckOk)
-        }
-
-        ClientMessage::Ready => {
-            let seat = require_seat(conn)?;
-            let mut state = shared.state.lock().await;
-            let lobby = state.lobby.as_mut().ok_or_else(|| ProtocolError::bad_request("no game"))?;
-            if lobby.started {
-                return Ok(ServerMessage::Ok);
-            }
-            if lobby.seats[seat.index()].deck.is_none() {
-                return Err(ProtocolError::new(ErrorCode::DeckRejected, "submit a deck before readying"));
-            }
-            lobby.seats[seat.index()].ready = true;
-            let _ = shared.broadcast.send(Broadcast::Lobby(lobby.view()));
-            if lobby.all_ready() {
-                start_game(shared, &mut state)?;
-            }
-            Ok(ServerMessage::Ok)
-        }
-
-        ClientMessage::GetState => {
-            let role = require_role(conn)?;
-            let state = shared.state.lock().await;
-            let game = state
-                .game
-                .as_ref()
-                .ok_or_else(|| ProtocolError::bad_request("the game has not started"))?;
-            Ok(ServerMessage::State {
-                state: view_for(game, role),
-            })
-        }
-
-        ClientMessage::GetLegalActions => {
-            let role = require_role(conn)?;
-            let state = shared.state.lock().await;
-            let game = state
-                .game
-                .as_ref()
-                .ok_or_else(|| ProtocolError::bad_request("the game has not started"))?;
-            let (actions, reason) = match role {
-                Role::Seat(s) => (legal_actions_for(game, s), game.must_act().get(&s).copied()),
-                Role::Spectator => (Vec::new(), None),
-            };
-            Ok(ServerMessage::LegalActions {
-                actions,
-                state_version: game.state_version(),
-                reason,
-            })
-        }
-
-        ClientMessage::Act {
-            action_id,
-            action,
-            state_version,
-        } => {
-            let seat = require_seat(conn)?;
-            let mut state = shared.state.lock().await;
-            let State { game, replay, .. } = &mut *state;
-            let game = game
-                .as_mut()
-                .ok_or_else(|| ProtocolError::bad_request("the game has not started"))?;
-            let current = game.state_version();
-            if state_version != current {
-                return Err(ProtocolError::new(
-                    ErrorCode::StaleStateVersion,
-                    format!("state is at version {current}, you sent {state_version}; fetch state and try again"),
+            let found = shared.registry.lock().await.resolve(&token);
+            let (game, role) = found.ok_or_else(|| {
+                ProtocolError::new(
+                    ErrorCode::BadToken,
+                    if shared.serve {
+                        "no live game here has that token"
+                    } else {
+                        "that token does not belong to this game"
+                    },
                 )
-                .with_version(current));
-            }
-            let action: Action = match (action_id, action) {
-                (Some(_), Some(_)) | (None, None) => return Err(ProtocolError::bad_request("send exactly one of action_id or action")),
-                (None, Some(a)) => a,
-                (Some(id), None) => game
-                    .legal_actions(seat)
-                    .into_iter()
-                    .nth(id as usize)
-                    .ok_or_else(|| ProtocolError::bad_request(format!("no legal action with id {id}")))?,
-            };
-            let events = game
-                .apply(seat, &action)
-                .map_err(|e| ProtocolError::from(e).with_version(current))?;
-            if let Some(w) = replay.as_mut() {
-                if let Err(e) = w.append(seat, &action) {
-                    warn!("replay log write failed: {e}");
+            })?;
+            if let Some(bound) = &conn.game {
+                if bound.game_id != game.game_id {
+                    return Err(ProtocolError::new(
+                        ErrorCode::BadToken,
+                        format!(
+                            "this connection is at game {}; that token is for game {}. Open a second connection.",
+                            bound.game_id, game.game_id
+                        ),
+                    ));
                 }
             }
-            let version = game.state_version();
-            shared.status.send_replace(status_of(game));
-            let _ = shared.broadcast.send(Broadcast::Events {
-                events: Arc::new(events.clone()),
-                state_version: version,
-            });
-            let legal_actions = if game.must_act().contains_key(&seat) {
-                legal_actions_for(game, seat)
-            } else {
-                Vec::new()
-            };
-            Ok(ServerMessage::Ack {
-                applied: action,
-                events: events.iter().filter_map(|e| e.view(Some(seat))).collect(),
-                state: game.view(seat),
-                legal_actions,
-            })
+            Ok(game_task::welcome(&game, conn, role, name).await)
         }
 
-        ClientMessage::Subscribe => {
-            require_role(conn)?;
-            conn.subscribed = Some(shared.broadcast.subscribe());
-            Ok(ServerMessage::Ok)
-        }
-
-        ClientMessage::Chat { text, to } => {
-            let seat = require_seat(conn)?;
-            let state = shared.state.lock().await;
-            let version = state.game.as_ref().map(|g| g.state_version()).unwrap_or(0);
-            let event = Event::Chat { from: seat, to, text };
-            let _ = shared.broadcast.send(Broadcast::Events {
-                events: Arc::new(vec![event]),
-                state_version: version,
-            });
-            Ok(ServerMessage::Ok)
+        other => {
+            let game = conn.game.clone().ok_or_else(|| ProtocolError::bad_request("send hello first"))?;
+            game_task::handle(&game, conn, other).await
         }
     }
-}
-
-/// All seats are ready: construct the game, open the replay log, and tell everyone.
-fn start_game(shared: &Arc<Shared>, state: &mut State) -> Result<(), ProtocolError> {
-    let lobby = state.lobby.as_mut().expect("lobby exists");
-    let players: Vec<PlayerSetup> = lobby
-        .seats
-        .iter()
-        .enumerate()
-        .map(|(i, s)| PlayerSetup {
-            name: lobby.seat_name(Seat(i as u8)),
-            deck: s.deck.clone().unwrap_or_default(),
-        })
-        .collect();
-    let config = GameConfig {
-        format: lobby.format.clone(),
-        players,
-        cards: shared.cards.clone(),
-        starting_player: None,
-    };
-    let game = Game::new(config, lobby.seed).map_err(|e| ProtocolError::internal(e.to_string()))?;
-
-    let header = ReplayHeader {
-        game_id: lobby.game_id.0.clone(),
-        format: lobby.format_name.clone(),
-        seed: lobby.seed,
-        players: lobby
-            .seats
-            .iter()
-            .enumerate()
-            .map(|(i, s)| ReplayPlayer {
-                name: lobby.seat_name(Seat(i as u8)),
-                deck: s.deck_names.clone(),
-            })
-            .collect(),
-    };
-    let path = shared.replay_dir.join(format!("{}.jsonl", lobby.game_id));
-    match ReplayWriter::create(&path, &header) {
-        Ok(w) => state.replay = Some(w),
-        Err(e) => warn!("could not open replay log {}: {e}", path.display()),
-    }
-
-    lobby.started = true;
-    info!(game = %lobby.game_id, seed = lobby.seed, "game started");
-    let _ = shared.broadcast.send(Broadcast::Lobby(lobby.view()));
-    let _ = shared.broadcast.send(Broadcast::Events {
-        events: Arc::new(game.log.clone()),
-        state_version: game.state_version(),
-    });
-    shared.status.send_replace(status_of(&game));
-    state.game = Some(game);
-    Ok(())
 }
