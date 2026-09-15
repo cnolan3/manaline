@@ -122,7 +122,7 @@ There is no separate "start the server" step, no game id to type, no token to co
 
 The individual `daemon` / `tui` / `mcp` subcommands remain for scripting, debugging, and networked play. They're documented as advanced; `play` is the front door.
 
-### 2.2 Networked play: servers, not relays *(post-initial-build)*
+### 2.2 Networked play: servers, not relays *(M8, built)*
 
 Two kinds of remote player need serving: power users who'll happily run their own server, and casual users who won't open a port on their home router. Both are served by the same design.
 
@@ -132,9 +132,9 @@ Two kinds of remote player need serving: power users who'll happily run their ow
 
 ```
 tier 0   manaline host / join         direct TCP between friends; Tailscale or ssh -L for NAT.
-                                      No infrastructure. Ships with M8.
+                                      No infrastructure. Built (M8).
 tier 1   manaline server               a lobby + many game daemons in one process. Power users
-                                      run it on a VPS or homelab. Ships with M8.
+                                      run it on a VPS or homelab. Built (M8).
 tier 2   the hosted instance           the same `manaline server`, run by the project, and the
                                       default `--server` for every client. Ships when tier 1 is
                                       stable and there's a reason to.
@@ -1147,7 +1147,7 @@ Forge-script → IR converter for supported primitives, dataset assembly and aug
 
 **After the initial build — the long-term goals, in the order they're likely to be pulled in:**
 
-**M8 — Networked play.** Tier 0: `host` / `join`, token auth on TCP, reconnect handling, idle-seat policy. Tier 1: `manaline server` — the lobby, many games per process, WebSocket-over-TLS listener, durable action log with replay-on-restart, `create` / `join <code>`. The protocol and daemon were built for this from M1, so this milestone is mostly the lobby, the WS transport, hardening, and a lot of testing over a bad connection. *Runnable: a friend joins your game from their house — directly, or through a server you run on a VPS.* Tier 2 (the hosted instance) is an ops decision, not a code milestone.
+**M8 — Networked play (built).** Tier 0: `host` / `join`, token auth on TCP, reconnect handling, idle-seat policy. Tier 1: `manaline server` — the lobby, many games per process, WebSocket-over-TLS listener, durable action log with replay-on-restart, `create` / `join <code>`. The protocol and daemon were built for this from M1, so this milestone was mostly the lobby, the WS transport, hardening, and a lot of testing over a bad connection. *Runnable: a friend joins your game from their house — directly, or through a server you run on a VPS.* Tier 2 (the hosted instance) is an ops decision, not a code milestone. Built with M9 in view: the lobby creates games from the format's seat count (up to six), tokens are issued per seat by the lobby, decks are validated per seat through the format's rules, and nothing in the transport or lobby knows how many players a game has.
 
 **M9 — Commander.** `FormatRule::Commander`, `CommanderDamage`, `ColorIdentity`; command zone, tax, zone-change choice; `deck check` for 100-singleton and identity; TUI pod layout with commander damage; the `Scryfall` card pool so banlists come from Scryfall's legality data. Then run `ingest set` on a few Commander staples and let the report tell you which engine primitives a real Commander pod needs. *Runnable: a four-seat pod, any mix of humans and agents.*
 
