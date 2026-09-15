@@ -1257,6 +1257,7 @@ mod tests {
             seat_tokens: (0..seats).map(|i| Token(format!("tok{i}"))).collect(),
             spectator_token: Some(Token("spec".into())),
             replay_path: None,
+            recovered: Vec::new(),
         }
     }
 

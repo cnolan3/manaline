@@ -59,6 +59,7 @@ async fn start_on(seed: u64, tcp: bool) -> Running {
             seats: 2,
             seed: Some(seed),
         }),
+        serve: false,
         cards: Arc::new(cards::core()),
         legality: None,
         idle: None,

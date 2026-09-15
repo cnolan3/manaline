@@ -14,6 +14,13 @@ pub struct SeatSlot {
     /// The decklist as submitted, for the replay header.
     pub deck_names: Vec<String>,
     pub ready: bool,
+    /// Whether this seat has been spoken for. A seat is claimed either by a
+    /// `join_game` that hands out its token, or by the first `hello` on the
+    /// token `create_game` returned — whichever comes first. `join_game` only
+    /// ever offers an unclaimed seat, so two people can never be sent the same
+    /// one; a seat claimed by someone who then never says `hello` stays taken
+    /// until the whole game is abandoned.
+    pub claimed: bool,
     pub connections: u32,
     /// When this seat last dropped to no connections at all, which is what the
     /// idle and abandonment clocks measure (§5, M8). A seat that has never
@@ -48,6 +55,7 @@ impl Lobby {
                     deck: None,
                     deck_names: Vec::new(),
                     ready: false,
+                    claimed: false,
                     connections: 0,
                     disconnected_since: Some(Instant::now()),
                     idle_warned: false,
@@ -73,6 +81,18 @@ impl Lobby {
         if slot.connections == 0 && slot.disconnected_since.is_none() {
             slot.disconnected_since = Some(Instant::now());
         }
+    }
+
+    /// The lowest-numbered seat nobody has been given yet, marked as taken.
+    /// `None` once every seat is spoken for.
+    pub fn claim_seat(&mut self) -> Option<Seat> {
+        let i = self.seats.iter().position(|s| !s.claimed)?;
+        self.seats[i].claimed = true;
+        Some(Seat(i as u8))
+    }
+
+    pub fn open_seats(&self) -> usize {
+        self.seats.iter().filter(|s| !s.claimed).count()
     }
 
     pub fn resolve(&self, token: &Token) -> Option<Role> {
@@ -113,13 +133,13 @@ impl Lobby {
     }
 }
 
-fn random_token() -> Token {
+pub(crate) fn random_token() -> Token {
     let s: String = thread_rng().sample_iter(&Alphanumeric).take(24).map(char::from).collect();
     Token(s)
 }
 
 /// Six characters from an alphabet without look-alikes (no 0/O, 1/I/L).
-fn random_game_code() -> String {
+pub(crate) fn random_game_code() -> String {
     const ALPHABET: &[u8] = b"ABCDEFGHJKMNPQRSTUVWXYZ23456789";
     let mut rng = thread_rng();
     (0..6).map(|_| ALPHABET[rng.gen_range(0..ALPHABET.len())] as char).collect()
