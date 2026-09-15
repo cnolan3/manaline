@@ -932,6 +932,19 @@ Concurrency is intentionally boring: a single `tokio::sync::Mutex<Game>` and a `
 
 **Remote seats** differ from local ones in exactly two ways: the token is the only authentication (no filesystem permissions to lean on), and disconnects are expected rather than fatal. Both are handled in the transport layer, not the game loop.
 
+### 5.1 Transports
+
+A connection is a stream of whole protocol messages (`protocol::framing::MessageTransport`). Two framings implement it — one JSON message per line over a byte stream, one JSON message per WebSocket text frame — and nothing above the transport can tell them apart. The daemon serves any combination at once; a client picks one by the endpoint it is given.
+
+| Endpoint | Daemon flag | Client form | For |
+|---|---|---|---|
+| Unix socket | `--socket <path>` (default) | `/run/manaline/<game>.sock`, `unix:<path>` | local clients on one machine |
+| TCP | `--tcp <host:port>` | `<host>:<port>`, `tcp:<host:port>` | direct play between friends; `ssh -L` or Tailscale across NAT |
+| WebSocket | `--ws <host:port>` | `ws://<host>:<port>` | behind a TLS-terminating reverse proxy |
+| WebSocket over TLS | `--ws <host:port> --tls-cert <pem> --tls-key <pem>` | `wss://<host>[:port]` | lobby servers on 443 (§2.2) |
+
+`--tls-cert` and `--tls-key` are a PEM certificate chain and its private key, and they apply to the `--ws` listener only. **The binary never obtains a certificate.** It reads the files it is pointed at; getting them is a deployment concern — a reverse proxy that terminates TLS, or Let's Encrypt tooling (`certbot`, `lego`, Caddy) writing into a directory the daemon can read. A client verifies a `wss://` server against the public root certificates; `MANALINE_TLS_CA=<pem>` (or `Client::connect_with`) points it at a private CA instead, which is how the test suite reaches a self-signed daemon.
+
 ---
 
 ## 6. TUI (`crates/tui`)

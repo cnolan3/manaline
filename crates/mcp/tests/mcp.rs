@@ -38,6 +38,8 @@ async fn start(seed: u64) -> Running {
         socket: Some(dir.join("game.sock")),
         no_socket: false,
         tcp: None,
+        ws: None,
+        tls: None,
         parent_pid: None,
         replay_dir: Some(dir.join("games")),
         create: Some(CreateGame {

@@ -5,7 +5,7 @@
 
 use crate::client::{BoxedRead, BoxedWrite, ClientError, Welcome};
 use crate::endpoint::Endpoint;
-use crate::framing::{FrameError, FramedReader, FramedWriter};
+use crate::framing::FrameError;
 use crate::messages::{ClientEnvelope, ClientMessage, LegalAction, ServerEnvelope, ServerMessage, Token, PROTOCOL_VERSION};
 use engine::{Action, EventView, GameView};
 use std::collections::HashMap;
@@ -37,16 +37,25 @@ pub async fn connect(endpoint: &Endpoint) -> Result<(AsyncClient, mpsc::Receiver
             let (r, w) = s.into_split();
             (Box::new(r), Box::new(w))
         }
+        Endpoint::Ws(url) => {
+            let transport = crate::ws::connect(url, &crate::ws::TlsOptions::from_env()).await?;
+            return Ok(spawn_transport(transport));
+        }
     };
     Ok(spawn(r, w))
 }
 
+/// Line framing over a byte stream; `spawn_transport` for anything else.
 pub fn spawn(reader: BoxedRead, writer: BoxedWrite) -> (AsyncClient, mpsc::Receiver<ServerMessage>) {
+    spawn_transport(crate::framing::LineTransport::boxed(reader, writer))
+}
+
+pub fn spawn_transport(transport: crate::framing::BoxedTransport) -> (AsyncClient, mpsc::Receiver<ServerMessage>) {
+    let (mut reader, mut writer) = crate::framing::MessageConnection::<ServerEnvelope, ClientEnvelope>::new(transport).split();
     let (out_tx, mut out_rx) = mpsc::channel::<ClientEnvelope>(64);
     let (push_tx, push_rx) = mpsc::channel::<ServerMessage>(256);
     let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
 
-    let mut writer: FramedWriter<BoxedWrite, ClientEnvelope> = FramedWriter::new(writer);
     tokio::spawn(async move {
         while let Some(msg) = out_rx.recv().await {
             if writer.send(&msg).await.is_err() {
@@ -55,7 +64,6 @@ pub fn spawn(reader: BoxedRead, writer: BoxedWrite) -> (AsyncClient, mpsc::Recei
         }
     });
 
-    let mut reader: FramedReader<BoxedRead, ServerEnvelope> = FramedReader::new(reader);
     let pending_r = pending.clone();
     tokio::spawn(async move {
         loop {

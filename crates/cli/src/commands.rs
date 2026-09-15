@@ -47,9 +47,19 @@ pub struct DaemonArgs {
     /// Also listen on TCP, e.g. `127.0.0.1:7454` or `0.0.0.0:0`.
     #[arg(long)]
     pub tcp: Option<String>,
-    /// Listen on TCP only (no Unix socket).
+    /// Listen on the network only (no Unix socket).
     #[arg(long)]
     pub no_socket: bool,
+    /// Also serve the WebSocket transport here, e.g. `0.0.0.0:443`.
+    #[arg(long)]
+    pub ws: Option<String>,
+    /// PEM certificate chain for the WebSocket listener; with --tls-key it
+    /// makes that listener `wss://`.
+    #[arg(long, requires = "tls_key")]
+    pub tls_cert: Option<PathBuf>,
+    /// PEM private key for --tls-cert.
+    #[arg(long, requires = "tls_cert")]
+    pub tls_key: Option<PathBuf>,
     /// Exit when this process is gone.
     #[arg(long)]
     pub parent_pid: Option<u32>,
@@ -73,10 +83,20 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
         (None, None) => None,
         _ => bail!("--format and --seats go together"),
     };
+    let tls = match (args.tls_cert, args.tls_key) {
+        (Some(cert), Some(key)) => Some(daemon::TlsConfig { cert, key }),
+        (None, None) => None,
+        _ => bail!("--tls-cert and --tls-key go together"),
+    };
+    if tls.is_some() && args.ws.is_none() {
+        bail!("--tls-cert and --tls-key only apply to the --ws listener");
+    }
     let config = DaemonConfig {
         socket: args.socket,
         no_socket: args.no_socket,
         tcp: args.tcp,
+        ws: args.ws,
+        tls,
         parent_pid: args.parent_pid,
         replay_dir: args.replay_dir,
         create,

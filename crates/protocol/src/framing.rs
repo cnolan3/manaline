@@ -1,5 +1,8 @@
-//! Newline-delimited JSON over any async byte stream. One message per line,
-//! identical over Unix sockets, TCP, and (later) WebSocket text frames.
+//! One JSON message in, one JSON message out, over whatever carries bytes.
+//!
+//! Two framings implement [`MessageTransport`]: newline-delimited JSON over an
+//! async byte stream (Unix sockets and TCP), and one WebSocket text frame per
+//! message (`crate::ws`). Nothing above this module can tell them apart.
 
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -19,6 +22,8 @@ pub enum FrameError {
     Json(#[from] serde_json::Error),
     #[error("message exceeds {MAX_LINE_BYTES} bytes")]
     TooLong,
+    #[error("websocket error: {0}")]
+    Ws(String),
 }
 
 /// Serialize one message as a single line.
@@ -148,6 +153,202 @@ where
 
     pub fn split(self) -> (FramedReader<R, In>, FramedWriter<W, Out>) {
         (self.reader, self.writer)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Transports: one message in, one message out, whatever the framing.
+// ---------------------------------------------------------------------------
+
+/// A bidirectional stream of whole protocol messages. `bytes` is one message's
+/// JSON with no framing of its own: the line framing adds the newline, the
+/// WebSocket framing puts it in a text frame.
+#[async_trait::async_trait]
+pub trait MessageTransport: Send {
+    async fn send(&mut self, bytes: Vec<u8>) -> Result<(), FrameError>;
+    async fn recv(&mut self) -> Result<Vec<u8>, FrameError>;
+    async fn close(&mut self) -> Result<(), FrameError>;
+    /// Halves that can be sent and received on at the same time. A server
+    /// connection needs this: it reads requests while pushing events.
+    fn split_boxed(self: Box<Self>) -> (BoxedSender, BoxedReceiver);
+}
+
+/// The sending half of a [`MessageTransport`].
+#[async_trait::async_trait]
+pub trait MessageSender: Send {
+    async fn send(&mut self, bytes: Vec<u8>) -> Result<(), FrameError>;
+    async fn close(&mut self) -> Result<(), FrameError>;
+}
+
+/// The receiving half of a [`MessageTransport`].
+#[async_trait::async_trait]
+pub trait MessageReceiver: Send {
+    async fn recv(&mut self) -> Result<Vec<u8>, FrameError>;
+}
+
+pub type BoxedTransport = Box<dyn MessageTransport>;
+pub type BoxedSender = Box<dyn MessageSender>;
+pub type BoxedReceiver = Box<dyn MessageReceiver>;
+
+/// Newline-delimited JSON over a byte stream: the Unix-socket and TCP framing.
+pub struct LineTransport<R, W> {
+    reader: FramedReader<R, ()>,
+    writer: FramedWriter<W, ()>,
+}
+
+impl<R, W> LineTransport<R, W>
+where
+    R: AsyncRead + Unpin + Send + 'static,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
+    pub fn new(reader: R, writer: W) -> LineTransport<R, W> {
+        LineTransport {
+            reader: FramedReader::new(reader),
+            writer: FramedWriter::new(writer),
+        }
+    }
+
+    /// The same thing, boxed, ready for [`MessageConnection::new`].
+    pub fn boxed(reader: R, writer: W) -> BoxedTransport {
+        Box::new(LineTransport::new(reader, writer))
+    }
+}
+
+#[async_trait::async_trait]
+impl<R, W> MessageTransport for LineTransport<R, W>
+where
+    R: AsyncRead + Unpin + Send + 'static,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
+    async fn send(&mut self, bytes: Vec<u8>) -> Result<(), FrameError> {
+        MessageSender::send(&mut self.writer, bytes).await
+    }
+
+    async fn recv(&mut self) -> Result<Vec<u8>, FrameError> {
+        self.reader.recv_raw().await
+    }
+
+    async fn close(&mut self) -> Result<(), FrameError> {
+        self.writer.shutdown().await
+    }
+
+    fn split_boxed(self: Box<Self>) -> (BoxedSender, BoxedReceiver) {
+        let LineTransport { reader, writer } = *self;
+        (Box::new(writer), Box::new(reader))
+    }
+}
+
+#[async_trait::async_trait]
+impl<W: AsyncWrite + Unpin + Send> MessageSender for FramedWriter<W, ()> {
+    async fn send(&mut self, bytes: Vec<u8>) -> Result<(), FrameError> {
+        let mut line = bytes;
+        line.push(b'\n');
+        self.send_raw(&line).await
+    }
+
+    async fn close(&mut self) -> Result<(), FrameError> {
+        self.shutdown().await
+    }
+}
+
+#[async_trait::async_trait]
+impl<R: AsyncRead + Unpin + Send> MessageReceiver for FramedReader<R, ()> {
+    async fn recv(&mut self) -> Result<Vec<u8>, FrameError> {
+        self.recv_raw().await
+    }
+}
+
+/// A typed connection over any transport: sends `Out`, receives `In`. The
+/// transport-agnostic twin of [`Connection`], which is tied to a byte stream.
+pub struct MessageConnection<In, Out> {
+    transport: BoxedTransport,
+    _t: PhantomData<fn() -> (In, Out)>,
+}
+
+impl<In, Out> MessageConnection<In, Out>
+where
+    In: DeserializeOwned,
+    Out: Serialize,
+{
+    pub fn new(transport: BoxedTransport) -> MessageConnection<In, Out> {
+        MessageConnection {
+            transport,
+            _t: PhantomData,
+        }
+    }
+
+    /// Line framing over a byte stream, for callers that already have halves.
+    pub fn over_stream<R, W>(reader: R, writer: W) -> MessageConnection<In, Out>
+    where
+        R: AsyncRead + Unpin + Send + 'static,
+        W: AsyncWrite + Unpin + Send + 'static,
+    {
+        MessageConnection::new(LineTransport::boxed(reader, writer))
+    }
+
+    pub async fn send(&mut self, msg: &Out) -> Result<(), FrameError> {
+        self.transport.send(serde_json::to_vec(msg)?).await
+    }
+
+    pub async fn recv(&mut self) -> Result<In, FrameError> {
+        decode(&self.transport.recv().await?)
+    }
+
+    pub async fn send_raw(&mut self, bytes: &[u8]) -> Result<(), FrameError> {
+        self.transport.send(bytes.to_vec()).await
+    }
+
+    /// The next message's bytes, undecoded. For tests that inspect exactly what
+    /// went over the wire.
+    pub async fn recv_raw(&mut self) -> Result<Vec<u8>, FrameError> {
+        self.transport.recv().await
+    }
+
+    pub async fn close(&mut self) -> Result<(), FrameError> {
+        self.transport.close().await
+    }
+
+    /// Halves that can be read and written concurrently.
+    pub fn split(self) -> (MessageReader<In>, MessageWriter<Out>) {
+        let (tx, rx) = self.transport.split_boxed();
+        (MessageReader { rx, _t: PhantomData }, MessageWriter { tx, _t: PhantomData })
+    }
+}
+
+/// The receiving half of a [`MessageConnection`].
+pub struct MessageReader<In> {
+    rx: BoxedReceiver,
+    _t: PhantomData<fn() -> In>,
+}
+
+impl<In: DeserializeOwned> MessageReader<In> {
+    pub async fn recv(&mut self) -> Result<In, FrameError> {
+        decode(&self.rx.recv().await?)
+    }
+
+    /// The next message's bytes, undecoded.
+    pub async fn recv_raw(&mut self) -> Result<Vec<u8>, FrameError> {
+        self.rx.recv().await
+    }
+}
+
+/// The sending half of a [`MessageConnection`].
+pub struct MessageWriter<Out> {
+    tx: BoxedSender,
+    _t: PhantomData<fn() -> Out>,
+}
+
+impl<Out: Serialize> MessageWriter<Out> {
+    pub async fn send(&mut self, msg: &Out) -> Result<(), FrameError> {
+        self.tx.send(serde_json::to_vec(msg)?).await
+    }
+
+    pub async fn send_raw(&mut self, bytes: &[u8]) -> Result<(), FrameError> {
+        self.tx.send(bytes.to_vec()).await
+    }
+
+    pub async fn shutdown(&mut self) -> Result<(), FrameError> {
+        self.tx.close().await
     }
 }
 

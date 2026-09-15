@@ -24,6 +24,13 @@ libc = "0.2"
 ratatui = "0.29"
 crossterm = { version = "0.28", features = ["event-stream"] }
 futures = "0.3"
+async-trait = "0.1"
+# The WebSocket/TLS transport (§2.2). `ring` is rustls's only crypto provider
+# in this tree, so nothing here needs a C toolchain to build.
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+rustls-pemfile = "2"
+rcgen = "0.14"
 
 [profile.release]
 debug = 1

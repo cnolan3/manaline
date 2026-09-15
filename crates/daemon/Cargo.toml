@@ -24,3 +24,5 @@ tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "sync", 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
 rand_chacha.workspace = true
+# Mints a throwaway certificate so the `wss://` test has one to trust.
+rcgen.workspace = true

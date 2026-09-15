@@ -2,10 +2,11 @@
 //! version and seat checks, reconnects, the replay log, and the §10 guard
 //! that inspects the raw bytes a seat receives.
 
-use daemon::{CreateGame, Daemon, DaemonConfig, DaemonHandle};
+use daemon::{CreateGame, Daemon, DaemonConfig, DaemonHandle, TlsConfig};
 use engine::{Action, Outcome, Seat};
+use protocol::framing::LineTransport;
 use protocol::messages::{ClientEnvelope, ServerEnvelope};
-use protocol::{Client, ClientError, ClientMessage, Endpoint, ErrorCode, FramedReader, FramedWriter, ServerMessage, Token};
+use protocol::{Client, ClientError, ClientMessage, Endpoint, ErrorCode, MessageConnection, ServerMessage, TlsOptions, Token};
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
@@ -22,21 +23,38 @@ fn scratch() -> PathBuf {
     dir
 }
 
+/// Which listener a test drives the daemon through. The messages are the same
+/// over all four; only the framing and the handshake differ (§2.2).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum Transport {
+    Unix,
+    Tcp,
+    Ws,
+    Wss,
+}
+
 struct Running {
     handle: DaemonHandle,
     endpoint: Endpoint,
+    tls: TlsOptions,
     tokens: Vec<Token>,
     spectator: Token,
     replay_path: PathBuf,
     task: tokio::task::JoinHandle<()>,
 }
 
-async fn start(seats: u8, seed: u64, tcp: bool) -> Running {
+async fn start(seats: u8, seed: u64, transport: Transport) -> Running {
     let dir = scratch();
+    let sockets = transport == Transport::Unix;
+    // `wss://` needs a certificate the client will accept: a throwaway CA
+    // minted here, and an end-entity certificate for 127.0.0.1 under it.
+    let tls = (transport == Transport::Wss).then(|| self_signed(&dir));
     let config = DaemonConfig {
-        socket: (!tcp).then(|| dir.join("game.sock")),
-        no_socket: tcp,
-        tcp: tcp.then(|| "127.0.0.1:0".to_string()),
+        socket: sockets.then(|| dir.join("game.sock")),
+        no_socket: !sockets,
+        tcp: (transport == Transport::Tcp).then(|| "127.0.0.1:0".to_string()),
+        ws: matches!(transport, Transport::Ws | Transport::Wss).then(|| "127.0.0.1:0".to_string()),
+        tls: tls.as_ref().map(|t| t.server.clone()),
         parent_pid: None,
         replay_dir: Some(dir.join("games")),
         create: Some(CreateGame {
@@ -50,15 +68,18 @@ async fn start(seats: u8, seed: u64, tcp: bool) -> Running {
     let daemon = Daemon::bind(config).await.unwrap();
     let info = daemon.info().clone();
     let handle = daemon.handle();
-    let endpoint = match (info.socket, info.tcp) {
-        (Some(p), _) => Endpoint::Unix(p),
-        (None, Some(a)) => Endpoint::Tcp(a.to_string()),
+    let endpoint = match (info.socket, info.tcp, info.ws) {
+        (Some(p), _, _) => Endpoint::Unix(p),
+        (None, Some(a), _) => Endpoint::Tcp(a.to_string()),
+        (None, None, Some(url)) => Endpoint::Ws(url),
         _ => unreachable!(),
     };
+    assert_eq!(endpoint.is_tls(), transport == Transport::Wss);
     let task = tokio::spawn(async move { daemon.run().await.unwrap() });
     Running {
         handle,
         endpoint,
+        tls: tls.map(|t| TlsOptions::with_ca(t.ca)).unwrap_or_default(),
         tokens: info.seat_tokens,
         spectator: info.spectator_token.unwrap(),
         replay_path: info.replay_path.unwrap(),
@@ -66,8 +87,49 @@ async fn start(seats: u8, seed: u64, tcp: bool) -> Running {
     }
 }
 
+struct TestTls {
+    server: TlsConfig,
+    /// The CA PEM a client must trust to reach this daemon.
+    ca: PathBuf,
+}
+
+/// A private CA and a server certificate for 127.0.0.1 signed by it, written
+/// as PEM under `dir`. Nothing outside this test trusts either.
+fn self_signed(dir: &std::path::Path) -> TestTls {
+    use rcgen::{BasicConstraints, CertificateParams, CertifiedIssuer, DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose};
+
+    let mut ca_params = CertificateParams::new(Vec::new()).unwrap();
+    ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+    ca_params.distinguished_name.push(DnType::CommonName, "manaline test CA");
+    let ca = CertifiedIssuer::self_signed(ca_params, KeyPair::generate().unwrap()).unwrap();
+
+    let mut params = CertificateParams::new(vec!["127.0.0.1".to_string(), "localhost".to_string()]).unwrap();
+    params.distinguished_name.push(DnType::CommonName, "manaline test daemon");
+    params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+    params.use_authority_key_identifier_extension = true;
+    let key = KeyPair::generate().unwrap();
+    let cert = params.signed_by(&key, &ca).unwrap();
+
+    let (cert_path, key_path, ca_path) = (dir.join("cert.pem"), dir.join("key.pem"), dir.join("ca.pem"));
+    std::fs::write(&cert_path, cert.pem()).unwrap();
+    std::fs::write(&key_path, key.serialize_pem()).unwrap();
+    std::fs::write(&ca_path, ca.pem()).unwrap();
+    TestTls {
+        server: TlsConfig {
+            cert: cert_path,
+            key: key_path,
+        },
+        ca: ca_path,
+    }
+}
+
+async fn connect(r: &Running) -> Client {
+    Client::connect_with(&r.endpoint, &r.tls).await.unwrap()
+}
+
 async fn seat_client(r: &Running, seat: usize, name: &str, deck: &str) -> Client {
-    let mut c = Client::connect(&r.endpoint).await.unwrap();
+    let mut c = connect(r).await;
     let w = c.hello(&r.tokens[seat], Some(name)).await.unwrap();
     assert_eq!(w.role, protocol::Role::Seat(Seat(seat as u8)));
     c.set_deck(&cards::deck_text(deck).unwrap()).await.unwrap().unwrap();
@@ -106,10 +168,10 @@ async fn bot_loop(mut c: Client, seed: u64) -> Client {
 
 #[tokio::test]
 async fn bots_play_a_whole_game_over_a_unix_socket_and_the_log_replays_it() {
-    let r = start(2, 11, false).await;
+    let r = start(2, 11, Transport::Unix).await;
     let mut a = seat_client(&r, 0, "Ann", "green").await;
     let b = seat_client(&r, 1, "Bob", "red").await;
-    let mut spec = Client::connect(&r.endpoint).await.unwrap();
+    let mut spec = connect(&r).await;
     let w = spec.hello(&r.spectator, None).await.unwrap();
     assert_eq!(w.role, protocol::Role::Spectator);
     assert!(w.state.is_none(), "not started yet");
@@ -160,7 +222,24 @@ fn dummy_client() -> Client {
 
 #[tokio::test]
 async fn bots_play_over_tcp_at_four_seats() {
-    let r = start(4, 5, true).await;
+    four_seats_play_out(Transport::Tcp, 5).await;
+}
+
+/// The same four-seat game over a plain WebSocket: one text frame per message
+/// instead of one line, and every handler above the transport unchanged.
+#[tokio::test]
+async fn bots_play_over_a_websocket_at_four_seats() {
+    four_seats_play_out(Transport::Ws, 5).await;
+}
+
+/// And over `wss://`, against a certificate minted for the test.
+#[tokio::test]
+async fn bots_play_over_a_tls_websocket_at_four_seats() {
+    four_seats_play_out(Transport::Wss, 5).await;
+}
+
+async fn four_seats_play_out(transport: Transport, seed: u64) {
+    let r = start(4, seed, transport).await;
     let decks = ["white", "blue", "black", "red"];
     let mut clients = Vec::new();
     for (i, d) in decks.iter().enumerate() {
@@ -183,10 +262,10 @@ async fn bots_play_over_tcp_at_four_seats() {
 
 #[tokio::test]
 async fn versions_tokens_and_turn_order_are_enforced() {
-    let r = start(2, 3, false).await;
+    let r = start(2, 3, Transport::Unix).await;
 
     // Wrong token, wrong version.
-    let mut bad = Client::connect(&r.endpoint).await.unwrap();
+    let mut bad = connect(&r).await;
     let err = bad.hello(&Token("nope".into()), None).await.unwrap_err();
     assert!(matches!(err, ClientError::Protocol(e) if e.code == ErrorCode::BadToken));
     let err = bad
@@ -205,7 +284,7 @@ async fn versions_tokens_and_turn_order_are_enforced() {
     let mut a = seat_client(&r, 0, "A", "green").await;
     let mut b = seat_client(&r, 1, "B", "red").await;
     // Ready without a deck is refused; a short deck is rejected with reasons.
-    let mut c = Client::connect(&r.endpoint).await.unwrap();
+    let mut c = connect(&r).await;
     c.hello(&r.spectator, None).await.unwrap();
     let err = c.ready().await.unwrap_err();
     assert!(matches!(err, ClientError::Protocol(e) if e.code == ErrorCode::BadRequest));
@@ -255,7 +334,7 @@ async fn versions_tokens_and_turn_order_are_enforced() {
 
 #[tokio::test]
 async fn a_seat_that_disconnects_keeps_its_seat_and_resumes() {
-    let r = start(2, 8, false).await;
+    let r = start(2, 8, Transport::Unix).await;
     let mut a = seat_client(&r, 0, "A", "green").await;
     let mut b = seat_client(&r, 1, "B", "red").await;
     a.ready().await.unwrap();
@@ -274,7 +353,7 @@ async fn a_seat_that_disconnects_keeps_its_seat_and_resumes() {
     assert!(lobby.started);
 
     // Reconnect with the same token: welcomed straight into the running game.
-    let mut a2 = Client::connect(&r.endpoint).await.unwrap();
+    let mut a2 = connect(&r).await;
     let w = a2.hello(&r.tokens[0], None).await.unwrap();
     assert_eq!(w.role, protocol::Role::Seat(Seat(0)));
     let state = w.state.expect("game in progress");
@@ -293,7 +372,18 @@ async fn a_seat_that_disconnects_keeps_its_seat_and_resumes() {
 /// no other seat's hand contents, and no library contents.
 #[tokio::test]
 async fn the_wire_never_carries_another_seats_hidden_information() {
-    let r = start(2, 21, false).await;
+    hidden_information_never_reaches_seat_one(Transport::Unix).await;
+}
+
+/// The same guard against the bytes inside WebSocket frames: a different
+/// framing must not become a different filter.
+#[tokio::test]
+async fn the_websocket_wire_never_carries_another_seats_hidden_information() {
+    hidden_information_never_reaches_seat_one(Transport::Ws).await;
+}
+
+async fn hidden_information_never_reaches_seat_one(transport: Transport) {
+    let r = start(2, 21, transport).await;
     let a = seat_client(&r, 0, "A", "green").await;
     let a_ready = async move {
         let mut a = a;
@@ -301,17 +391,9 @@ async fn the_wire_never_carries_another_seats_hidden_information() {
         a
     };
 
-    // Seat 1 speaks the protocol by hand so every raw line can be checked.
-    let stream = tokio::net::UnixStream::connect(match &r.endpoint {
-        Endpoint::Unix(p) => p.clone(),
-        _ => unreachable!(),
-    })
-    .await
-    .unwrap();
-    let (rd, wr) = stream.into_split();
+    // Seat 1 speaks the protocol by hand so every raw message can be checked.
     let mut raw = RawSeat {
-        reader: FramedReader::new(rd),
-        writer: FramedWriter::new(wr),
+        conn: raw_connection(&r).await,
         next: 1,
         me: Seat(1),
         lines: 0,
@@ -365,14 +447,29 @@ async fn the_wire_never_carries_another_seats_hidden_information() {
         raw.next_push().await;
     }
     a_task.await.unwrap();
-    assert!(raw.lines > 200, "checked {} lines", raw.lines);
+    assert!(raw.lines > 200, "checked {} messages", raw.lines);
     r.handle.shutdown();
     r.task.await.unwrap();
 }
 
+/// An undecoded connection to the daemon over whichever transport `r` serves,
+/// so the test sees the exact bytes of every message.
+async fn raw_connection(r: &Running) -> MessageConnection<ServerEnvelope, ClientEnvelope> {
+    match &r.endpoint {
+        Endpoint::Unix(path) => {
+            let (rd, wr) = tokio::net::UnixStream::connect(path).await.unwrap().into_split();
+            MessageConnection::new(LineTransport::boxed(rd, wr))
+        }
+        Endpoint::Tcp(addr) => {
+            let (rd, wr) = tokio::net::TcpStream::connect(addr).await.unwrap().into_split();
+            MessageConnection::new(LineTransport::boxed(rd, wr))
+        }
+        Endpoint::Ws(url) => MessageConnection::new(protocol::ws::connect(url, &r.tls).await.unwrap()),
+    }
+}
+
 struct RawSeat {
-    reader: FramedReader<tokio::net::unix::OwnedReadHalf, ServerEnvelope>,
-    writer: FramedWriter<tokio::net::unix::OwnedWriteHalf, ClientEnvelope>,
+    conn: MessageConnection<ServerEnvelope, ClientEnvelope>,
     next: u64,
     me: Seat,
     lines: usize,
@@ -383,7 +480,7 @@ impl RawSeat {
     async fn request(&mut self, msg: ClientMessage) -> ServerMessage {
         let req = self.next;
         self.next += 1;
-        self.writer.send(&ClientEnvelope { req: Some(req), msg }).await.unwrap();
+        self.conn.send(&ClientEnvelope { req: Some(req), msg }).await.unwrap();
         loop {
             let env = self.recv_checked().await;
             if env.req == Some(req) {
@@ -408,7 +505,8 @@ impl RawSeat {
     }
 
     async fn recv_checked(&mut self) -> ServerEnvelope {
-        let bytes = self.reader.recv_raw().await.unwrap();
+        let bytes = self.conn.recv_raw().await.unwrap();
+        assert!(!bytes.contains(&b'\n'), "one message, one frame or line");
         self.lines += 1;
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         check_value(&value, self.me, &String::from_utf8_lossy(&bytes));

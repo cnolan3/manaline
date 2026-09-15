@@ -3,10 +3,11 @@
 //! queues pushed messages for the caller to drain.
 
 use crate::endpoint::Endpoint;
-use crate::framing::{Connection, FrameError};
+use crate::framing::{FrameError, MessageConnection};
 use crate::messages::{
     ClientEnvelope, ClientMessage, LegalAction, LobbyView, ProtocolError, Role, ServerEnvelope, ServerMessage, Token, PROTOCOL_VERSION,
 };
+use crate::ws::TlsOptions;
 use engine::{Action, EventView, Format, GameView};
 use std::collections::VecDeque;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -27,7 +28,7 @@ pub type BoxedRead = Box<dyn AsyncRead + Unpin + Send>;
 pub type BoxedWrite = Box<dyn AsyncWrite + Unpin + Send>;
 
 pub struct Client {
-    conn: Connection<BoxedRead, BoxedWrite, ServerEnvelope, ClientEnvelope>,
+    conn: MessageConnection<ServerEnvelope, ClientEnvelope>,
     next_req: u64,
     pushed: VecDeque<ServerMessage>,
 }
@@ -43,7 +44,14 @@ pub struct Welcome {
 }
 
 impl Client {
+    /// Dial an endpoint, with the default TLS settings (the public roots, plus
+    /// `MANALINE_TLS_CA` if the user set it).
     pub async fn connect(endpoint: &Endpoint) -> Result<Client, ClientError> {
+        Client::connect_with(endpoint, &TlsOptions::from_env()).await
+    }
+
+    /// Dial an endpoint, choosing what a `wss://` server is verified against.
+    pub async fn connect_with(endpoint: &Endpoint, tls: &TlsOptions) -> Result<Client, ClientError> {
         match endpoint {
             Endpoint::Unix(path) => {
                 let stream = tokio::net::UnixStream::connect(path).await.map_err(ClientError::Connect)?;
@@ -56,12 +64,19 @@ impl Client {
                 let (r, w) = stream.into_split();
                 Ok(Client::from_parts(Box::new(r), Box::new(w)))
             }
+            Endpoint::Ws(url) => Ok(Client::from_transport(crate::ws::connect(url, tls).await?)),
         }
     }
 
+    /// A client over an already-framed byte stream (line framing).
     pub fn from_parts(reader: BoxedRead, writer: BoxedWrite) -> Client {
+        Client::from_transport(crate::framing::LineTransport::boxed(reader, writer))
+    }
+
+    /// A client over any transport.
+    pub fn from_transport(transport: crate::framing::BoxedTransport) -> Client {
         Client {
-            conn: Connection::new(reader, writer),
+            conn: MessageConnection::new(transport),
             next_req: 1,
             pushed: VecDeque::new(),
         }
@@ -256,6 +271,7 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::framing::Connection;
 
     #[tokio::test]
     async fn request_reply_with_interleaved_pushes() {

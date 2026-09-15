@@ -15,6 +15,8 @@ async fn joins_and_plays_the_opening_through_the_protocol() {
         socket: Some(dir.join("game.sock")),
         no_socket: false,
         tcp: None,
+        ws: None,
+        tls: None,
         parent_pid: None,
         replay_dir: Some(dir.join("games")),
         create: Some(CreateGame {

@@ -8,14 +8,10 @@ use crate::replay::{ReplayHeader, ReplayPlayer, ReplayWriter};
 use engine::text::describe_action;
 use engine::{ActReason, Action, CardDb, Event, Format, Game, GameConfig, PlayerSetup, Seat, Violation};
 use protocol::messages::{ClientEnvelope, ServerEnvelope};
-use protocol::{
-    ClientMessage, ErrorCode, FramedReader, FramedWriter, GameId, LegalAction, LobbyView, ProtocolError, Role, ServerMessage, Token,
-    PROTOCOL_VERSION,
-};
+use protocol::{ClientMessage, ErrorCode, GameId, LegalAction, LobbyView, ProtocolError, Role, ServerMessage, Token, PROTOCOL_VERSION};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, UnixListener};
 use tokio::sync::{broadcast, watch, Mutex};
 use tracing::{debug, info, warn};
@@ -36,6 +32,12 @@ pub struct DaemonConfig {
     pub no_socket: bool,
     /// A `host:port` to listen on; `127.0.0.1:0` picks a free port.
     pub tcp: Option<String>,
+    /// A `host:port` to serve the WebSocket transport on (§2.2). With `tls`
+    /// set it is `wss://`, without it plain `ws://`.
+    pub ws: Option<String>,
+    /// The certificate and key the WebSocket listener presents. Getting them
+    /// is a deployment concern — a reverse proxy, or Let's Encrypt tooling.
+    pub tls: Option<TlsConfig>,
     pub parent_pid: Option<u32>,
     /// Where replay logs go; defaults to the platform data directory.
     pub replay_dir: Option<PathBuf>,
@@ -45,13 +47,20 @@ pub struct DaemonConfig {
     pub legality: Option<Arc<dyn engine::LegalitySource + Send + Sync>>,
 }
 
+/// A PEM certificate chain and its private key, for the `wss://` listener.
+#[derive(Clone, Debug)]
+pub struct TlsConfig {
+    pub cert: PathBuf,
+    pub key: PathBuf,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum DaemonError {
     #[error("i/o error: {0}")]
     Io(#[from] std::io::Error),
     #[error("{0}")]
     Setup(String),
-    #[error("no listener configured: pass --socket or --tcp")]
+    #[error("no listener configured: pass --socket, --tcp or --ws")]
     NoListener,
 }
 
@@ -61,6 +70,9 @@ pub enum DaemonError {
 pub struct StartupInfo {
     pub socket: Option<PathBuf>,
     pub tcp: Option<std::net::SocketAddr>,
+    /// The URL clients should use for the WebSocket transport, if it is on.
+    #[serde(default)]
+    pub ws: Option<String>,
     pub game_id: Option<GameId>,
     pub seat_tokens: Vec<Token>,
     pub spectator_token: Option<Token>,
@@ -130,6 +142,8 @@ pub struct Daemon {
     shared: Arc<Shared>,
     unix: Option<UnixListener>,
     tcp: Option<TcpListener>,
+    ws: Option<TcpListener>,
+    tls: Option<protocol::ws::TlsAcceptor>,
     info: StartupInfo,
     parent_pid: Option<u32>,
 }
@@ -137,7 +151,7 @@ pub struct Daemon {
 impl Daemon {
     /// Bind the listeners and, if asked, create the game. Nothing is served until `run`.
     pub async fn bind(config: DaemonConfig) -> Result<Daemon, DaemonError> {
-        if config.no_socket && config.tcp.is_none() {
+        if config.no_socket && config.tcp.is_none() && config.ws.is_none() {
             return Err(DaemonError::NoListener);
         }
         let lobby = match config.create {
@@ -177,6 +191,7 @@ impl Daemon {
         let mut info = StartupInfo {
             socket: None,
             tcp: None,
+            ws: None,
             game_id: None,
             seat_tokens: Vec::new(),
             spectator_token: None,
@@ -205,6 +220,19 @@ impl Daemon {
             }
             None => None,
         };
+        let tls = match &config.tls {
+            Some(t) => Some(protocol::ws::tls_acceptor(&t.cert, &t.key)?),
+            None => None,
+        };
+        let ws = match &config.ws {
+            Some(addr) => {
+                let listener = TcpListener::bind(addr).await?;
+                let scheme = if tls.is_some() { "wss" } else { "ws" };
+                info.ws = Some(format!("{scheme}://{}", listener.local_addr()?));
+                Some(listener)
+            }
+            None => None,
+        };
 
         if let Some(lobby) = lobby {
             info.game_id = Some(lobby.game_id.clone());
@@ -218,6 +246,8 @@ impl Daemon {
             shared,
             unix,
             tcp,
+            ws,
+            tls,
             info,
             parent_pid: config.parent_pid,
         })
@@ -239,6 +269,8 @@ impl Daemon {
             shared,
             unix,
             tcp,
+            ws,
+            tls,
             info,
             parent_pid,
         } = self;
@@ -246,14 +278,15 @@ impl Daemon {
         if let Some(pid) = parent_pid {
             tokio::spawn(watch_parent(pid, shared.clone()));
         }
-        info!(socket = ?info.socket, tcp = ?info.tcp, "daemon listening");
+        info!(socket = ?info.socket, tcp = ?info.tcp, ws = ?info.ws, "daemon listening");
         loop {
             tokio::select! {
                 _ = shutdown.changed() => break,
                 accepted = accept_unix(&unix), if unix.is_some() => match accepted {
                     Ok(stream) => {
                         let (r, w) = stream.into_split();
-                        tokio::spawn(serve_connection(shared.clone(), r, w, "unix".to_string()));
+                        let transport = protocol::framing::LineTransport::boxed(r, w);
+                        tokio::spawn(serve_connection(shared.clone(), transport, "unix".to_string()));
                     }
                     Err(e) => warn!("unix accept failed: {e}"),
                 },
@@ -261,9 +294,17 @@ impl Daemon {
                     Ok((stream, peer)) => {
                         stream.set_nodelay(true).ok();
                         let (r, w) = stream.into_split();
-                        tokio::spawn(serve_connection(shared.clone(), r, w, peer.to_string()));
+                        let transport = protocol::framing::LineTransport::boxed(r, w);
+                        tokio::spawn(serve_connection(shared.clone(), transport, peer.to_string()));
                     }
                     Err(e) => warn!("tcp accept failed: {e}"),
+                },
+                accepted = accept_tcp(&ws), if ws.is_some() => match accepted {
+                    Ok((stream, peer)) => {
+                        stream.set_nodelay(true).ok();
+                        tokio::spawn(serve_websocket(shared.clone(), stream, tls.clone(), peer.to_string()));
+                    }
+                    Err(e) => warn!("websocket accept failed: {e}"),
                 },
             }
         }
@@ -327,13 +368,29 @@ struct Conn {
     peer: String,
 }
 
-async fn serve_connection<R, W>(shared: Arc<Shared>, reader: R, writer: W, peer: String)
-where
-    R: AsyncRead + Unpin + Send + 'static,
-    W: AsyncWrite + Unpin + Send + 'static,
-{
-    let mut reader: FramedReader<R, ClientEnvelope> = FramedReader::new(reader);
-    let mut writer: FramedWriter<W, ServerEnvelope> = FramedWriter::new(writer);
+/// The TLS handshake (when configured) and then the WebSocket one; after that
+/// the connection is a message stream like any other and the handlers below
+/// cannot tell which transport carried it.
+async fn serve_websocket(shared: Arc<Shared>, stream: tokio::net::TcpStream, tls: Option<protocol::ws::TlsAcceptor>, peer: String) {
+    let transport = match tls {
+        Some(acceptor) => match acceptor.accept(stream).await {
+            Ok(tls_stream) => protocol::ws::accept(tls_stream).await,
+            Err(e) => {
+                debug!(%peer, "tls handshake failed: {e}");
+                return;
+            }
+        },
+        None => protocol::ws::accept(stream).await,
+    };
+    match transport {
+        Ok(transport) => serve_connection(shared, transport, peer).await,
+        Err(e) => debug!(%peer, "websocket handshake failed: {e}"),
+    }
+}
+
+async fn serve_connection(shared: Arc<Shared>, transport: protocol::BoxedTransport, peer: String) {
+    let conn_io: protocol::MessageConnection<ClientEnvelope, ServerEnvelope> = protocol::MessageConnection::new(transport);
+    let (mut reader, mut writer) = conn_io.split();
     let mut conn = Conn {
         role: None,
         subscribed: None,

@@ -10,10 +10,13 @@ use std::str::FromStr;
 pub enum Endpoint {
     Unix(PathBuf),
     Tcp(String),
+    /// A full `ws://` or `wss://` URL, kept verbatim so it round-trips.
+    Ws(String),
 }
 
 impl Endpoint {
-    /// `unix:<path>`, `tcp:<host:port>`, a bare path (contains a `/`), or a bare `host:port`.
+    /// `unix:<path>`, `tcp:<host:port>`, a `ws://`/`wss://` URL, a bare path
+    /// (contains a `/`), or a bare `host:port`.
     pub fn parse(s: &str) -> Result<Endpoint, String> {
         let s = s.trim();
         if let Some(p) = s.strip_prefix("unix:") {
@@ -22,13 +25,21 @@ impl Endpoint {
         if let Some(a) = s.strip_prefix("tcp:") {
             return Ok(Endpoint::Tcp(a.to_string()));
         }
+        if s.starts_with("ws://") || s.starts_with("wss://") {
+            return Ok(Endpoint::Ws(s.to_string()));
+        }
         if s.contains('/') || s.ends_with(".sock") {
             return Ok(Endpoint::Unix(PathBuf::from(s)));
         }
         if s.rsplit_once(':').map(|(_, port)| port.parse::<u16>().is_ok()).unwrap_or(false) {
             return Ok(Endpoint::Tcp(s.to_string()));
         }
-        Err(format!("{s:?} is neither a socket path nor host:port"))
+        Err(format!("{s:?} is not a socket path, a host:port, or a ws:// URL"))
+    }
+
+    /// Whether reaching this endpoint means a TLS handshake.
+    pub fn is_tls(&self) -> bool {
+        matches!(self, Endpoint::Ws(url) if url.starts_with("wss://"))
     }
 }
 
@@ -44,6 +55,7 @@ impl fmt::Display for Endpoint {
         match self {
             Endpoint::Unix(p) => write!(f, "unix:{}", p.display()),
             Endpoint::Tcp(a) => write!(f, "tcp:{a}"),
+            Endpoint::Ws(url) => write!(f, "{url}"),
         }
     }
 }
@@ -481,6 +493,28 @@ mod tests {
         );
         assert!(Endpoint::parse("nonsense").is_err());
         assert_eq!(Endpoint::parse("127.0.0.1:7454").unwrap().to_string(), "tcp:127.0.0.1:7454");
+    }
+
+    #[test]
+    fn websocket_urls_round_trip() {
+        for url in [
+            "ws://127.0.0.1:7454",
+            "ws://play.example/game",
+            "wss://play.example",
+            "wss://play.example:443/game",
+        ] {
+            let parsed = Endpoint::parse(url).unwrap();
+            assert_eq!(parsed, Endpoint::Ws(url.to_string()));
+            assert_eq!(parsed.to_string(), url, "Display round-trips");
+            assert_eq!(Endpoint::parse(&parsed.to_string()).unwrap(), parsed);
+        }
+        assert!(Endpoint::parse("wss://play.example").unwrap().is_tls());
+        assert!(!Endpoint::parse("ws://play.example").unwrap().is_tls());
+        // A URL wins over the "contains a slash means a path" rule.
+        assert!(matches!(Endpoint::parse("ws://x/y").unwrap(), Endpoint::Ws(_)));
+        // And the older forms still parse as they did.
+        assert_eq!(Endpoint::parse("/tmp/x.sock").unwrap(), Endpoint::Unix("/tmp/x.sock".into()));
+        assert_eq!(Endpoint::parse("tcp:h:1").unwrap(), Endpoint::Tcp("h:1".into()));
     }
 
     #[test]

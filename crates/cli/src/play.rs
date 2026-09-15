@@ -988,6 +988,7 @@ mod tests {
         StartupInfo {
             socket: Some("/run/manaline/quiet-owl.sock".into()),
             tcp: Some("127.0.0.1:7455".parse().unwrap()),
+            ws: None,
             game_id: Some(GameId("quiet-owl".into())),
             seat_tokens: (0..seats).map(|i| Token(format!("tok{i}"))).collect(),
             spectator_token: Some(Token("spec".into())),
