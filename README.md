@@ -55,7 +55,34 @@ turn and decision it is, the outcome); `--watch` opens the terminal client as
 a spectator instead. Ctrl-C ends the table either way.
 
 Not yet: the in-house Oracle-text-to-IR model and its ingestion pipeline (M5,
-in a companion research repo), networked play (M8), Commander (M9).
+in a companion research repo), the lobby server for strangers (M8 tier 1, in
+progress), Commander (M9).
+
+## Playing over the network
+
+Between friends, one of you hosts and the others join directly. `host` is
+`play` listening on the network: it prints one `join` command per seat with
+your LAN address and the seat's token.
+
+```
+cargo run -- host --deck green                      # you and one friend; prints their join line
+cargo run -- host --deck green --seats me,human,human,claude
+cargo run -- join 192.168.1.10:43211 --token <t> --deck red   # on the friend's machine
+```
+
+Anything that carries TCP works, so a Tailscale address or an `ssh -L`
+tunnel reaches a host behind a home router. The daemon can also serve
+WebSockets (`daemon --ws 0.0.0.0:8443 --tls-cert cert.pem --tls-key key.pem`)
+so a client can `join wss://host:8443 --token <t>`; certificates come from a
+reverse proxy or Let's Encrypt tooling, not from manaline.
+
+Connections are expected to drop. Every client reconnects on its own with the
+same token and picks its seat back up; the terminal client says
+`Reconnecting…` in its header while it does. A hosted table also has an
+idle policy: a seat the game is waiting on that has been gone for a minute
+gets a warning in the log, and after ten minutes the host concedes for it so
+the rest of the table can finish (`--idle-warn`, `--idle-concede`,
+`--abandon-after` tune this; local `play` games have no policy).
 
 ## Pointing an agent at manaline
 
@@ -90,7 +117,7 @@ crates/deckstats deck-file parser, `deck check` classification, curve and colour
 crates/ingest   card IR tooling: the round-trip and Oracle cross-check CI runs (§4.3)
 crates/cardsearch Scryfall-style query language and index (§4.5)
 crates/protocol the daemon protocol: messages, NDJSON framing, client helpers (§2)
-crates/daemon   hosts one game, speaks the protocol over Unix socket and TCP (§5)
+crates/daemon   hosts one game, speaks the protocol over Unix socket, TCP, and WebSocket (§5)
 crates/tui      the terminal client (§6)
 crates/mcp      the MCP server that lets an agent play a seat (§7)
 crates/cli      the `manaline` binary
@@ -104,6 +131,7 @@ decks/          starter decklists in the standard text format (§4.5)
 cargo run -- play --deck green --vs random     # you against the built-in bot
 cargo run -- play --deck green --vs claude     # you against an agent (see the hints in the client)
 cargo run -- play --deck green --vs human      # prints a join command for another terminal
+cargo run -- host --deck green                 # the same over the network: join lines with your LAN address
 cargo run -- play --seats random,claude --format free-for-all   # a table you only watch
 cargo run -- sim --seats 4 --games 5 --log        # random bots in a pod, every event printed
 cargo run -- replay ~/.local/share/manaline/games/<id>.jsonl --log
@@ -158,8 +186,8 @@ changed where it was installed. An existing file path always means that
 file, edited in place. `$MANALINE_DECKS_DIR` replaces the whole search path
 with one directory.
 
-Advanced pieces `play` is made of: `daemon`, `join`, `tui`, `bot`, `mcp`. Run
-any with `--help`.
+Advanced pieces `play` and `host` are made of: `daemon`, `join`, `tui`, `bot`,
+`mcp`. Run any with `--help`.
 
 ## Tests
 
