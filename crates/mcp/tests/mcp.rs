@@ -26,7 +26,6 @@ struct Running {
     /// This test's own runtime directory, so published games and seat claims
     /// are invisible to the other tests (and to the real machine).
     runtime: Runtime,
-    socket: Option<std::path::PathBuf>,
     /// Where the daemon listens when it was started on TCP.
     tcp: Option<std::net::SocketAddr>,
     game_id: String,
@@ -80,9 +79,53 @@ async fn start_on(seed: u64, tcp: bool) -> Running {
         tokens: info.seat_tokens,
         task,
         runtime: Runtime::at(dir.join("runtime")),
-        socket: info.socket,
         tcp: info.tcp,
         game_id: info.game_id.map(|g| g.0).unwrap_or_else(|| "game".into()),
+    }
+}
+
+/// A lobby server (§2.2 tier 1) on a WebSocket listener, holding one game made
+/// the way `manaline create` makes one: over the protocol, not at startup. This
+/// is what `play --server wss://…` leaves behind for an agent to find.
+async fn start_server_ws(seed: u64) -> Running {
+    let dir = std::env::temp_dir().join(format!("manaline-mcp-server-{}-{seed}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let config = DaemonConfig {
+        socket: None,
+        no_socket: true,
+        tcp: None,
+        ws: Some("127.0.0.1:0".to_string()),
+        tls: None,
+        parent_pid: None,
+        replay_dir: Some(dir.join("games")),
+        // A server creates nothing itself; `create_game` does, as often as asked.
+        create: None,
+        serve: true,
+        cards: Arc::new(cards::core()),
+        legality: None,
+        idle: None,
+        abandon_after: None,
+    };
+    let d = Daemon::bind(config).await.unwrap();
+    let url = d.info().ws.clone().expect("the websocket listener is bound");
+    let handle = d.handle();
+    let task = tokio::spawn(async move { d.run().await.unwrap() });
+
+    let endpoint = Endpoint::parse(&url).unwrap();
+    assert!(matches!(endpoint, Endpoint::Ws(_)), "{endpoint}");
+    let mut creating = Client::connect(&endpoint).await.unwrap();
+    let (game_id, tokens, _spectator) = creating.create_game("cube", 2, Some(seed)).await.unwrap();
+    drop(creating);
+
+    Running {
+        handle,
+        endpoint,
+        tokens,
+        task,
+        runtime: Runtime::at(dir.join("runtime")),
+        tcp: None,
+        game_id: game_id.0,
     }
 }
 
@@ -103,16 +146,20 @@ fn publish(rt: &Runtime, r: &Running, seats: &[(SeatKind, Option<&str>)]) -> Gam
             token: (*kind == SeatKind::Agent).then(|| r.tokens[i].clone()),
         })
         .collect();
-    let marker = GameMarker {
+    let mut marker = GameMarker {
         game_id: r.game_id.clone(),
         pid: std::process::id(),
-        socket: r.socket.clone(),
+        socket: None,
         tcp: None,
+        ws: None,
         format: "cube".into(),
         spectator_token: None,
         seats: slots,
         dir: std::path::PathBuf::new(),
     };
+    // Whatever transport this daemon is on: a socket, TCP, or the `ws://` of a
+    // game on a lobby server. Nothing downstream can tell the difference.
+    marker.set_endpoint(&r.endpoint);
     rt.publish_game(&marker).unwrap()
 }
 
@@ -1089,6 +1136,79 @@ async fn a_session_seats_itself_from_the_published_game() {
 
     r2.handle.shutdown();
     r2.task.await.unwrap();
+    r.handle.shutdown();
+    r.task.await.unwrap();
+}
+
+/// Block until the game has actually begun. `get_state` is a `bad_request`
+/// while the table is still in the lobby, and the first state it answers with
+/// is the game.
+async fn wait_for_start(c: &mut Client) {
+    for _ in 0..500 {
+        match c.get_state().await {
+            Ok(_) => return,
+            Err(ClientError::Protocol(e)) if e.code == protocol::ErrorCode::BadRequest => {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            Err(e) => panic!("{e}"),
+        }
+    }
+    panic!("the game never started");
+}
+
+/// The tier-1 path end to end (§2.2): the game is on a lobby server reached
+/// over `ws://`, `play --server` published a marker naming that URL, and an
+/// agent's MCP session finds it, sits down remotely, and plays to the end. The
+/// session is given no endpoint and no token — everything it needs is in the
+/// marker, exactly as on a local table.
+#[tokio::test]
+async fn a_session_seats_itself_at_a_game_on_a_lobby_server() {
+    let r = start_server_ws(31).await;
+    let game = publish(&r.runtime, &r, &[(SeatKind::Human, None), (SeatKind::Agent, Some("red"))]);
+    assert!(
+        game.ws.as_deref().is_some_and(|u| u.starts_with("ws://")),
+        "the marker names the server, not a socket: {:?}",
+        game.ws
+    );
+    assert_eq!(game.socket, None);
+    assert_eq!(game.endpoint(), Some(r.endpoint.clone()));
+
+    let server = mcp::standalone(engine::Format::cube()).with_runtime(r.runtime.clone());
+    assert!(server.session().is_none(), "a fresh session holds no seat");
+
+    // The first game tool call claims the agent seat and dials `ws://`.
+    let res = server.get_game_state().await.unwrap();
+    assert!(is_error(&res) && text_of(&res).contains("has not started"), "{}", text_of(&res));
+    assert_eq!(server.seat(), Some(Seat(1)));
+    assert_eq!(server.mode(), format!("game {}, seat 1", r.game_id));
+    assert_eq!(game.claims(), vec![(1, std::process::id())]);
+    assert!(
+        server.session().unwrap().lobby().seats[1].deck_ok,
+        "the deck the marker named was submitted over the websocket"
+    );
+
+    // The other seat is a person on another machine, joining over the same
+    // transport with the token the server issued.
+    let mut human = Client::connect(&r.endpoint).await.unwrap();
+    human.hello(&r.tokens[0], Some("Connor")).await.unwrap();
+    human.subscribe().await.unwrap();
+    human.set_deck(&cards::deck_text("green").unwrap()).await.unwrap().unwrap();
+    human.ready().await.unwrap();
+    // A server's games each have their own status watch, so there is no one
+    // daemon-wide `must_act` to wait on: the table says it has started when it
+    // starts answering `get_state`.
+    wait_for_start(&mut human).await;
+
+    let human_task = tokio::spawn(human_loop(human, 5));
+    let played = agent_loop(&server, 20).await;
+    human_task.await.unwrap();
+    assert!(played.actions > 10, "the agent took {} actions", played.actions);
+    assert!(matches!(played.outcome, Some(Outcome::Winner(_))), "{played:?}");
+    let res = server.get_game_state().await.unwrap();
+    assert!(text_of(&res).contains("GAME OVER"), "{}", text_of(&res));
+
+    // A server never stops because one of its games ended.
+    assert!(r.handle.has_game(&protocol::GameId(r.game_id.clone())).await);
     r.handle.shutdown();
     r.task.await.unwrap();
 }

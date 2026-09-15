@@ -208,6 +208,10 @@ pub struct GameMarker {
     pub pid: u32,
     pub socket: Option<PathBuf>,
     pub tcp: Option<String>,
+    /// A `ws://` or `wss://` URL, when the table is a game on a lobby server
+    /// (§2.2). Absent from markers written before servers existed.
+    #[serde(default)]
+    pub ws: Option<String>,
     pub format: String,
     #[serde(default)]
     pub spectator_token: Option<Token>,
@@ -239,11 +243,29 @@ pub enum SeatKind {
 }
 
 impl GameMarker {
+    /// Where a client reaches this table. A Unix socket wins when there is one
+    /// — it is the cheapest link and only a local daemon publishes one — then
+    /// TCP, then the WebSocket URL of a game on a lobby server.
     pub fn endpoint(&self) -> Option<Endpoint> {
-        match (&self.socket, &self.tcp) {
-            (Some(p), _) => Some(Endpoint::Unix(p.clone())),
-            (None, Some(t)) => Some(Endpoint::Tcp(t.clone())),
-            (None, None) => None,
+        match (&self.socket, &self.tcp, &self.ws) {
+            (Some(p), _, _) => Some(Endpoint::Unix(p.clone())),
+            (None, Some(t), _) => Some(Endpoint::Tcp(t.clone())),
+            (None, None, Some(url)) => Endpoint::parse(url).ok(),
+            (None, None, None) => None,
+        }
+    }
+
+    /// Say that this table is reached at `endpoint` and nowhere else, whatever
+    /// transport it is on. `play --server` publishes a game it did not host, so
+    /// the one address it has is the server's.
+    pub fn set_endpoint(&mut self, endpoint: &Endpoint) {
+        self.socket = None;
+        self.tcp = None;
+        self.ws = None;
+        match endpoint {
+            Endpoint::Unix(p) => self.socket = Some(p.clone()),
+            Endpoint::Tcp(a) => self.tcp = Some(a.clone()),
+            Endpoint::Ws(url) => self.ws = Some(url.clone()),
         }
     }
 
@@ -550,6 +572,7 @@ mod tests {
             pid: std::process::id(),
             socket: Some(rt.dir.join("quiet-owl.sock")),
             tcp: None,
+            ws: None,
             format: "cube".into(),
             spectator_token: Some(Token("spec".into())),
             seats: vec![
@@ -601,6 +624,59 @@ mod tests {
         published.withdraw();
         assert!(rt.live_games().is_empty());
         assert!(!published.claims_dir().exists());
+    }
+
+    /// A table on a lobby server is reached over WebSockets, and a marker
+    /// written before there were servers still parses and still points home.
+    #[test]
+    fn a_marker_carries_whatever_transport_the_table_is_on() {
+        let mut marker = GameMarker {
+            game_id: "K7QMPX".into(),
+            pid: std::process::id(),
+            socket: Some("/run/manaline/K7QMPX.sock".into()),
+            tcp: Some("127.0.0.1:7455".into()),
+            ws: None,
+            format: "cube".into(),
+            spectator_token: None,
+            seats: Vec::new(),
+            dir: PathBuf::new(),
+        };
+        // A socket wins while there is one.
+        assert_eq!(marker.endpoint(), Some(Endpoint::Unix("/run/manaline/K7QMPX.sock".into())));
+
+        // `play --server` publishes exactly one address, whatever its form.
+        for url in ["wss://play.example", "ws://127.0.0.1:7455"] {
+            let remote = Endpoint::parse(url).unwrap();
+            marker.set_endpoint(&remote);
+            assert_eq!((&marker.socket, &marker.tcp), (&None, &None), "the old addresses are gone");
+            assert_eq!(marker.ws.as_deref(), Some(url));
+            assert_eq!(marker.endpoint(), Some(remote));
+
+            // And it round-trips through the file an agent reads.
+            let json = serde_json::to_string(&marker).unwrap();
+            let back: GameMarker = serde_json::from_str(&json).unwrap();
+            assert_eq!(back.endpoint(), marker.endpoint());
+        }
+        marker.set_endpoint(&Endpoint::Tcp("play.example:7454".into()));
+        assert_eq!(marker.endpoint(), Some(Endpoint::Tcp("play.example:7454".into())));
+        assert_eq!(marker.ws, None);
+        marker.set_endpoint(&Endpoint::Unix("/run/g.sock".into()));
+        assert_eq!(marker.endpoint(), Some(Endpoint::Unix("/run/g.sock".into())));
+
+        // A marker written before servers existed has no `ws` key at all.
+        let old = r#"{"game_id":"g","pid":1,"socket":null,"tcp":"127.0.0.1:1","format":"cube","seats":[]}"#;
+        let old: GameMarker = serde_json::from_str(old).unwrap();
+        assert_eq!(old.ws, None);
+        assert_eq!(old.endpoint(), Some(Endpoint::Tcp("127.0.0.1:1".into())));
+
+        // Nowhere to connect is still nowhere to connect.
+        let nowhere = GameMarker {
+            socket: None,
+            tcp: None,
+            ws: None,
+            ..old
+        };
+        assert_eq!(nowhere.endpoint(), None);
     }
 
     #[test]

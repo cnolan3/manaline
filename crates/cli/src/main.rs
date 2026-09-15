@@ -3,6 +3,7 @@
 mod bot;
 mod commands;
 mod deck;
+mod lobby;
 mod play;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -26,9 +27,12 @@ enum Command {
     Play(play::PlayArgs),
     /// Host a game for friends over the network: prints a join command per seat.
     Host(play::HostArgs),
-    /// Join a friend's game: `manaline join <host:port> --token <t> --deck <file>`,
-    /// or a socket path for a table on this machine.
+    /// Join a game: `manaline join <code> --server <endpoint> --deck <file>` on a
+    /// lobby server, or `manaline join <host:port> --token <t> --deck <file>` straight
+    /// to a friend's daemon.
     Join(play::JoinArgs),
+    /// Make a game on a lobby server and print the code to share.
+    Create(lobby::CreateArgs),
     /// Open the terminal client on an existing game (advanced).
     Tui(play::TuiArgs),
     /// Play random bots against each other in-process and print the result.
@@ -123,6 +127,7 @@ fn main() -> Result<()> {
         Command::Play(args) => runtime()?.block_on(play::play(args)),
         Command::Host(args) => runtime()?.block_on(play::host(args)),
         Command::Join(args) => runtime()?.block_on(play::join(args)),
+        Command::Create(args) => runtime()?.block_on(lobby::create(args)),
         Command::Tui(args) => runtime()?.block_on(play::tui(args)),
         Command::Sim(args) => sim(args),
         Command::List { what } => list(what),

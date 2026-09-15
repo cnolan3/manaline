@@ -55,8 +55,7 @@ turn and decision it is, the outcome); `--watch` opens the terminal client as
 a spectator instead. Ctrl-C ends the table either way.
 
 Not yet: the in-house Oracle-text-to-IR model and its ingestion pipeline (M5,
-in a companion research repo), the lobby server for strangers (M8 tier 1, in
-progress), Commander (M9).
+in a companion research repo), Commander (M9).
 
 ## Playing over the network
 
@@ -75,6 +74,29 @@ tunnel reaches a host behind a home router. The daemon can also serve
 WebSockets (`daemon --ws 0.0.0.0:8443 --tls-cert cert.pem --tls-key key.pem`)
 so a client can `join wss://host:8443 --token <t>`; certificates come from a
 reverse proxy or Let's Encrypt tooling, not from manaline.
+
+For anyone you would not hand your hidden zones to, and for anyone who cannot
+open a port, the daemon moves off the players' machines: `manaline server` is
+the same daemon holding many games at once, run on a VPS or a homelab box.
+`create` makes a table there and prints a six-character code; everyone else
+joins by that code and the server hands each of them a seat, so there is no
+token to copy and no port to forward. `play --server` sets the whole table up
+remotely and is otherwise the local `play` exactly — your terminal, the bots,
+and the agents all connect to the server instead of to a daemon here.
+
+```
+manaline server --ws 0.0.0.0:443 --tls-cert cert.pem --tls-key key.pem   # on the box
+cargo run -- create --server wss://play.example --format cube --seats 2  # prints the code
+cargo run -- join K7QMPX --server wss://play.example --deck red          # each player
+cargo run -- play --server wss://play.example --deck green --seats me,claude,human
+```
+
+Agents need nothing new: `play --server` publishes the table with the server's
+URL in place of a socket path, and the agent's MCP session dials `wss://` the
+way it dials a socket. The server keeps the action log, so a restart, a deploy,
+or a move to another machine costs one replay and every client resumes with the
+token it already holds; a table nobody is left at is dropped by the server's own
+`--abandon-after` rather than by whoever started it.
 
 Connections are expected to drop. Every client reconnects on its own with the
 same token and picks its seat back up; the terminal client says
@@ -132,6 +154,8 @@ cargo run -- play --deck green --vs random     # you against the built-in bot
 cargo run -- play --deck green --vs claude     # you against an agent (see the hints in the client)
 cargo run -- play --deck green --vs human      # prints a join command for another terminal
 cargo run -- host --deck green                 # the same over the network: join lines with your LAN address
+cargo run -- create --server wss://play.example --seats 2   # a table on a lobby server: prints the code
+cargo run -- join K7QMPX --server wss://play.example --deck red   # join one by code
 cargo run -- play --seats random,claude --format free-for-all   # a table you only watch
 cargo run -- sim --seats 4 --games 5 --log        # random bots in a pod, every event printed
 cargo run -- replay ~/.local/share/manaline/games/<id>.jsonl --log

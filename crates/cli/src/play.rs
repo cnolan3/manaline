@@ -49,6 +49,12 @@ pub struct PlayArgs {
     /// Also listen on TCP so a remote terminal can join (a `human` seat).
     #[arg(long)]
     pub tcp: Option<String>,
+    /// Set the table up on a lobby server instead of on this machine: `host:port`,
+    /// `ws://…`, or `wss://…` (§2.2 tier 1). Everything else works the same — the
+    /// bots, your terminal, and the agents all connect there instead of here —
+    /// and `human` seats join by the code rather than with a token.
+    #[arg(long, value_name = "ENDPOINT", conflicts_with_all = ["tcp", "idle_warn", "idle_concede", "abandon_after"])]
+    pub server: Option<String>,
     /// With no `me` seat, watch the table in the terminal client instead of
     /// printing one line per event.
     #[arg(long)]
@@ -145,6 +151,7 @@ impl HostArgs {
             name: self.name,
             theme: self.theme,
             tcp: Some(self.bind),
+            server: None,
             watch: self.watch,
             idle_warn: Some(self.idle_warn.unwrap_or(HOST_IDLE_WARN_SECS)),
             idle_concede: Some(self.idle_concede.unwrap_or(HOST_IDLE_CONCEDE_SECS)),
@@ -400,6 +407,7 @@ pub fn build_marker(info: &StartupInfo, format: &str, plans: &[SeatPlan]) -> Res
         pid: std::process::id(),
         socket: info.socket.clone(),
         tcp: info.tcp.map(|a| a.to_string()),
+        ws: info.ws.clone(),
         format: format.to_string(),
         spectator_token: info.spectator_token.clone(),
         seats,
@@ -422,6 +430,56 @@ impl Published {
 impl Drop for Published {
     fn drop(&mut self) {
         self.0.withdraw();
+    }
+}
+
+/// Where the game `play` set up actually lives. `play` creates a game the same
+/// way either way — one internal creation function on the daemon side (§2.2.1)
+/// — and the only thing that differs afterwards is whether there is a child
+/// process to kill on the way out.
+struct Table {
+    /// A daemon of our own, or `None` for a game on somebody's server.
+    child: Option<DaemonChild>,
+    info: StartupInfo,
+    endpoint: Endpoint,
+}
+
+impl Table {
+    fn local(child: DaemonChild) -> Result<Table> {
+        let socket = child.info.socket.clone().ok_or_else(|| anyhow!("daemon reported no socket"))?;
+        Ok(Table {
+            info: child.info.clone(),
+            endpoint: Endpoint::Unix(socket),
+            child: Some(child),
+        })
+    }
+
+    /// Make the game on a lobby server: connect, `create_game`, keep the
+    /// tokens. Nothing local is started at all.
+    async fn on_server(server: &str, format: &str, seats: u8, seed: Option<u64>) -> Result<Table> {
+        let endpoint = Endpoint::parse(server).map_err(|e| anyhow!(e))?;
+        let created = crate::lobby::create_on(&endpoint, format, seats, seed).await?;
+        Ok(Table {
+            child: None,
+            info: StartupInfo {
+                socket: None,
+                tcp: None,
+                ws: None,
+                game_id: Some(created.game_id),
+                seat_tokens: created.seat_tokens,
+                spectator_token: Some(created.spectator_token),
+                // The server keeps the log; there is nothing on this machine.
+                replay_path: None,
+                recovered: Vec::new(),
+            },
+            endpoint,
+        })
+    }
+
+    async fn stop(&mut self) {
+        if let Some(child) = &mut self.child {
+            child.stop().await;
+        }
     }
 }
 
@@ -456,24 +514,36 @@ pub async fn play_in(args: PlayArgs, runtime: Runtime) -> Result<()> {
         decklists.push(Some(text));
     }
 
-    let mut daemon = spawn_daemon(DaemonOptions {
-        format: &args.format,
-        seats: plans.len() as u8,
-        seed: args.seed,
-        tcp: args.tcp.as_deref(),
-        idle_warn: args.idle_warn,
-        idle_concede: args.idle_concede,
-        abandon_after: args.abandon_after,
-    })
-    .await?;
-    let info = daemon.info.clone();
-    let socket = info.socket.clone().ok_or_else(|| anyhow!("daemon reported no socket"))?;
-    let endpoint = Endpoint::Unix(socket.clone());
+    // The table is either a daemon of our own or a game on somebody's server.
+    // Past this line nothing else in `play` can tell the difference: one
+    // endpoint, one token per seat, and a spectator token.
+    let mut table = match &args.server {
+        Some(server) => Table::on_server(server, &args.format, plans.len() as u8, args.seed).await?,
+        None => Table::local(
+            spawn_daemon(DaemonOptions {
+                format: &args.format,
+                seats: plans.len() as u8,
+                seed: args.seed,
+                tcp: args.tcp.as_deref(),
+                idle_warn: args.idle_warn,
+                idle_concede: args.idle_concede,
+                abandon_after: args.abandon_after,
+            })
+            .await?,
+        )?,
+    };
+    let info = table.info.clone();
+    let endpoint = table.endpoint.clone();
     let tokens = info.seat_tokens.clone();
 
     // Published before anyone is seated, so an agent that is already waiting
-    // finds the table as soon as the daemon is up.
-    let marker = build_marker(&info, &args.format, &plans)?;
+    // finds the table as soon as it exists. On a server the marker's one
+    // address is the server's, so an agent's MCP session dials `wss://` exactly
+    // as it dials a socket.
+    let mut marker = build_marker(&info, &args.format, &plans)?;
+    if args.server.is_some() {
+        marker.set_endpoint(&endpoint);
+    }
     let published = Published::new(&runtime, &marker)?;
 
     // Bots play in this process, one task per `random` seat.
@@ -489,10 +559,16 @@ pub async fn play_in(args: PlayArgs, runtime: Runtime) -> Result<()> {
         bot_tasks.push(tokio::spawn(bot::run(settings)));
     }
 
-    // A wildcard listener is reachable from everywhere and nameable from
-    // nowhere, so the hints advertise this machine's own address instead.
-    let advertised = info.tcp.map(|addr| advertised_addr(addr, lan_ipv4()));
-    let mut hints = human_hints(&plans, &socket, &tokens, advertised.as_ref());
+    let mut hints = match &args.server {
+        Some(server) => server_hints(&plans, &published.0.game_id, server),
+        None => {
+            let socket = info.socket.clone().ok_or_else(|| anyhow!("daemon reported no socket"))?;
+            // A wildcard listener is reachable from everywhere and nameable
+            // from nowhere, so the hints advertise this machine's own address.
+            let advertised = info.tcp.map(|addr| advertised_addr(addr, lan_ipv4()));
+            human_hints(&plans, &socket, &tokens, advertised.as_ref())
+        }
+    };
     hints.extend(agent_hints(&published.0, &plans));
 
     let result = match me {
@@ -536,8 +612,11 @@ pub async fn play_in(args: PlayArgs, runtime: Runtime) -> Result<()> {
     for t in bot_tasks {
         t.abort();
     }
+    // The marker goes either way. A daemon of ours is torn down with it; a
+    // game on a server is left where it is — the server's own abandon policy
+    // clears it up once nobody is left at the table (§2.2).
     drop(published);
-    daemon.stop().await;
+    table.stop().await;
 
     let outcome = result?;
     if let Some(o) = outcome {
@@ -601,6 +680,25 @@ fn human_hints(plans: &[SeatPlan], socket: &std::path::Path, tokens: &[Token], t
                 tokens[p.seat as usize]
             ));
         }
+    }
+    vec![lines.join("\n")]
+}
+
+/// The same for a table on a lobby server: the code is the whole invitation.
+/// Nobody needs a token, because the server hands each arrival its own.
+fn server_hints(plans: &[SeatPlan], code: &str, server: &str) -> Vec<String> {
+    let mut lines = vec![format!("Table {code} is on {server}.")];
+    let seats = plans.iter().filter(|p| p.role == SeatRole::Human).count();
+    match seats {
+        0 => lines.push("No seat is waiting for another person; nothing to send on.".to_string()),
+        1 => lines.push("To seat the other player, send them this:".to_string()),
+        n => lines.push(format!("To seat the other {n} players, send each of them this:")),
+    }
+    for _ in 0..seats {
+        lines.push(format!("  manaline join {code} --server {server} --deck <their deck>"));
+    }
+    if seats > 0 {
+        lines.push("No token to copy: the server hands each of them a seat when they run it.".to_string());
     }
     vec![lines.join("\n")]
 }
@@ -930,12 +1028,18 @@ pub async fn spawn_daemon(opts: DaemonOptions<'_>) -> Result<DaemonChild> {
 
 #[derive(clap::Args)]
 pub struct JoinArgs {
-    /// Where the table is: `host:port` for a friend's `manaline host` over the
-    /// network, or the socket path a `play` on this machine printed.
-    pub endpoint: String,
+    /// The six-character game code someone sent you (with `--server`), or where
+    /// the table is: `host:port` for a friend's `manaline host`, or the socket
+    /// path a `play` on this machine printed (with `--token`).
+    #[arg(value_name = "CODE|ENDPOINT")]
+    pub target: String,
+    /// The lobby server the game code is on: `host:port`, `ws://…`, or `wss://…`.
+    #[arg(long, value_name = "ENDPOINT")]
+    pub server: Option<String>,
     /// The seat token whoever set the table up sent you. One token, one seat.
+    /// Not needed with a game code: the server hands one out.
     #[arg(long)]
-    pub token: String,
+    pub token: Option<String>,
     /// Your deck: a file path or a built-in deck name.
     #[arg(long)]
     pub deck: String,
@@ -946,12 +1050,33 @@ pub struct JoinArgs {
     pub theme: Option<String>,
 }
 
+/// `manaline join`, both ways in (§2.2): straight to a daemon with a token, or
+/// by code through a lobby server, which hands back a token and then gets out
+/// of the way — from there the two are the same client on the same endpoint.
 pub async fn join(args: JoinArgs) -> Result<()> {
     let decklist = crate::deck_text(&args.deck)?;
-    let name = args.name.unwrap_or_else(whoami);
-    let mut config = tui::config(&args.endpoint, &args.token, &name, Some(decklist))?;
-    config.deck_path = deck_path_of(&args.deck);
-    config.theme = tui::theme_flag(args.theme.as_deref())?;
+    let name = args.name.clone().unwrap_or_else(whoami);
+    let (endpoint, token) = match crate::lobby::join_target(&args.target, args.server.as_deref(), args.token.as_deref())? {
+        crate::lobby::JoinTarget::Direct { endpoint, token } => (endpoint, token),
+        crate::lobby::JoinTarget::Code { code, server } => {
+            let token = match &args.token {
+                // A token with a code: the seat is already ours, so there is
+                // nothing to ask the lobby for.
+                Some(t) => Token(t.clone()),
+                None => claim_by_code(&server, &code, &name).await?,
+            };
+            (server, token)
+        }
+    };
+    let config = tui::TuiConfig {
+        endpoint,
+        token,
+        name,
+        decklist: Some(decklist),
+        hints: Vec::new(),
+        deck_path: deck_path_of(&args.deck),
+        theme: tui::theme_flag(args.theme.as_deref())?,
+    };
     let outcome = tui::run(config).await?;
     if let Some(o) = outcome {
         println!(
@@ -963,6 +1088,23 @@ pub async fn join(args: JoinArgs) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Ask a lobby server for a seat at the game with this code. The connection is
+/// dropped the moment the token is in hand: the seat is held from the `joined`
+/// reply, and the client that plays it opens its own link with the token — the
+/// same one a reconnect uses, which is why the reconnect path never learns
+/// there was a lobby at all.
+async fn claim_by_code(server: &Endpoint, code: &str, name: &str) -> Result<Token> {
+    let mut client = protocol::Client::connect(server)
+        .await
+        .with_context(|| format!("connecting to the server at {server}"))?;
+    let (token, seat, game_id) = client
+        .join_game(code, Some(name))
+        .await
+        .with_context(|| format!("joining game {code} on {server}"))?;
+    println!("Joined game {game_id} at {server} in seat {}.", seat.0);
+    Ok(token)
 }
 
 #[derive(clap::Args)]
@@ -1030,6 +1172,7 @@ mod tests {
             name: None,
             theme: None,
             tcp: None,
+            server: None,
             watch: false,
             idle_warn: None,
             idle_concede: None,
@@ -1365,6 +1508,97 @@ mod tests {
 
         let plans = table(&[Me, Random], &[Some("m"), Some("r")]);
         assert!(human_hints(&plans, std::path::Path::new("/run/g.sock"), &tokens, None).is_empty());
+    }
+
+    /// `play --server` is the same table on somebody else's machine: the
+    /// marker points at the server, so an agent's MCP session dials `wss://`
+    /// exactly as it dials a socket, and the human seats join by the code.
+    #[test]
+    fn a_table_on_a_server_publishes_the_servers_address() {
+        use SeatRole::*;
+        let plans = table(&[Me, Human, Agent(AgentKind::Claude)], &[Some("mine"), None, None]);
+        // What `Table::on_server` reports: no socket, no listener of our own.
+        let info = StartupInfo {
+            socket: None,
+            tcp: None,
+            ws: None,
+            game_id: Some(GameId("K7QMPX".into())),
+            seat_tokens: (0..3).map(|i| Token(format!("tok{i}"))).collect(),
+            spectator_token: Some(Token("spec".into())),
+            replay_path: None,
+            recovered: Vec::new(),
+        };
+        let mut marker = build_marker(&info, "cube", &plans).unwrap();
+        assert_eq!(marker.endpoint(), None, "nothing local to connect to");
+        marker.set_endpoint(&Endpoint::parse("wss://play.example").unwrap());
+        assert_eq!(marker.endpoint(), Some(Endpoint::Ws("wss://play.example".into())));
+        assert_eq!(marker.game_id, "K7QMPX");
+        // The agent seat still carries its token: that is how an agent sits down.
+        assert_eq!(marker.seats[2].token, Some(Token("tok2".into())));
+        assert_eq!(marker.seats[1].token, None, "the other person joins by code");
+
+        // A plain `host:port` server and a local socket work the same way.
+        marker.set_endpoint(&Endpoint::parse("play.example:7454").unwrap());
+        assert_eq!(marker.endpoint(), Some(Endpoint::Tcp("play.example:7454".into())));
+    }
+
+    #[test]
+    fn a_server_table_invites_people_by_code_not_by_token() {
+        use SeatRole::*;
+        let plans = table(&[Me, Human, Human], &[Some("m"), None, None]);
+        let hints = server_hints(&plans, "K7QMPX", "wss://play.example").join("\n");
+        assert!(hints.contains("Table K7QMPX is on wss://play.example."), "{hints}");
+        assert!(hints.contains("other 2 players"), "{hints}");
+        assert_eq!(
+            hints
+                .matches("manaline join K7QMPX --server wss://play.example --deck <their deck>")
+                .count(),
+            2,
+            "{hints}"
+        );
+        assert!(!hints.contains("--token"), "nobody copies a token on a server:\n{hints}");
+
+        // One other person, and none at all.
+        let plans = table(&[Me, Agent(AgentKind::Claude)], &[Some("m"), None]);
+        let hints = server_hints(&plans, "K7QMPX", "127.0.0.1:7454").join("\n");
+        assert!(hints.contains("Table K7QMPX is on 127.0.0.1:7454."), "{hints}");
+        assert!(hints.contains("No seat is waiting"), "{hints}");
+        assert!(!hints.contains("manaline join"), "{hints}");
+        let plans = table(&[Me, Human], &[Some("m"), None]);
+        let hints = server_hints(&plans, "K7QMPX", "127.0.0.1:7454").join("\n");
+        assert!(hints.contains("the other player"), "{hints}");
+        assert_eq!(hints.matches("manaline join K7QMPX").count(), 1, "{hints}");
+    }
+
+    /// `--server` replaces the local daemon, so nothing that configures one
+    /// can be asked for at the same time: the server sets its own policy.
+    #[test]
+    fn a_server_table_takes_no_local_daemon_flags() {
+        use clap::{CommandFactory, FromArgMatches, Parser};
+        #[derive(Parser)]
+        struct Wrapper {
+            #[command(flatten)]
+            play: PlayArgs,
+        }
+        let parse = |args: &[&str]| {
+            let mut all = vec!["manaline-play"];
+            all.extend_from_slice(args);
+            Wrapper::command().try_get_matches_from(all).map(|m| {
+                let w = Wrapper::from_arg_matches(&m).unwrap();
+                w.play
+            })
+        };
+        let ok = parse(&["--deck", "green", "--server", "wss://play.example", "--seats", "me,claude"]).unwrap();
+        assert_eq!(ok.server.as_deref(), Some("wss://play.example"));
+        for clashing in ["--tcp", "--idle-warn", "--idle-concede", "--abandon-after"] {
+            let value = if clashing == "--tcp" { "0.0.0.0:0" } else { "60" };
+            assert!(
+                parse(&["--deck", "green", "--server", "wss://play.example", clashing, value]).is_err(),
+                "{clashing} should clash with --server"
+            );
+        }
+        // Without --server they are all still fine.
+        assert!(parse(&["--deck", "green", "--tcp", "0.0.0.0:0", "--idle-warn", "60"]).is_ok());
     }
 
     #[tokio::test]
