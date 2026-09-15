@@ -649,10 +649,19 @@ fn agent_hints(marker: &GameMarker, plans: &[SeatPlan]) -> Vec<String> {
 /// ended while we watched.
 async fn follow(endpoint: &Endpoint, token: &Token, plans: &[SeatPlan]) -> Result<Option<engine::Outcome>> {
     use protocol::ServerMessage;
-    let (client, mut pushes) = protocol::async_client::connect(endpoint)
-        .await
-        .with_context(|| format!("connecting to {endpoint}"))?;
-    let welcome = client.hello(token, None).await?;
+    // The spectator rides out drops like every other client.
+    let protocol::async_client::Joined {
+        client,
+        mut pushes,
+        welcome,
+    } = protocol::async_client::join(protocol::async_client::ReconnectConfig {
+        endpoint: endpoint.clone(),
+        token: token.clone(),
+        name: None,
+        policy: Default::default(),
+    })
+    .await
+    .with_context(|| format!("connecting to {endpoint}"))?;
     client.subscribe().await?;
     println!("Watching {} ({}). Ctrl-C stops the table.", welcome.game_id, welcome.format.name);
 
