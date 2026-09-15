@@ -216,13 +216,21 @@ impl Supervisor {
         loop {
             match self.steady(&mut conn).await {
                 // Nobody can send another request, but a push receiver may still
-                // be listening, so keep reading until the connection itself ends.
-                Exit::HandlesGone => {
-                    while let Some(env) = conn.reads.recv().await {
-                        self.dispatch(env).await;
+                // be listening, so keep reading until it lets go — or until the
+                // connection itself ends. Once neither end is listening the
+                // client is finished and must drop the connection: the daemon
+                // never hangs up on an idle one, so a socket held open here is
+                // a seat that stays connected and, on a server, a finished game
+                // that never leaves the lobby.
+                Exit::HandlesGone => loop {
+                    tokio::select! {
+                        _ = self.push_tx.closed() => return,
+                        read = conn.reads.recv() => match read {
+                            Some(env) => self.dispatch(env).await,
+                            None => return,
+                        },
                     }
-                    return;
-                }
+                },
                 // Replies that arrived before the link died still count.
                 Exit::Dead => {
                     while let Ok(env) = conn.reads.try_recv() {
