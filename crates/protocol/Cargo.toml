@@ -14,7 +14,7 @@ manaline-engine = { path = "../engine" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["io-util", "net", "sync", "rt", "macros"] }
+tokio = { workspace = true, features = ["io-util", "net", "sync", "rt", "macros", "time"] }
 async-trait.workspace = true
 futures.workspace = true
 tokio-tungstenite.workspace = true

@@ -10,6 +10,7 @@ use daemon::StartupInfo;
 use engine::Format;
 use protocol::endpoint::{GameMarker, Runtime, SeatKind, SeatSlot};
 use protocol::{Endpoint, Token};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
@@ -52,6 +53,108 @@ pub struct PlayArgs {
     /// printing one line per event.
     #[arg(long)]
     pub watch: bool,
+    /// Tell the table when a seat the game is waiting on has been gone this many seconds.
+    #[arg(long, value_name = "SECS")]
+    pub idle_warn: Option<u64>,
+    /// Concede for a seat the game is waiting on once it has been gone this many seconds.
+    #[arg(long, value_name = "SECS")]
+    pub idle_concede: Option<u64>,
+    /// Shut the table down once every seat has been gone this many seconds.
+    #[arg(long, value_name = "SECS")]
+    pub abandon_after: Option<u64>,
+}
+
+/// `manaline host`: `play` with the defaults a game between friends over the
+/// network wants (§2.2, tier 0). It runs as `play_in` like everything else;
+/// only the defaults differ, so the two can never drift apart.
+#[derive(clap::Args)]
+pub struct HostArgs {
+    /// Your deck: a file path or a built-in deck name (see `list decks`). Required
+    /// when a seat is yours.
+    #[arg(long)]
+    pub deck: Option<String>,
+    /// Who sits where, one entry per seat in seat order. Defaults to `me,human`:
+    /// you and one friend. Also takes `random`, `claude`, `codex`, and `mcp`.
+    #[arg(long, conflicts_with = "vs")]
+    pub seats: Option<String>,
+    /// Shorthand for `--seats me,<vs>`.
+    #[arg(long)]
+    pub vs: Option<String>,
+    /// Seat 1's deck. Usually left out: whoever joins brings their own.
+    #[arg(long)]
+    pub opp_deck: Option<String>,
+    /// A deck for any seat: `--seat-deck 2=green`. Repeatable.
+    #[arg(long = "seat-deck", value_name = "N=DECK")]
+    pub seat_decks: Vec<String>,
+    /// Address to listen on. The default takes every interface and a free port,
+    /// which is what someone on your network (or over Tailscale) needs.
+    #[arg(long, value_name = "ADDR", default_value = "0.0.0.0:0")]
+    pub bind: String,
+    #[arg(long, default_value = "cube")]
+    pub format: String,
+    #[arg(long)]
+    pub seed: Option<u64>,
+    /// Your display name at the table.
+    #[arg(long)]
+    pub name: Option<String>,
+    /// Colour theme for this run: default, mono, or high-contrast (saved choice otherwise).
+    #[arg(long)]
+    pub theme: Option<String>,
+    /// With no `me` seat, watch the table in the terminal client instead of
+    /// printing one line per event.
+    #[arg(long)]
+    pub watch: bool,
+    /// Say a seat the game is waiting on has gone quiet after this many seconds.
+    #[arg(long, value_name = "SECS")]
+    pub idle_warn: Option<u64>,
+    /// Concede for a seat that stays gone this many seconds, so the rest of the
+    /// table can finish.
+    #[arg(long, value_name = "SECS")]
+    pub idle_concede: Option<u64>,
+    /// Shut the table down once every seat has been gone this many seconds.
+    #[arg(long, value_name = "SECS")]
+    pub abandon_after: Option<u64>,
+}
+
+/// How long a seat may be gone before the table says so, and before it
+/// concedes for them. On by default over the network, where a closed laptop
+/// must not strand everyone else, and off for `play`, where the daemon and the
+/// only human at the table die together anyway.
+const HOST_IDLE_WARN_SECS: u64 = 60;
+const HOST_IDLE_CONCEDE_SECS: u64 = 600;
+
+impl HostArgs {
+    /// `host` as the `play` it really is, so its defaults are one conversion a
+    /// test can check rather than a second copy of `play_in`.
+    pub fn into_play(self) -> PlayArgs {
+        // `--vs` still means `me,<vs>`; only a table that named neither gets
+        // the networked default of you and one friend.
+        let seats = match (&self.seats, &self.vs) {
+            (Some(s), _) => Some(s.clone()),
+            (None, Some(_)) => None,
+            (None, None) => Some("me,human".to_string()),
+        };
+        PlayArgs {
+            deck: self.deck,
+            seats,
+            vs: self.vs,
+            opp_deck: self.opp_deck,
+            seat_decks: self.seat_decks,
+            format: self.format,
+            seed: self.seed,
+            name: self.name,
+            theme: self.theme,
+            tcp: Some(self.bind),
+            watch: self.watch,
+            idle_warn: Some(self.idle_warn.unwrap_or(HOST_IDLE_WARN_SECS)),
+            idle_concede: Some(self.idle_concede.unwrap_or(HOST_IDLE_CONCEDE_SECS)),
+            abandon_after: self.abandon_after,
+        }
+    }
+}
+
+pub async fn host(args: HostArgs) -> Result<()> {
+    play(args.into_play()).await
 }
 
 /// Who sits in one seat.
@@ -353,7 +456,16 @@ pub async fn play_in(args: PlayArgs, runtime: Runtime) -> Result<()> {
         decklists.push(Some(text));
     }
 
-    let mut daemon = spawn_daemon(&args.format, plans.len() as u8, args.seed, args.tcp.as_deref()).await?;
+    let mut daemon = spawn_daemon(DaemonOptions {
+        format: &args.format,
+        seats: plans.len() as u8,
+        seed: args.seed,
+        tcp: args.tcp.as_deref(),
+        idle_warn: args.idle_warn,
+        idle_concede: args.idle_concede,
+        abandon_after: args.abandon_after,
+    })
+    .await?;
     let info = daemon.info.clone();
     let socket = info.socket.clone().ok_or_else(|| anyhow!("daemon reported no socket"))?;
     let endpoint = Endpoint::Unix(socket.clone());
@@ -377,7 +489,10 @@ pub async fn play_in(args: PlayArgs, runtime: Runtime) -> Result<()> {
         bot_tasks.push(tokio::spawn(bot::run(settings)));
     }
 
-    let mut hints = human_hints(&plans, &socket, &tokens, info.tcp.as_ref());
+    // A wildcard listener is reachable from everywhere and nameable from
+    // nowhere, so the hints advertise this machine's own address instead.
+    let advertised = info.tcp.map(|addr| advertised_addr(addr, lan_ipv4()));
+    let mut hints = human_hints(&plans, &socket, &tokens, advertised.as_ref());
     hints.extend(agent_hints(&published.0, &plans));
 
     let result = match me {
@@ -434,6 +549,31 @@ pub async fn play_in(args: PlayArgs, runtime: Runtime) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// What to print for a listener bound to `bound`. A wildcard address means
+/// "every interface", which is no use to the friend who has to type it, so
+/// this machine's own address stands in when one was found.
+pub fn advertised_addr(bound: SocketAddr, lan: Option<Ipv4Addr>) -> SocketAddr {
+    match lan {
+        Some(ip) if bound.ip().is_unspecified() => SocketAddr::new(IpAddr::V4(ip), bound.port()),
+        _ => bound,
+    }
+}
+
+/// This machine's address on the local network, or `None`. Best effort and
+/// dependency-free: connecting a UDP socket sends no packets, it only asks the
+/// kernel which interface it would route from — here towards a documentation
+/// address (RFC 5737) that nothing answers. A host with several interfaces or
+/// a VPN may well name one the friend cannot reach, which is why failing here
+/// only costs a nicer hint.
+fn lan_ipv4() -> Option<Ipv4Addr> {
+    let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    sock.connect("203.0.113.1:80").ok()?;
+    match sock.local_addr().ok()?.ip() {
+        IpAddr::V4(ip) if !ip.is_loopback() && !ip.is_unspecified() => Some(ip),
+        _ => None,
+    }
 }
 
 /// How another terminal joins each `human` seat.
@@ -714,8 +854,24 @@ impl DaemonChild {
     }
 }
 
+/// What `play` asks of the daemon it spawns. A struct rather than a parameter
+/// list because these are all optional and all easy to transpose.
+pub struct DaemonOptions<'a> {
+    pub format: &'a str,
+    pub seats: u8,
+    pub seed: Option<u64>,
+    /// An extra TCP listener, for players who are not on this machine.
+    pub tcp: Option<&'a str>,
+    /// Seconds a seat the game is waiting on may be gone before the table says so.
+    pub idle_warn: Option<u64>,
+    /// Seconds before the table concedes for that seat.
+    pub idle_concede: Option<u64>,
+    /// Seconds with every seat gone before the table shuts itself down.
+    pub abandon_after: Option<u64>,
+}
+
 /// Spawn `manaline daemon` as a child on a fresh socket and read its startup line.
-pub async fn spawn_daemon(format: &str, seats: u8, seed: Option<u64>, tcp: Option<&str>) -> Result<DaemonChild> {
+pub async fn spawn_daemon(opts: DaemonOptions<'_>) -> Result<DaemonChild> {
     let exe = std::env::current_exe().context("locating the manaline binary")?;
     let log_dir = protocol::endpoint::data_dir().join("logs");
     std::fs::create_dir_all(&log_dir).ok();
@@ -725,20 +881,29 @@ pub async fn spawn_daemon(format: &str, seats: u8, seed: Option<u64>, tcp: Optio
     let mut cmd = tokio::process::Command::new(exe);
     cmd.arg("daemon")
         .arg("--format")
-        .arg(format)
+        .arg(opts.format)
         .arg("--seats")
-        .arg(seats.to_string())
+        .arg(opts.seats.to_string())
         .arg("--parent-pid")
         .arg(std::process::id().to_string())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::from(log_file))
         .kill_on_drop(true);
-    if let Some(s) = seed {
+    if let Some(s) = opts.seed {
         cmd.arg("--seed").arg(s.to_string());
     }
-    if let Some(addr) = tcp {
+    if let Some(addr) = opts.tcp {
         cmd.arg("--tcp").arg(addr);
+    }
+    for (flag, secs) in [
+        ("--idle-warn", opts.idle_warn),
+        ("--idle-concede", opts.idle_concede),
+        ("--abandon-after", opts.abandon_after),
+    ] {
+        if let Some(n) = secs {
+            cmd.arg(flag).arg(n.to_string());
+        }
     }
     let mut child = cmd.spawn().context("starting the game daemon")?;
     let stdout = child.stdout.take().expect("piped stdout");
@@ -756,8 +921,10 @@ pub async fn spawn_daemon(format: &str, seats: u8, seed: Option<u64>, tcp: Optio
 
 #[derive(clap::Args)]
 pub struct JoinArgs {
-    /// Socket path or host:port printed by a `human` seat in `play`, or by `host`.
+    /// Where the table is: `host:port` for a friend's `manaline host` over the
+    /// network, or the socket path a `play` on this machine printed.
     pub endpoint: String,
+    /// The seat token whoever set the table up sent you. One token, one seat.
     #[arg(long)]
     pub token: String,
     /// Your deck: a file path or a built-in deck name.
@@ -855,7 +1022,104 @@ mod tests {
             theme: None,
             tcp: None,
             watch: false,
+            idle_warn: None,
+            idle_concede: None,
+            abandon_after: None,
         }
+    }
+
+    fn host_args() -> HostArgs {
+        HostArgs {
+            deck: Some("mine".into()),
+            seats: None,
+            vs: None,
+            opp_deck: None,
+            seat_decks: Vec::new(),
+            bind: "0.0.0.0:0".into(),
+            format: "cube".into(),
+            seed: None,
+            name: None,
+            theme: None,
+            watch: false,
+            idle_warn: None,
+            idle_concede: None,
+            abandon_after: None,
+        }
+    }
+
+    #[test]
+    fn host_is_play_with_networked_defaults() {
+        let args = host_args().into_play();
+        assert_eq!(args.tcp.as_deref(), Some("0.0.0.0:0"), "listening for friends by default");
+        // A seat the game waits on is given a while, then conceded, so nobody
+        // else is stuck behind a closed laptop.
+        assert_eq!(args.idle_warn, Some(60));
+        assert_eq!(args.idle_concede, Some(600));
+        assert_eq!(args.abandon_after, None);
+
+        let plans = plan_table(&args, "Connor").unwrap();
+        assert_eq!(plans.len(), 2);
+        assert_eq!(plans[0].role, SeatRole::Me);
+        assert_eq!(plans[1].role, SeatRole::Human, "the other seat is a person, not a bot");
+
+        // `play` asks for none of it.
+        let plain = self::args();
+        assert_eq!(plain.idle_warn, None);
+        assert_eq!(plain.idle_concede, None);
+        assert_eq!(plain.tcp, None);
+    }
+
+    #[test]
+    fn host_flags_override_its_defaults() {
+        let args = HostArgs {
+            bind: "192.168.1.10:7454".into(),
+            idle_warn: Some(5),
+            idle_concede: Some(30),
+            abandon_after: Some(90),
+            ..host_args()
+        }
+        .into_play();
+        assert_eq!(args.tcp.as_deref(), Some("192.168.1.10:7454"));
+        assert_eq!(
+            (args.idle_warn, args.idle_concede, args.abandon_after),
+            (Some(5), Some(30), Some(90))
+        );
+
+        // Never assume two seats: `--seats` reaches the whole table.
+        let args = HostArgs {
+            seats: Some("me,human,human,claude".into()),
+            ..host_args()
+        }
+        .into_play();
+        let roles: Vec<SeatRole> = plan_table(&args, "Connor").unwrap().iter().map(|p| p.role).collect();
+        assert_eq!(
+            roles,
+            vec![SeatRole::Me, SeatRole::Human, SeatRole::Human, SeatRole::Agent(AgentKind::Claude)]
+        );
+
+        // `--vs` keeps meaning `me,<vs>`.
+        let args = HostArgs {
+            vs: Some("random".into()),
+            ..host_args()
+        }
+        .into_play();
+        let roles: Vec<SeatRole> = plan_table(&args, "Connor").unwrap().iter().map(|p| p.role).collect();
+        assert_eq!(roles, vec![SeatRole::Me, SeatRole::Random]);
+    }
+
+    #[test]
+    fn a_wildcard_listener_is_advertised_as_this_machine() {
+        let wildcard: SocketAddr = "0.0.0.0:7454".parse().unwrap();
+        let lan: Ipv4Addr = "192.168.1.10".parse().unwrap();
+        assert_eq!(advertised_addr(wildcard, Some(lan)), "192.168.1.10:7454".parse().unwrap());
+        // Nothing better to say: the bound address goes out as it is.
+        assert_eq!(advertised_addr(wildcard, None), wildcard);
+        let specific: SocketAddr = "10.0.0.4:7454".parse().unwrap();
+        assert_eq!(
+            advertised_addr(specific, Some(lan)),
+            specific,
+            "an address someone chose is left alone"
+        );
     }
 
     #[test]

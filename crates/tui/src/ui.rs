@@ -3,6 +3,7 @@
 use crate::app::{App, LogKind, Mode};
 use crate::theme::Theme;
 use engine::{ActReason, AttackTarget, CardType, HandView, Keyword, ObjectId, ObjectView, Outcome, Seat, Target};
+use protocol::ConnState;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
@@ -268,9 +269,20 @@ fn draw_side(f: &mut Frame, app: &App, area: Rect) {
     }
 }
 
+/// What to say about the link, first thing in the header so it survives an
+/// 80-column truncation. A healthy connection is not news, so it says nothing.
+fn conn_prefix(conn: ConnState) -> &'static str {
+    match conn {
+        ConnState::Connecting { .. } => "Reconnecting… ── ",
+        ConnState::GaveUp => "Disconnected ── ",
+        ConnState::Connected | ConnState::Reconnected => "",
+    }
+}
+
 fn header(app: &App) -> String {
+    let conn = conn_prefix(app.conn);
     let Some(view) = &app.view else {
-        return format!(" manaline ── game {} ── lobby ", app.game_id);
+        return format!(" manaline ── {conn}game {} ── lobby ", app.game_id);
     };
     if let Some(r) = &app.replay {
         return format!(
@@ -303,7 +315,7 @@ fn header(app: &App) -> String {
         },
     };
     format!(
-        " manaline ── Turn {} · {} · {} ── active: {} ── game {} ",
+        " manaline ── {conn}Turn {} · {} · {} ── active: {} ── game {} ",
         view.turn,
         view.phase.label(),
         status,

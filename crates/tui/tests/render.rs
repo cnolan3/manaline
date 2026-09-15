@@ -161,6 +161,24 @@ fn spectator_and_lobby_render() {
 }
 
 #[test]
+fn a_reconnecting_link_shows_in_the_header_at_both_sizes() {
+    let game = board();
+    let mut app = app_for(&game, Seat(0));
+    app.set_conn(protocol::ConnState::Connecting { attempt: 1 });
+    let wide = render(&app, 100, 32);
+    assert!(wide.contains("Reconnecting…"), "{wide}");
+    // The narrow terminal truncates the title, so the notice has to come first.
+    let narrow = render(&app, 80, 24);
+    assert!(narrow.contains("Reconnecting…"), "{narrow}");
+    app.set_conn(protocol::ConnState::GaveUp);
+    let gone = render(&app, 100, 32);
+    assert!(gone.contains("Disconnected"), "{gone}");
+    app.set_conn(protocol::ConnState::Reconnected);
+    let back = render(&app, 100, 32);
+    assert!(!back.contains("Reconnecting…") && !back.contains("Disconnected"), "{back}");
+}
+
+#[test]
 fn hand_keys_play_lands_and_open_payment_menus() {
     let game = board();
     let mut app = app_for(&game, Seat(0));

@@ -9,7 +9,7 @@ use mcp::server::{
 };
 use mcp::SessionConfig;
 use protocol::endpoint::{GameMarker, Runtime, SeatKind, SeatSlot};
-use protocol::{Client, ClientError, Endpoint, ServerMessage, Token};
+use protocol::{Client, ClientError, ConnState, Endpoint, ServerMessage, Token};
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
@@ -26,18 +26,30 @@ struct Running {
     /// This test's own runtime directory, so published games and seat claims
     /// are invisible to the other tests (and to the real machine).
     runtime: Runtime,
-    socket: std::path::PathBuf,
+    socket: Option<std::path::PathBuf>,
+    /// Where the daemon listens when it was started on TCP.
+    tcp: Option<std::net::SocketAddr>,
     game_id: String,
 }
 
 async fn start(seed: u64) -> Running {
+    start_on(seed, false).await
+}
+
+/// `start`, but listening on TCP: a remote seat, whose link can be cut and
+/// put back on again (`Proxy`).
+async fn start_tcp(seed: u64) -> Running {
+    start_on(seed, true).await
+}
+
+async fn start_on(seed: u64, tcp: bool) -> Running {
     let dir = std::env::temp_dir().join(format!("manaline-mcp-test-{}-{seed}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let config = DaemonConfig {
-        socket: Some(dir.join("game.sock")),
-        no_socket: false,
-        tcp: None,
+        socket: (!tcp).then(|| dir.join("game.sock")),
+        no_socket: tcp,
+        tcp: tcp.then(|| "127.0.0.1:0".to_string()),
         ws: None,
         tls: None,
         parent_pid: None,
@@ -49,19 +61,26 @@ async fn start(seed: u64) -> Running {
         }),
         cards: Arc::new(cards::core()),
         legality: None,
+        idle: None,
+        abandon_after: None,
     };
     let d = Daemon::bind(config).await.unwrap();
     let info = d.info().clone();
     let handle = d.handle();
     let task = tokio::spawn(async move { d.run().await.unwrap() });
-    let socket = info.socket.unwrap();
+    let endpoint = match (&info.socket, &info.tcp) {
+        (Some(p), _) => Endpoint::Unix(p.clone()),
+        (None, Some(a)) => Endpoint::Tcp(a.to_string()),
+        _ => unreachable!("the daemon listens somewhere"),
+    };
     Running {
         handle,
-        endpoint: Endpoint::Unix(socket.clone()),
+        endpoint,
         tokens: info.seat_tokens,
         task,
         runtime: Runtime::at(dir.join("runtime")),
-        socket,
+        socket: info.socket,
+        tcp: info.tcp,
         game_id: info.game_id.map(|g| g.0).unwrap_or_else(|| "game".into()),
     }
 }
@@ -86,7 +105,7 @@ fn publish(rt: &Runtime, r: &Running, seats: &[(SeatKind, Option<&str>)]) -> Gam
     let marker = GameMarker {
         game_id: r.game_id.clone(),
         pid: std::process::id(),
-        socket: Some(r.socket.clone()),
+        socket: r.socket.clone(),
         tcp: None,
         format: "cube".into(),
         spectator_token: None,
@@ -680,6 +699,28 @@ async fn a_newer_call_supersedes_an_abandoned_wait() {
     r.task.await.unwrap();
 }
 
+/// A session nobody holds any more must let go of its seat at once. The client
+/// reconnects on its own, so the tasks pumping it must not keep it alive.
+#[tokio::test]
+async fn a_dropped_session_is_not_kept_alive_by_its_background_tasks() {
+    let r = start(27).await;
+    let session = mcp::Session::connect(SessionConfig {
+        endpoint: r.endpoint.clone(),
+        token: r.tokens[1].clone(),
+        name: "Agent".into(),
+        decklist: None,
+    })
+    .await
+    .unwrap();
+    let weak = Arc::downgrade(&session);
+    drop(session);
+    tokio::task::yield_now().await;
+    assert!(weak.upgrade().is_none(), "a background task is still holding the session");
+
+    r.handle.shutdown();
+    r.task.await.unwrap();
+}
+
 #[tokio::test]
 async fn search_and_deck_stats_tools_work_before_the_game_starts() {
     let r = start(13).await;
@@ -1253,6 +1294,163 @@ async fn sit_down_picks_a_specific_seat() {
         text_of(&res)
     );
 
+    r.handle.shutdown();
+    r.task.await.unwrap();
+}
+
+/// A TCP hop in front of the daemon whose live connection can be cut, so a
+/// seat sees the link die the way a remote one does. The listener stays up, so
+/// the client's reconnect lands on a fresh hop and the same daemon.
+struct Proxy {
+    addr: std::net::SocketAddr,
+    cut: tokio::sync::broadcast::Sender<()>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Proxy {
+    async fn in_front_of(daemon: std::net::SocketAddr) -> Proxy {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (cut, _) = tokio::sync::broadcast::channel(4);
+        let hang_up = cut.clone();
+        let task = tokio::spawn(async move {
+            while let Ok((mut near, _)) = listener.accept().await {
+                let Ok(mut far) = tokio::net::TcpStream::connect(daemon).await else {
+                    return;
+                };
+                let mut cut = hang_up.subscribe();
+                tokio::spawn(async move {
+                    // Dropping both halves on a cut is what the client sees as EOF.
+                    tokio::select! {
+                        _ = tokio::io::copy_bidirectional(&mut near, &mut far) => {}
+                        _ = cut.recv() => {}
+                    }
+                });
+            }
+        });
+        Proxy { addr, cut, task }
+    }
+
+    fn endpoint(&self) -> Endpoint {
+        Endpoint::Tcp(self.addr.to_string())
+    }
+
+    /// Kill whatever is connected through here right now.
+    fn cut(&self) {
+        let _ = self.cut.send(());
+    }
+}
+
+/// Play the human seat until `agent` has a decision waiting: pass priority
+/// wherever that is legal, otherwise take the first action that is not
+/// conceding (which at the start is keeping the opening hand).
+async fn human_until(c: &mut Client, handle: &DaemonHandle, agent: Seat) {
+    let status = handle.status();
+    while !status.borrow().must_act.contains_key(&agent) {
+        let (acts, version) = c.get_legal_actions().await.unwrap();
+        let pick = acts
+            .iter()
+            .find(|a| matches!(a.action, Action::PassPriority))
+            .or_else(|| acts.iter().find(|a| !matches!(a.action, Action::Concede)));
+        match pick {
+            Some(a) => match c.act_by_id(a.id, version).await {
+                Ok(_) => {}
+                Err(ClientError::Protocol(e)) if e.retryable => {}
+                Err(e) => panic!("{e}"),
+            },
+            // Nothing for this seat to do yet: wait for the game to move.
+            None => {
+                c.next_push().await.unwrap();
+            }
+        }
+    }
+}
+
+/// A dropped link is not a timeout: the seat is still ours, so a wait in
+/// flight sits through the drop, resyncs when the client comes back, and
+/// returns the turn it was waiting for.
+#[tokio::test]
+async fn a_wait_survives_the_connection_dropping_under_it() {
+    let r = start_tcp(26).await;
+    let proxy = Proxy::in_front_of(r.tcp.unwrap()).await;
+    let server = mcp::connect(SessionConfig {
+        endpoint: proxy.endpoint(),
+        token: r.tokens[1].clone(),
+        name: "Claude".into(),
+        decklist: Some(cards::deck_text("red").unwrap()),
+    })
+    .await
+    .unwrap();
+    let me = server.session().unwrap().me;
+
+    // The human seat is played by hand here, so the agent's turn arrives
+    // exactly when this test says it does.
+    let mut human = Client::connect(&r.endpoint).await.unwrap();
+    human.hello(&r.tokens[0], Some("Connor")).await.unwrap();
+    human.subscribe().await.unwrap();
+    human.set_deck(&cards::deck_text("green").unwrap()).await.unwrap().unwrap();
+    human.ready().await.unwrap();
+    let mut status = r.handle.status();
+    status.wait_for(|s| !s.must_act.is_empty()).await.unwrap();
+
+    // The agent keeps its opening hand; the human has not decided yet, so it
+    // is now the other seat the game is waiting on.
+    let res = server
+        .wait_for_turn(Parameters(WaitParams {
+            timeout_seconds: Some(30),
+            auto_pass: Some(false),
+        }))
+        .await
+        .unwrap();
+    assert!(!is_error(&res), "{}", text_of(&res));
+    let ids = legal_ids(&res);
+    let (keep, _) = ids.iter().find(|(_, d)| d.starts_with("Keep")).expect("a mulligan decision");
+    let res = server
+        .take_action(Parameters(TakeActionParams {
+            action_id: Some(*keep),
+            action: None,
+            state_version: None,
+        }))
+        .await
+        .unwrap();
+    assert!(!is_error(&res), "{}", text_of(&res));
+    assert_eq!(res.structured_content.as_ref().unwrap()["still_your_turn"], false);
+
+    // Wait for the next turn, then cut the link out from under the wait.
+    let waiter = server.clone();
+    let wait = tokio::spawn(async move {
+        waiter
+            .wait_for_turn(Parameters(WaitParams {
+                timeout_seconds: Some(60),
+                auto_pass: Some(false),
+            }))
+            .await
+            .unwrap()
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    proxy.cut();
+
+    // The human plays on while the agent is away (the backoff starts at 500ms,
+    // so this all happens with the seat disconnected) until it must act again.
+    human_until(&mut human, &r.handle, me).await;
+
+    let res = tokio::time::timeout(std::time::Duration::from_secs(30), wait)
+        .await
+        .expect("the wait came back")
+        .unwrap();
+    assert!(!is_error(&res), "{}", text_of(&res));
+    let sc = res.structured_content.clone().unwrap();
+    assert_eq!(sc["timed_out"], false, "{}", text_of(&res));
+    assert!(sc.get("game_over").is_none() || sc["game_over"] == false, "{sc}");
+    assert!(!legal_ids(&res).is_empty(), "{}", text_of(&res));
+    assert!(text_of(&res).contains("IT IS YOUR TURN TO ACT"), "{}", text_of(&res));
+    assert_eq!(
+        server.session().unwrap().client.conn_state(),
+        ConnState::Reconnected,
+        "the wait should have been carried across a real reconnect"
+    );
+
+    proxy.task.abort();
     r.handle.shutdown();
     r.task.await.unwrap();
 }

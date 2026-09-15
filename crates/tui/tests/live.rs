@@ -26,6 +26,8 @@ async fn joins_and_plays_the_opening_through_the_protocol() {
         }),
         cards: Arc::new(cards::core()),
         legality: None,
+        idle: None,
+        abandon_after: None,
     };
     let d = Daemon::bind(config).await.unwrap();
     let info = d.info().clone();

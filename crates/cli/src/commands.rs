@@ -66,6 +66,46 @@ pub struct DaemonArgs {
     /// Where to write replay logs.
     #[arg(long)]
     pub replay_dir: Option<PathBuf>,
+    /// Tell the table when a seat the game is waiting on has been gone this
+    /// many seconds (off by default).
+    #[arg(long, value_name = "SECS")]
+    pub idle_warn: Option<u64>,
+    /// Concede for a seat the game is waiting on once it has been gone this
+    /// many seconds, so everyone else can finish (off by default).
+    #[arg(long, value_name = "SECS")]
+    pub idle_concede: Option<u64>,
+    /// Shut down once every seat has been gone this many seconds (off by default).
+    #[arg(long, value_name = "SECS")]
+    pub abandon_after: Option<u64>,
+}
+
+/// `--idle-warn` / `--idle-concede` as a policy. Either flag alone implies the
+/// other: a warning with no concession, or a concession with a warning one
+/// tenth of the way in.
+pub fn idle_policy(warn: Option<u64>, concede: Option<u64>) -> Result<Option<daemon::IdlePolicy>> {
+    use std::time::Duration;
+    let policy = match (warn, concede) {
+        (None, None) => return Ok(None),
+        (Some(w), Some(c)) => {
+            if c < w {
+                bail!("--idle-concede {c} is sooner than --idle-warn {w}");
+            }
+            daemon::IdlePolicy {
+                warn_after: Duration::from_secs(w),
+                concede_after: Duration::from_secs(c),
+            }
+        }
+        (Some(w), None) => daemon::IdlePolicy {
+            warn_after: Duration::from_secs(w),
+            // No concession asked for: a deadline nothing reaches.
+            concede_after: Duration::from_secs(u32::MAX as u64),
+        },
+        (None, Some(c)) => daemon::IdlePolicy {
+            warn_after: Duration::from_secs(c / 10),
+            concede_after: Duration::from_secs(c),
+        },
+    };
+    Ok(Some(policy))
 }
 
 /// Print one JSON line describing the listening daemon, then serve until
@@ -102,6 +142,8 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
         create,
         cards: Arc::new(cards::core()),
         legality: crate::deck::legality_source(),
+        idle: idle_policy(args.idle_warn, args.idle_concede)?,
+        abandon_after: args.abandon_after.map(std::time::Duration::from_secs),
     };
     let daemon = Daemon::bind(config).await?;
     println!("{}", serde_json::to_string(daemon.info())?);

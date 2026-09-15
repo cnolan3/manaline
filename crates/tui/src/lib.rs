@@ -13,7 +13,7 @@ use crate::app::{App, Command, LogKind, Mode};
 use anyhow::{anyhow, bail, Context, Result};
 use engine::Outcome;
 use futures::StreamExt;
-use protocol::{async_client, AsyncClient, ClientError, Endpoint, Role, Token};
+use protocol::{async_client, AsyncClient, ClientError, ConnState, Endpoint, ReconnectConfig, ReconnectPolicy, Role, Token};
 use ratatui::crossterm::event::{Event as TermEvent, EventStream, KeyEventKind};
 use ratatui::crossterm::{execute, terminal};
 use std::time::Duration;
@@ -51,13 +51,18 @@ pub async fn run(config: TuiConfig) -> Result<Option<Outcome>> {
     result.map(|_| app.outcome())
 }
 
-/// Everything `run` does before touching the terminal: connect, hello,
-/// submit the deck, ready up, subscribe, and load the initial state.
+/// Everything `run` does before touching the terminal: join (connect and
+/// hello, and keep doing so across drops), submit the deck, ready up,
+/// subscribe, and load the initial state.
 pub async fn join(config: TuiConfig) -> Result<Session> {
-    let (client, pushes) = async_client::connect(&config.endpoint)
-        .await
-        .with_context(|| format!("connecting to {}", config.endpoint))?;
-    let welcome = client.hello(&config.token, Some(&config.name)).await?;
+    let protocol::Joined { client, pushes, welcome } = async_client::join(ReconnectConfig {
+        endpoint: config.endpoint.clone(),
+        token: config.token.clone(),
+        name: Some(config.name.clone()),
+        policy: ReconnectPolicy::default(),
+    })
+    .await
+    .with_context(|| format!("connecting to {}", config.endpoint))?;
     let me = match welcome.role {
         Role::Seat(s) => Some(s),
         Role::Spectator => None,
@@ -123,9 +128,29 @@ async fn event_loop(
 ) -> Result<()> {
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_millis(100));
+    let mut state = client.watch_state();
+    // The watch sender dies with the client; the pushes branch ends the loop, so stop listening rather than spin.
+    let mut watching = true;
     loop {
         terminal.draw(|f| ui::draw(f, app))?;
         tokio::select! {
+            changed = state.changed(), if watching => match changed {
+                Err(_) => watching = false,
+                Ok(()) => {
+                    let conn = *state.borrow();
+                    app.set_conn(conn);
+                    match conn {
+                        ConnState::Connecting { .. } => app.set_status("Reconnecting…"),
+                        ConnState::Reconnected => {
+                            // The daemon kept the seat; what we hold may be stale.
+                            app.needs_refresh = true;
+                            app.push_log(LogKind::System, "Reconnected.".into());
+                        }
+                        ConnState::GaveUp => app.push_log(LogKind::System, "The game connection is gone.".into()),
+                        ConnState::Connected => {}
+                    }
+                }
+            },
             ev = events.next() => match ev {
                 Some(Ok(TermEvent::Key(key))) if key.kind != KeyEventKind::Release => {
                     let commands = app.handle_key(key);

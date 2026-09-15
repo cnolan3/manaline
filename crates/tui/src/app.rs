@@ -5,7 +5,7 @@
 use crate::settings::Settings;
 use engine::text::describe_event_view;
 use engine::{ActReason, Action, AttackTarget, DamageTarget, EventBase, EventView, GameView, Keyword, ObjectId, Outcome, Seat, Target};
-use protocol::{LegalAction, LobbyView, ServerMessage};
+use protocol::{ConnState, LegalAction, LobbyView, ServerMessage};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -176,6 +176,9 @@ pub struct App {
     pub log_scroll: usize,
     pub mode: Mode,
     pub status: Option<(String, Instant)>,
+    /// Where the link to the daemon stands, so the header can say when it is
+    /// away: a dropped seat is resumed, not lost, and the user should know which.
+    pub conn: ConnState,
     pub waiting_since: Option<Instant>,
     pub expanded_opponent: usize,
     pub needs_refresh: bool,
@@ -215,6 +218,7 @@ impl App {
             log_scroll: 0,
             mode: Mode::Normal,
             status: None,
+            conn: ConnState::Connected,
             waiting_since: None,
             expanded_opponent: 0,
             needs_refresh: false,
@@ -344,6 +348,10 @@ impl App {
 
     pub fn set_status(&mut self, text: impl Into<String>) {
         self.status = Some((text.into(), Instant::now()));
+    }
+
+    pub fn set_conn(&mut self, conn: ConnState) {
+        self.conn = conn;
     }
 
     pub fn push_log(&mut self, kind: LogKind, text: String) {

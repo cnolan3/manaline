@@ -822,6 +822,12 @@ impl McpServer {
             match session.wait_for_turn(left, generation).await {
                 Wait::TimedOut => break,
                 Wait::Superseded => return Ok(superseded(auto_passed)),
+                Wait::Disconnected => {
+                    return Ok(tool_error(
+                        "lost the connection to the game and could not get it back (gave up after 5 minutes); \
+                         the game may still be running — try again or rejoin.",
+                    ))
+                }
                 Wait::Ready(view) => {
                     if let Some(o) = view.outcome {
                         let text = format!(

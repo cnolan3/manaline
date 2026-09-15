@@ -97,7 +97,7 @@ One daemon per game, any number of seat clients, one protocol.
 
 Codes are a closed enum (`bad_token`, `unsupported_version`, `illegal_action`, `stale_state_version`, `not_your_turn_to_act`, `deck_rejected`, `game_over`, `internal`); `message` is for humans and agents, `code` is for programs. `stale_state_version` and `not_your_turn_to_act` are `retryable: true` — the right response is to fetch state and try again.
 
-The MCP server and the TUI are thin: they translate their own protocol into these messages. A seat that disconnects keeps its seat; reconnecting with the same token resumes. Long-term, a seat with no connection for N minutes can be auto-passed or conceded per format config; the initial build just waits.
+The MCP server and the TUI are thin: they translate their own protocol into these messages. A seat that disconnects keeps its seat; reconnecting with the same token resumes, and the client does that by itself — backoff, the same `hello`, requests in flight retried once — so a dropped link is a pause in the header, not the end of the game. A seat the game is waiting on that has no connection at all is the table's problem rather than one player's, so the daemon's optional idle policy warns the table once and then concedes for it, and a table every seat has left shuts itself down. Both are off for a daemon `play` spawns locally and on for `host`.
 
 ### 2.1 Local play is one command
 
@@ -1070,13 +1070,13 @@ Object ids are stable for the life of the game and appear everywhere so the agen
 
 ```
 manaline play      --deck <file> [--vs mcp|human|random] [--opp-deck <file>] [--format <name>] [--seed <u64>]
-manaline host      --format <name> --seats <n> [--tcp <addr>]     # tier 0: prints one join token per seat
+manaline host      --deck <file> [--seats <spec>] [--bind <addr>]  # tier 0: prints one join command per seat
 manaline join      <host:port> --token <t> --deck <file>          # tier 0: direct to a friend's daemon
 manaline join      <code> [--server wss://…] --deck <file>        # tier 1/2: via a lobby server
 manaline create    --format <name> --seats <n> [--server wss://…] # tier 1/2: prints the game code
 manaline queue     --format <name> [--seats <n>] [--server wss://…] --deck <file>   # matchmaking (future)
 manaline server    --listen <addr> [--tls-cert … --tls-key …] [--state-dir …]   # tier 1: run a lobby
-manaline daemon    --game <id> [--socket <path>] [--tcp <addr>]
+manaline daemon    --game <id> [--socket <path>] [--tcp <addr>] [--idle-warn <s>] [--idle-concede <s>] [--abandon-after <s>]
 manaline tui       --game <id> --seat <n> | --token <t>
 manaline mcp       --game <id> --seat <n> | --token <t> [--http <addr> | --stdio]
 manaline replay    <file.jsonl> [--step]
@@ -1085,7 +1085,7 @@ manaline deck      new <name> --format <f> | check <file> [--format <f>] | stats
 manaline ingest    set | card | roundtrip | eval     # dev tool, see §4.3.1
 ```
 
-`play` is the only command most people ever run; it orchestrates the others as child processes and tears them down together (§2.1). `--vs` accepts `random`, `human`, `mcp`, and named presets (`claude`, `codex`, …) that are just `mcp` plus a config snippet tailored to that client. `host` / `join` are the networked-play entry points and are stubs until that milestone — but the daemon flags they wrap exist from M1.
+`play` is the only command most people ever run; it orchestrates the others as child processes and tears them down together (§2.1). `--vs` accepts `random`, `human`, `mcp`, and named presets (`claude`, `codex`, …) that are just `mcp` plus a config snippet tailored to that client. `host` / `join` are the tier-0 networked-play entry points: `host` is `play` with a TCP listener (`--bind`, `0.0.0.0:0` by default), seats defaulting to `me,human`, the idle policy on, and a `manaline join <lan-ip>:<port> --token <t>` line printed per human seat.
 
 ---
 

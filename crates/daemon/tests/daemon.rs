@@ -2,17 +2,28 @@
 //! version and seat checks, reconnects, the replay log, and the §10 guard
 //! that inspects the raw bytes a seat receives.
 
-use daemon::{CreateGame, Daemon, DaemonConfig, DaemonHandle, TlsConfig};
+use daemon::{CreateGame, Daemon, DaemonConfig, DaemonHandle, IdlePolicy, TlsConfig};
 use engine::{Action, Outcome, Seat};
 use protocol::framing::LineTransport;
 use protocol::messages::{ClientEnvelope, ServerEnvelope};
-use protocol::{Client, ClientError, ClientMessage, Endpoint, ErrorCode, MessageConnection, ServerMessage, TlsOptions, Token};
+use protocol::{
+    async_client, AsyncClient, Client, ClientError, ClientMessage, ConnState, Endpoint, ErrorCode, Joined, MessageConnection,
+    ReconnectConfig, ReconnectPolicy, ServerMessage, TlsOptions, Token,
+};
 use rand::seq::SliceRandom;
-use rand::SeedableRng;
+use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
+use std::future::Future;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::mpsc::Receiver;
+use tokio::sync::watch;
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -44,6 +55,11 @@ struct Running {
 }
 
 async fn start(seats: u8, seed: u64, transport: Transport) -> Running {
+    start_with(seats, seed, transport, None, None).await
+}
+
+/// `start`, plus the M8 away-from-the-table policies.
+async fn start_with(seats: u8, seed: u64, transport: Transport, idle: Option<IdlePolicy>, abandon_after: Option<Duration>) -> Running {
     let dir = scratch();
     let sockets = transport == Transport::Unix;
     // `wss://` needs a certificate the client will accept: a throwaway CA
@@ -64,6 +80,8 @@ async fn start(seats: u8, seed: u64, transport: Transport) -> Running {
         }),
         cards: Arc::new(cards::core()),
         legality: None,
+        idle,
+        abandon_after,
     };
     let daemon = Daemon::bind(config).await.unwrap();
     let info = daemon.info().clone();
@@ -554,4 +572,360 @@ fn check_value(v: &serde_json::Value, me: Seat, line: &str) {
             check_value(child, me, line);
         }
     }
+}
+
+#[tokio::test]
+async fn an_idle_seat_is_warned_then_conceded_and_the_table_plays_on() {
+    let warn_after = Duration::from_millis(200);
+    let concede_after = Duration::from_millis(600);
+    let r = start_with(3, 17, Transport::Unix, Some(IdlePolicy { warn_after, concede_after }), None).await;
+    let mut clients: Vec<Option<Client>> = Vec::new();
+    for (i, deck) in ["green", "red", "blue"].iter().enumerate() {
+        let mut c = seat_client(&r, i, &format!("P{i}"), deck).await;
+        c.ready().await.unwrap();
+        clients.push(Some(c));
+    }
+    let mut status = r.handle.status();
+    status.wait_for(|s| !s.must_act.is_empty()).await.unwrap();
+    let idle = *status.borrow().must_act.keys().next().unwrap();
+
+    // The seat the game is waiting on walks away.
+    let gone_at = Instant::now();
+    drop(clients[idle.index()].take());
+    let observer = clients[(idle.index() + 1) % 3].as_mut().unwrap();
+
+    // One warning in the table chat, naming the seat, after warn_after.
+    let text = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let ServerMessage::Event {
+                event: engine::EventBase::Chat { from, text, .. },
+                ..
+            } = observer.next_push().await.unwrap()
+            {
+                assert_eq!(from, idle);
+                return text;
+            }
+        }
+    })
+    .await
+    .expect("the idle warning");
+    assert!(gone_at.elapsed() >= warn_after);
+    assert!(
+        text.contains(&format!("P{}", idle.index())) && text.contains(&format!("seat {}", idle.0)),
+        "{text}"
+    );
+
+    // Then the daemon concedes for it, and the other two carry on.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let ServerMessage::Event {
+                event: engine::EventBase::Eliminated { seat, reason },
+                ..
+            } = observer.next_push().await.unwrap()
+            {
+                assert_eq!((seat, reason), (idle, engine::Elimination::Conceded));
+                return;
+            }
+        }
+    })
+    .await
+    .expect("the idle concession");
+    assert!(gone_at.elapsed() >= concede_after);
+    status.wait_for(|s| !s.must_act.contains_key(&idle)).await.unwrap();
+    assert!(!status.borrow().game_over, "two seats are still in the game");
+
+    let tasks: Vec<_> = clients
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .map(|(i, c)| tokio::spawn(bot_loop(c, i as u64)))
+        .collect();
+    for t in tasks {
+        t.await.unwrap();
+    }
+    assert!(r.handle.is_over().await);
+    r.handle.shutdown();
+    r.task.await.unwrap();
+}
+
+#[tokio::test]
+async fn a_table_nobody_is_left_at_shuts_itself_down() {
+    let r = start_with(3, 4, Transport::Tcp, None, Some(Duration::from_millis(300))).await;
+    let a = seat_client(&r, 0, "A", "green").await;
+    let b = seat_client(&r, 1, "B", "red").await;
+    drop(a);
+    drop(b);
+    // Seat 2 never connected at all, so every seat is now away: nobody calls
+    // shutdown and `run` still returns.
+    tokio::time::timeout(Duration::from_secs(2), r.task)
+        .await
+        .expect("the daemon gives up on its own")
+        .unwrap();
+}
+
+/// A TCP proxy in front of the daemon that kills every connection after a
+/// seeded number of lines, so the seats behind it lose their links over and
+/// over while the game runs.
+struct LossyProxy {
+    addr: SocketAddr,
+    /// Connections the budget killed, as opposed to ones an end closed.
+    cuts: Arc<AtomicU32>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+/// Lines one connection may carry, both directions together, before the proxy
+/// cuts it: low enough to cut many times a game, high enough that a rejoin
+/// still makes progress before the next cut.
+const CUT_AFTER: std::ops::Range<u32> = 24..120;
+
+async fn lossy_proxy(upstream: String, seed: u64) -> LossyProxy {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let cuts = Arc::new(AtomicU32::new(0));
+    let counted = cuts.clone();
+    let task = tokio::spawn(async move {
+        // Seeded, so a failure here can be replayed.
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
+        while let Ok((down, _)) = listener.accept().await {
+            let budget = rng.gen_range(CUT_AFTER);
+            let Ok(up) = TcpStream::connect(&upstream).await else { continue };
+            tokio::spawn(relay(down, up, budget, counted.clone()));
+        }
+    });
+    LossyProxy { addr, cuts, task }
+}
+
+/// Forward lines both ways until the shared budget runs out, then drop both
+/// sockets so each side sees a clean EOF.
+async fn relay(down: TcpStream, up: TcpStream, budget: u32, cuts: Arc<AtomicU32>) {
+    // Both ends of the real thing turn Nagle off; a proxy that did not would
+    // pace the game at the delayed-ack timer rather than the daemon's speed.
+    down.set_nodelay(true).ok();
+    up.set_nodelay(true).ok();
+    let (down_r, down_w) = down.into_split();
+    let (up_r, up_w) = up.into_split();
+    let left = Arc::new(AtomicU32::new(budget));
+    let cut = tokio::select! {
+        cut = pump(down_r, up_w, left.clone()) => cut,
+        cut = pump(up_r, down_w, left.clone()) => cut,
+    };
+    if cut {
+        cuts.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// One direction, a line at a time: the protocol is newline-delimited JSON, so
+/// a line is a message. `true` once the budget is spent — the message that
+/// spent it is delivered first, so the cut falls between messages.
+async fn pump(read: OwnedReadHalf, mut write: OwnedWriteHalf, left: Arc<AtomicU32>) -> bool {
+    let mut read = BufReader::new(read);
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        match read.read_until(b'\n', &mut line).await {
+            Ok(0) | Err(_) => return false,
+            Ok(_) => {}
+        }
+        if write.write_all(&line).await.is_err() {
+            return false;
+        }
+        if left.fetch_sub(1, Ordering::SeqCst) <= 1 {
+            return true;
+        }
+    }
+}
+
+/// Play one seat through a link that keeps dying. Never concedes; a retryable
+/// protocol error means "look again" (a re-sent `act` the daemon has already
+/// applied comes back `stale_state_version`, which is exactly that); a framing
+/// error means the client is re-establishing the link underneath us, so the
+/// step is redone once it is back. Only giving up for good fails the test.
+async fn proxy_seat(config: ReconnectConfig, seat: Seat, decklist: String, seed: u64, reconnects: Arc<AtomicU32>) {
+    let Joined {
+        client,
+        mut pushes,
+        welcome,
+    } = async_client::join(config).await.unwrap();
+    assert_eq!(welcome.role, protocol::Role::Seat(seat), "joined the wrong seat");
+    count_rejoins(&client, reconnects);
+
+    step(&client, || client.subscribe()).await.unwrap();
+    step(&client, || client.set_deck(&decklist)).await.unwrap().unwrap();
+    step(&client, || client.ready()).await.unwrap();
+
+    let mut states = client.watch_state();
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    loop {
+        // The push channel is bounded and the task that fills it also delivers
+        // our replies, so a loop that reads pushes only when idle drains here.
+        while pushes.try_recv().is_ok() {}
+        // Mark the link before looking: a drop after this point makes whatever
+        // we are about to read stale, and `wake` has to notice that.
+        states.borrow_and_update();
+        let (acts, version, _) = match step(&client, || client.get_legal_actions()).await {
+            Ok(x) => x,
+            // Somebody has not readied yet: wait for the lobby to move.
+            Err(ClientError::Protocol(e)) if e.code == ErrorCode::BadRequest => {
+                wake(&mut pushes, &mut states).await;
+                continue;
+            }
+            Err(e) => panic!("seat {}: {e}", seat.0),
+        };
+        let playable: Vec<_> = acts.iter().filter(|a| !matches!(a.action, Action::Concede)).collect();
+        if let Some(pick) = playable.choose(&mut rng) {
+            let action = pick.action.clone();
+            match step(&client, || client.act(action.clone(), version)).await {
+                Ok((_, state, _)) => {
+                    assert_eq!(state.you, Some(seat), "the seat moved under us");
+                    if state.outcome.is_some() {
+                        return;
+                    }
+                }
+                Err(ClientError::Protocol(e)) if e.retryable => continue,
+                Err(e) => panic!("seat {}: {e}", seat.0),
+            }
+            continue;
+        }
+        let state = step(&client, || client.get_state()).await.unwrap();
+        assert_eq!(state.you, Some(seat), "the seat moved under us");
+        if state.outcome.is_some() {
+            return;
+        }
+        wake(&mut pushes, &mut states).await;
+    }
+}
+
+/// The rejoins happen inside the client, so count them from its state watch.
+fn count_rejoins(client: &AsyncClient, reconnects: Arc<AtomicU32>) {
+    let mut states = client.watch_state();
+    tokio::spawn(async move {
+        while states.changed().await.is_ok() {
+            if *states.borrow_and_update() == ConnState::Reconnected {
+                reconnects.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    });
+}
+
+/// Run one request, waiting a dropped link out rather than failing on it.
+async fn step<T, F, Fut>(client: &AsyncClient, mut request: F) -> Result<T, ClientError>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, ClientError>>,
+{
+    loop {
+        match request().await {
+            Err(ClientError::Frame(_)) => linked(client).await,
+            done => return done,
+        }
+    }
+}
+
+/// Wait until the client has a link again. Marking the state before waiting
+/// matters: otherwise `changed` returns at once on a transition already acted on.
+async fn linked(client: &AsyncClient) {
+    let mut states = client.watch_state();
+    loop {
+        let state = *states.borrow_and_update();
+        assert_ne!(state, ConnState::GaveUp, "the client stopped reconnecting");
+        if state.is_connected() {
+            return;
+        }
+        states.changed().await.expect("the client is still reconnecting");
+    }
+}
+
+/// Wait for the game to move, or for the link to come back. `states` is marked
+/// at the top of each turn of the loop, so a change already waiting here means
+/// the link dropped after the game was last looked at: whatever the table did
+/// meanwhile never reached us, and waiting for a push would wait forever.
+async fn wake(pushes: &mut Receiver<ServerMessage>, states: &mut watch::Receiver<ConnState>) {
+    loop {
+        if states.has_changed().expect("the client is still reconnecting") && resynced(states) {
+            return;
+        }
+        tokio::select! {
+            push = pushes.recv() => {
+                assert!(push.is_some(), "the client stopped reconnecting");
+                return;
+            }
+            changed = states.changed() => {
+                changed.expect("the client is still reconnecting");
+                if resynced(states) {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+/// `true` once the link is up again — the caller must then look at the game
+/// itself, since nothing that happened while it was down was pushed to us.
+fn resynced(states: &mut watch::Receiver<ConnState>) -> bool {
+    let state = *states.borrow_and_update();
+    assert_ne!(state, ConnState::GaveUp, "the client stopped reconnecting");
+    state.is_connected()
+}
+
+/// Four seats play a whole game through a proxy that keeps cutting their
+/// connections: the table still reaches an outcome and every seat is still
+/// the seat it joined as.
+#[tokio::test]
+async fn four_seats_keep_their_places_through_a_link_that_keeps_dropping() {
+    let r = start(4, 9, Transport::Tcp).await;
+    let upstream = match &r.endpoint {
+        Endpoint::Tcp(a) => a.clone(),
+        _ => unreachable!(),
+    };
+    let proxy = lossy_proxy(upstream, 77).await;
+    let names: Vec<String> = (0..4).map(|i| format!("P{i}")).collect();
+    let reconnects = Arc::new(AtomicU32::new(0));
+    let policy = ReconnectPolicy {
+        initial: Duration::from_millis(20),
+        max: Duration::from_millis(200),
+        give_up_after: Duration::from_secs(30),
+    };
+    let seats: Vec<_> = ["white", "blue", "black", "red"]
+        .iter()
+        .enumerate()
+        .map(|(i, deck)| {
+            let config = ReconnectConfig {
+                endpoint: Endpoint::Tcp(proxy.addr.to_string()),
+                token: r.tokens[i].clone(),
+                name: Some(names[i].clone()),
+                policy,
+            };
+            let deck = cards::deck_text(deck).unwrap();
+            tokio::spawn(proxy_seat(config, Seat(i as u8), deck, i as u64, reconnects.clone()))
+        })
+        .collect();
+
+    tokio::time::timeout(Duration::from_secs(120), async {
+        for s in seats {
+            s.await.unwrap();
+        }
+    })
+    .await
+    .expect("the game finished");
+    assert!(r.handle.is_over().await);
+
+    // The spectator goes straight to the daemon, so the last word is not the
+    // proxy's to lose.
+    let mut spec = Client::connect(&r.endpoint).await.unwrap();
+    spec.hello(&r.spectator, None).await.unwrap();
+    let final_state = spec.get_state().await.unwrap();
+    assert!(matches!(final_state.outcome, Some(Outcome::Winner(_)) | Some(Outcome::Draw)));
+    for (i, name) in names.iter().enumerate() {
+        let player = &final_state.players[i];
+        assert_eq!(&player.name, name, "seat {i} is still the seat that joined");
+        assert_ne!(player.elimination, Some(engine::Elimination::Conceded), "seat {i} was conceded for");
+    }
+    let cuts = proxy.cuts.load(Ordering::SeqCst);
+    assert!(cuts >= 2, "the proxy cut only {cuts} connections");
+    let back = reconnects.load(Ordering::SeqCst);
+    assert!(back >= 2, "the seats rejoined only {back} times");
+
+    proxy.task.abort();
+    r.handle.shutdown();
+    r.task.await.unwrap();
 }
