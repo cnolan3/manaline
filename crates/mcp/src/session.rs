@@ -5,9 +5,12 @@
 use anyhow::{anyhow, bail, Context, Result};
 use engine::text::describe_event_view;
 use engine::{ActReason, Action, EventBase, EventView, Format, GameView, ObjectId, Outcome, Seat};
-use protocol::{async_client, AsyncClient, ClientError, Endpoint, ErrorCode, LegalAction, LobbyView, Role, ServerMessage, Token};
+use protocol::{
+    async_client, AsyncClient, ClientError, ConnState, Endpoint, ErrorCode, Joined, LegalAction, LobbyView, ReconnectConfig,
+    ReconnectPolicy, Role, ServerMessage, Token,
+};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 use tokio::sync::watch;
 
@@ -48,16 +51,26 @@ pub struct Session {
 pub enum Wait {
     Ready(GameView),
     TimedOut,
+    /// The connection dropped and did not come back: the client gave up
+    /// reconnecting. A drop on its own is not this — the wait sits through one.
+    Disconnected,
     /// A newer tool call arrived; this wait must not act any further.
     Superseded,
 }
 
 impl Session {
     pub async fn connect(config: SessionConfig) -> Result<Arc<Session>> {
-        let (client, mut pushes) = async_client::connect(&config.endpoint)
-            .await
-            .with_context(|| format!("connecting to {}", config.endpoint))?;
-        let welcome = client.hello(&config.token, Some(&config.name)).await?;
+        // `join` says hello for us and, per §5, puts the link back up by itself:
+        // a seat that drops is still this seat's, so an agent mid-game is not
+        // thrown out of it by a broken pipe.
+        let Joined { client, pushes, welcome } = async_client::join(ReconnectConfig {
+            endpoint: config.endpoint.clone(),
+            token: config.token.clone(),
+            name: Some(config.name.clone()),
+            policy: ReconnectPolicy::default(),
+        })
+        .await
+        .with_context(|| format!("connecting to {}", config.endpoint))?;
         let me = match welcome.role {
             Role::Seat(s) => s,
             Role::Spectator => bail!("the MCP server needs a seat token, not a spectator token"),
@@ -92,12 +105,8 @@ impl Session {
             session.store_view(state);
         }
 
-        let bg = session.clone();
-        tokio::spawn(async move {
-            while let Some(msg) = pushes.recv().await {
-                bg.handle_push(msg).await;
-            }
-        });
+        pump_pushes(&session, pushes);
+        watch_connection(&session);
         Ok(session)
     }
 
@@ -243,6 +252,7 @@ impl Session {
             None => false,
         };
         let mut rx = self.view.subscribe();
+        let mut conn = self.client.watch_state();
         let deadline = tokio::time::Instant::now() + timeout;
         // Pushes are the fast path; a periodic poll of the daemon covers a
         // push that was lost or that carried nothing visible to this seat.
@@ -253,15 +263,34 @@ impl Session {
             if ready(&rx.borrow_and_update()) {
                 return Wait::Ready(self.view().expect("ready implies a view"));
             }
-            let now = tokio::time::Instant::now();
-            if now >= deadline {
-                return Wait::TimedOut;
+            let state = *conn.borrow_and_update();
+            if state == ConnState::GaveUp {
+                return Wait::Disconnected;
             }
-            let slice = (deadline - now).min(POLL_EVERY).min(Duration::from_millis(500));
-            match tokio::time::timeout(slice, rx.changed()).await {
-                Ok(Err(_)) => return Wait::TimedOut, // session gone
-                Ok(Ok(())) => {}
-                Err(_) => self.refresh().await,
+            // A link that is down is not the agent taking too long: the seat is
+            // still ours and the turn may be waiting on the other side of the
+            // reconnect, so the timeout only runs while we are connected.
+            let slice = if state.is_connected() {
+                let now = tokio::time::Instant::now();
+                if now >= deadline {
+                    return Wait::TimedOut;
+                }
+                (deadline - now).min(POLL_EVERY).min(Duration::from_millis(500))
+            } else {
+                POLL_EVERY
+            };
+            tokio::select! {
+                changed = rx.changed() => {
+                    if changed.is_err() {
+                        return Wait::TimedOut; // session gone
+                    }
+                }
+                changed = conn.changed() => {
+                    if changed.is_err() {
+                        return Wait::Disconnected; // the client itself is gone
+                    }
+                }
+                _ = tokio::time::sleep(slice) => self.refresh().await,
             }
         }
     }
@@ -308,6 +337,42 @@ impl Session {
     pub fn current_version(&self) -> u64 {
         self.view().map(|v| v.state_version).unwrap_or(0)
     }
+}
+
+/// Feed pushed messages into the session. Holds the session weakly and
+/// upgrades per message: a reconnecting client's push channel outlives any one
+/// connection, so a strong reference would pin a session nobody wants — one the
+/// agent left — to its seat until the reconnector finally gave up.
+fn pump_pushes(session: &Arc<Session>, mut pushes: tokio::sync::mpsc::Receiver<ServerMessage>) {
+    let weak: Weak<Session> = Arc::downgrade(session);
+    tokio::spawn(async move {
+        while let Some(msg) = pushes.recv().await {
+            // The upgrade must not be held across the `recv` above.
+            match weak.upgrade() {
+                Some(session) => session.handle_push(msg).await,
+                None => return,
+            }
+        }
+    });
+}
+
+/// Resync after the link comes back: the daemon welcomed us into a game that
+/// moved on while we were away, so the cached view is stale. Holds the session
+/// weakly, so the task ends with the session rather than keeping it alive.
+fn watch_connection(session: &Arc<Session>) {
+    let weak: Weak<Session> = Arc::downgrade(session);
+    let mut states = session.client.watch_state();
+    tokio::spawn(async move {
+        while states.changed().await.is_ok() {
+            if *states.borrow_and_update() != ConnState::Reconnected {
+                continue;
+            }
+            match weak.upgrade() {
+                Some(session) => session.refresh().await,
+                None => return,
+            }
+        }
+    });
 }
 
 pub fn describe_client_error(e: ClientError) -> anyhow::Error {

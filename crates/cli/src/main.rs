@@ -24,7 +24,10 @@ struct Cli {
 enum Command {
     /// Set up a table: `manaline play --deck green --vs random`, or `--seats me,claude,random`.
     Play(play::PlayArgs),
-    /// Join a game someone else is hosting, with the token they gave you.
+    /// Host a game for friends over the network: prints a join command per seat.
+    Host(play::HostArgs),
+    /// Join a friend's game: `manaline join <host:port> --token <t> --deck <file>`,
+    /// or a socket path for a table on this machine.
     Join(play::JoinArgs),
     /// Open the terminal client on an existing game (advanced).
     Tui(play::TuiArgs),
@@ -116,6 +119,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Play(args) => runtime()?.block_on(play::play(args)),
+        Command::Host(args) => runtime()?.block_on(play::host(args)),
         Command::Join(args) => runtime()?.block_on(play::join(args)),
         Command::Tui(args) => runtime()?.block_on(play::tui(args)),
         Command::Sim(args) => sim(args),

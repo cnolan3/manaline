@@ -3,7 +3,7 @@
 //! queues pushed messages for the caller to drain.
 
 use crate::endpoint::Endpoint;
-use crate::framing::{Connection, FrameError};
+use crate::framing::{Connection, FrameError, FramedReader, FramedWriter};
 use crate::messages::{
     ClientEnvelope, ClientMessage, LegalAction, LobbyView, ProtocolError, Role, ServerEnvelope, ServerMessage, Token, PROTOCOL_VERSION,
 };
@@ -65,6 +65,21 @@ impl Client {
             next_req: 1,
             pushed: VecDeque::new(),
         }
+    }
+
+    /// The framed halves of this connection, plus any pushed messages already
+    /// queued. `AsyncClient` drives its own reader and writer tasks from these,
+    /// so a caller can do a synchronous handshake here and hand the rest over.
+    pub fn into_parts(
+        self,
+    ) -> (
+        FramedReader<BoxedRead, ServerEnvelope>,
+        FramedWriter<BoxedWrite, ClientEnvelope>,
+        Vec<ServerMessage>,
+    ) {
+        let pushed = self.pushed.into_iter().collect();
+        let (reader, writer) = self.conn.split();
+        (reader, writer, pushed)
     }
 
     /// Send one request and wait for its reply, queueing any pushed messages

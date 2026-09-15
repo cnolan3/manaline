@@ -10,7 +10,7 @@ pub mod endpoint;
 pub mod framing;
 pub mod messages;
 
-pub use async_client::AsyncClient;
+pub use async_client::{AsyncClient, ConnState, Joined, ReconnectConfig, ReconnectPolicy};
 pub use client::{Client, ClientError, Welcome};
 pub use editor::{DeckCard, DeckGroup, EditorDeck, EditorError, EditorReply, EditorRequest, EditorStatus};
 pub use endpoint::Endpoint;

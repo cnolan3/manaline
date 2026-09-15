@@ -4,6 +4,7 @@ use engine::{CardId, Format, Seat};
 use protocol::{GameId, LobbyView, Role, SeatStatus, Token};
 use rand::distributions::Alphanumeric;
 use rand::{thread_rng, Rng};
+use std::time::Instant;
 
 #[derive(Clone, Debug)]
 pub struct SeatSlot {
@@ -14,6 +15,12 @@ pub struct SeatSlot {
     pub deck_names: Vec<String>,
     pub ready: bool,
     pub connections: u32,
+    /// When this seat last dropped to no connections at all, which is what the
+    /// idle and abandonment clocks measure (§5, M8). A seat that has never
+    /// connected has been away since the lobby was created.
+    pub disconnected_since: Option<Instant>,
+    /// One idle warning per absence, cleared when the seat comes back.
+    pub idle_warned: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -42,10 +49,29 @@ impl Lobby {
                     deck_names: Vec::new(),
                     ready: false,
                     connections: 0,
+                    disconnected_since: Some(Instant::now()),
+                    idle_warned: false,
                 })
                 .collect(),
             spectator_token: random_token(),
             started: false,
+        }
+    }
+
+    /// Count a connection for `seat`: the idle clock stops and rearms.
+    pub fn connect(&mut self, seat: Seat) {
+        let slot = &mut self.seats[seat.index()];
+        slot.connections += 1;
+        slot.disconnected_since = None;
+        slot.idle_warned = false;
+    }
+
+    /// Drop one connection; the idle clock starts when the last one goes.
+    pub fn disconnect(&mut self, seat: Seat) {
+        let slot = &mut self.seats[seat.index()];
+        slot.connections = slot.connections.saturating_sub(1);
+        if slot.connections == 0 && slot.disconnected_since.is_none() {
+            slot.disconnected_since = Some(Instant::now());
         }
     }
 

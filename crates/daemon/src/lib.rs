@@ -6,4 +6,4 @@ pub mod lobby;
 pub mod replay;
 pub mod server;
 
-pub use server::{CreateGame, Daemon, DaemonConfig, DaemonError, DaemonHandle, StartupInfo, Status};
+pub use server::{CreateGame, Daemon, DaemonConfig, DaemonError, DaemonHandle, IdlePolicy, StartupInfo, Status};

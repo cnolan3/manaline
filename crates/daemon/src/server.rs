@@ -15,10 +15,24 @@ use protocol::{
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, UnixListener};
 use tokio::sync::{broadcast, watch, Mutex};
 use tracing::{debug, info, warn};
+
+/// What the daemon does about a seat that has gone away mid-game (§2.2, M8).
+/// A seat the game is waiting on, with no connection at all, first gets one
+/// warning in the table chat and then, if it still has not come back, has
+/// `Action::Concede` applied for it so the other seats can finish.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IdlePolicy {
+    /// How long a disconnected seat the game is waiting on may hold everyone
+    /// up before the table is told about it (once).
+    pub warn_after: Duration,
+    /// How long before the daemon concedes for it. Must be at least `warn_after`.
+    pub concede_after: Duration,
+}
 
 /// Ask the daemon to create its game at startup instead of waiting for `create_game`.
 #[derive(Clone, Debug)]
@@ -43,6 +57,12 @@ pub struct DaemonConfig {
     pub cards: Arc<CardDb>,
     /// Per-format legality for Scryfall-pool formats (the carddb cache), if available.
     pub legality: Option<Arc<dyn engine::LegalitySource + Send + Sync>>,
+    /// What to do about a seat that disappears mid-game. `None` (the default
+    /// for a daemon `play` spawns locally) waits forever.
+    pub idle: Option<IdlePolicy>,
+    /// Shut the daemon down once every seat has been gone this long, in the
+    /// lobby or in a game. `None` never gives up.
+    pub abandon_after: Option<Duration>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -99,6 +119,8 @@ pub(crate) struct Shared {
     broadcast: broadcast::Sender<Broadcast>,
     shutdown: watch::Sender<bool>,
     replay_dir: PathBuf,
+    idle: Option<IdlePolicy>,
+    abandon_after: Option<Duration>,
 }
 
 /// A handle that can stop a running daemon and observe its status.
@@ -172,6 +194,8 @@ impl Daemon {
             broadcast,
             shutdown,
             replay_dir,
+            idle: config.idle,
+            abandon_after: config.abandon_after,
         });
 
         let mut info = StartupInfo {
@@ -246,6 +270,9 @@ impl Daemon {
         if let Some(pid) = parent_pid {
             tokio::spawn(watch_parent(pid, shared.clone()));
         }
+        if shared.idle.is_some() || shared.abandon_after.is_some() {
+            tokio::spawn(watch_away(shared.clone()));
+        }
         info!(socket = ?info.socket, tcp = ?info.tcp, "daemon listening");
         loop {
             tokio::select! {
@@ -294,6 +321,124 @@ async fn watch_parent(pid: u32, shared: Arc<Shared>) {
             return;
         }
     }
+}
+
+/// The idle and abandonment clocks (§2.2, M8). Spawned only when at least one
+/// of them is configured, so a locally spawned daemon behaves exactly as before.
+async fn watch_away(shared: Arc<Shared>) {
+    let mut shutdown = shared.shutdown.subscribe();
+    let tick = sweep_interval(&shared);
+    loop {
+        tokio::select! {
+            _ = shutdown.changed() => return,
+            _ = tokio::time::sleep(tick) => {}
+        }
+        if sweep(&shared).await {
+            return;
+        }
+    }
+}
+
+/// Fast enough that a policy measured in a few hundred milliseconds is not
+/// rounded away, slow enough never to be a hot loop.
+fn sweep_interval(shared: &Shared) -> Duration {
+    let mut shortest = Duration::from_millis(400);
+    if let Some(p) = shared.idle {
+        shortest = shortest.min(p.warn_after).min(p.concede_after);
+    }
+    if let Some(a) = shared.abandon_after {
+        shortest = shortest.min(a);
+    }
+    (shortest / 4).clamp(Duration::from_millis(10), Duration::from_millis(100))
+}
+
+/// One pass over the seats. Returns true once the daemon is shutting down.
+/// The lock is held for the whole pass and across no await.
+async fn sweep(shared: &Arc<Shared>) -> bool {
+    let now = Instant::now();
+    let mut state = shared.state.lock().await;
+    let State { lobby, game, replay } = &mut *state;
+    let Some(lobby) = lobby.as_mut() else {
+        return false;
+    };
+    let away = |slot: &crate::lobby::SeatSlot| slot.disconnected_since.map(|t| now.duration_since(t));
+
+    // Nobody is left at the table: give the process up (the Tier 1 server
+    // reuses this per game).
+    if let Some(limit) = shared.abandon_after {
+        if lobby.seats.iter().all(|s| away(s).is_some_and(|d| d >= limit)) {
+            info!(game = %lobby.game_id, "every seat has been gone for {limit:?}; giving up");
+            shared.shutdown.send_replace(true);
+            return true;
+        }
+    }
+
+    let Some(policy) = shared.idle else {
+        return false;
+    };
+    let Some(game) = game.as_mut() else {
+        return false;
+    };
+    if game.is_over().is_some() {
+        return false;
+    }
+    // Decide from one snapshot: a concession changes who must act.
+    let must_act = game.must_act();
+    let mut warn = Vec::new();
+    let mut concede = Vec::new();
+    for (i, slot) in lobby.seats.iter().enumerate() {
+        let seat = Seat(i as u8);
+        let Some(gone) = away(slot) else { continue };
+        if !must_act.contains_key(&seat) {
+            continue;
+        }
+        if gone >= policy.concede_after {
+            concede.push(seat);
+        } else if gone >= policy.warn_after && !slot.idle_warned {
+            warn.push(seat);
+        }
+    }
+
+    for seat in warn {
+        lobby.seats[seat.index()].idle_warned = true;
+        let text = format!(
+            "{} ({seat}) has been away for {} s",
+            lobby.seat_name(seat),
+            policy.warn_after.as_secs()
+        );
+        info!(game = %lobby.game_id, "{text}");
+        let _ = shared.broadcast.send(Broadcast::Events {
+            events: Arc::new(vec![Event::Chat {
+                from: seat,
+                to: None,
+                text,
+            }]),
+            state_version: game.state_version(),
+        });
+    }
+
+    for seat in concede {
+        // The game may have ended on an earlier concession in this same pass.
+        let events = match game.apply(seat, &Action::Concede) {
+            Ok(events) => events,
+            Err(e) => {
+                debug!("could not concede for {seat}: {e}");
+                continue;
+            }
+        };
+        if let Some(w) = replay.as_mut() {
+            if let Err(e) = w.append(seat, &Action::Concede) {
+                warn!("replay log write failed: {e}");
+            }
+        }
+        info!(game = %lobby.game_id, "{} has been away for {:?}; conceding for {seat}", lobby.seat_name(seat), policy.concede_after);
+        shared.status.send_replace(status_of(game));
+        let _ = shared.broadcast.send(Broadcast::Events {
+            events: Arc::new(events),
+            state_version: game.state_version(),
+        });
+    }
+    false
 }
 
 fn random_name() -> String {
@@ -380,7 +525,7 @@ where
     if let Some(Role::Seat(seat)) = conn.role {
         let mut state = shared.state.lock().await;
         if let Some(lobby) = state.lobby.as_mut() {
-            lobby.seats[seat.index()].connections = lobby.seats[seat.index()].connections.saturating_sub(1);
+            lobby.disconnect(seat);
             let view = lobby.view();
             let _ = shared.broadcast.send(Broadcast::Lobby(view));
         }
@@ -490,13 +635,12 @@ async fn handle_inner(shared: &Arc<Shared>, conn: &mut Conn, msg: ClientMessage)
                 .resolve(&token)
                 .ok_or_else(|| ProtocolError::new(ErrorCode::BadToken, "that token does not belong to this game"))?;
             if let Some(Role::Seat(old)) = conn.role {
-                lobby.seats[old.index()].connections = lobby.seats[old.index()].connections.saturating_sub(1);
+                lobby.disconnect(old);
             }
             if let Role::Seat(seat) = role {
-                let slot = &mut lobby.seats[seat.index()];
-                slot.connections += 1;
+                lobby.connect(seat);
                 if let Some(n) = name {
-                    slot.name = Some(n);
+                    lobby.seats[seat.index()].name = Some(n);
                 }
             }
             conn.role = Some(role);
