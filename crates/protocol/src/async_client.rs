@@ -27,6 +27,9 @@ pub struct AsyncClient {
     pending: Pending,
     next_req: Arc<AtomicU64>,
     state: watch::Receiver<ConnState>,
+    /// Set by `stop_reconnecting`; watched by the supervisor so a backoff
+    /// already in progress is cut short rather than slept out.
+    stop: Arc<watch::Sender<bool>>,
 }
 
 /// How a client comes back after the connection drops.
@@ -126,6 +129,8 @@ fn start(
     let (out_tx, out_rx) = mpsc::channel::<ClientEnvelope>(64);
     let (push_tx, push_rx) = mpsc::channel::<ServerMessage>(256);
     let (state_tx, state_rx) = watch::channel(ConnState::Connected);
+    let stop_tx = Arc::new(watch::channel(false).0);
+    let stop_rx = stop_tx.subscribe();
     let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
     let next_req = Arc::new(AtomicU64::new(1));
 
@@ -138,6 +143,8 @@ fn start(
         config,
         inflight: HashMap::new(),
         subscribed: false,
+        stop: stop_rx,
+        _stop_alive: stop_tx.clone(),
     };
     tokio::spawn(supervisor.run(link(reader, writer), queued));
 
@@ -147,6 +154,7 @@ fn start(
             pending,
             next_req,
             state: state_rx,
+            stop: stop_tx,
         },
         push_rx,
     )
@@ -206,6 +214,12 @@ struct Supervisor {
     /// been retried once.
     inflight: HashMap<u64, (ClientEnvelope, bool)>,
     subscribed: bool,
+    /// `true` once the app has said the link is not worth putting back up.
+    stop: watch::Receiver<bool>,
+    /// Held only so the stop channel stays open after the last handle drops:
+    /// a closed one makes `changed()` return instantly and would spin the
+    /// backoff below into a tight reconnect loop.
+    _stop_alive: Arc<watch::Sender<bool>>,
 }
 
 impl Supervisor {
@@ -237,6 +251,12 @@ impl Supervisor {
                         self.dispatch(env).await;
                     }
                 }
+            }
+            // Told to stop: this drop is final, exactly as if the policy had
+            // run out, so every waiter fails now instead of in five minutes.
+            if self.stopped() {
+                self.give_up();
+                return;
             }
             let Some(config) = self.config.clone() else {
                 // Without a reconnect config a dead reader is simply the end.
@@ -300,16 +320,31 @@ impl Supervisor {
         }
     }
 
-    /// Back off, reconnect, re-announce. `None` once the policy runs out.
+    /// Has the app told us to stop putting the connection back up?
+    fn stopped(&self) -> bool {
+        *self.stop.borrow()
+    }
+
+    /// Back off, reconnect, re-announce. `None` once the policy runs out, or
+    /// as soon as `stop_reconnecting` is called — including mid-backoff.
     async fn reconnect(&mut self, config: &ReconnectConfig) -> Option<Link> {
         let started = Instant::now();
         let mut delay = config.policy.initial;
         let mut attempt = 0u32;
         loop {
+            if self.stopped() {
+                return None;
+            }
             attempt += 1;
             let _ = self.state.send(ConnState::Connecting { attempt });
             let left = config.policy.give_up_after.checked_sub(started.elapsed())?;
-            tokio::time::sleep(delay.min(left)).await;
+            tokio::select! {
+                _ = tokio::time::sleep(delay.min(left)) => {}
+                _ = self.stop.changed() => {}
+            }
+            if self.stopped() {
+                return None;
+            }
             delay = (delay * 2).min(config.policy.max);
 
             let Ok(client) = Client::connect(&config.endpoint).await else {
@@ -421,6 +456,15 @@ impl AsyncClient {
 
     pub fn watch_state(&self) -> watch::Receiver<ConnState> {
         self.state.clone()
+    }
+
+    /// Stop putting the connection back up. A drop from here on is final: the
+    /// supervisor gives up at once — cutting short a backoff already running —
+    /// the state goes to `GaveUp`, and every request fails instead of blocking
+    /// for the rest of the policy's five minutes. For an app that knows the
+    /// other end is gone for good, such as a table whose game has ended.
+    pub fn stop_reconnecting(&self) {
+        let _ = self.stop.send(true);
     }
 
     pub async fn request(&self, msg: ClientMessage) -> Result<ServerMessage, ClientError> {

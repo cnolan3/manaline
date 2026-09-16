@@ -571,3 +571,45 @@ pub fn render_view(v: &GameView) -> String {
     }
     s
 }
+
+/// Why a player left the game, as a clause that agrees with its subject:
+/// `"you were reduced to 0 life"` when the viewer is the one who left,
+/// `"Claude 2 was reduced to 0 life"` when it is somebody else. The phrases
+/// on `Elimination` are third person singular, so the viewer's form has to
+/// be conjugated rather than spliced in behind a bare "you".
+pub fn elimination_clause(name: &str, is_you: bool, reason: &crate::game::Elimination) -> String {
+    let phrase = reason.phrase();
+    if !is_you {
+        return format!("{name} {phrase}");
+    }
+    match phrase.strip_prefix("was ") {
+        Some(rest) => format!("you were {rest}"),
+        None => format!("you {phrase}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::game::Elimination;
+
+    #[test]
+    fn an_elimination_clause_agrees_with_its_subject() {
+        assert_eq!(
+            elimination_clause("Claude 2", false, &Elimination::LifeZero),
+            "Claude 2 was reduced to 0 life"
+        );
+        assert_eq!(
+            elimination_clause("Claude 2", true, &Elimination::LifeZero),
+            "you were reduced to 0 life"
+        );
+        // Phrases that are already past tense plain verbs need no conjugating.
+        assert_eq!(elimination_clause("Bo", true, &Elimination::Conceded), "you conceded");
+        assert_eq!(elimination_clause("Bo", false, &Elimination::Conceded), "Bo conceded");
+        assert_eq!(
+            elimination_clause("Bo", true, &Elimination::DrewFromEmptyLibrary),
+            "you drew from an empty library"
+        );
+        assert_eq!(elimination_clause("Bo", true, &Elimination::Poison), "you took ten poison counters");
+    }
+}

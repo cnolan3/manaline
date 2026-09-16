@@ -30,8 +30,25 @@ Within a phase, players take turns holding priority. When you hold priority
 you may cast a spell, play a land, or pass. When every player passes in a row
 with nothing on the stack, the game moves to the next phase. Passing does not
 skip your whole turn: you will get priority again in the next phase.
-`wait_for_turn` passes for you whenever passing is your only option, so you
-are woken only when there is something you could actually do.
+
+There are a dozen priority windows in a turn cycle and almost all of them are
+quiet, so `wait_for_turn` passes through them for you. It wakes you for:
+
+* anything that is not plain priority — attackers, blockers, a choice, a
+  mulligan, a discard;
+* any window with something on the stack, so you can always respond to a
+  spell, an ability or a trigger;
+* your own main phases (your sorcery-speed window: lands, creatures) and your
+  own declare attackers step;
+* on an opponent's turn, their declare attackers once attackers are in, their
+  declare blockers, and their end step — the classic instant windows.
+
+Everything else with an empty stack is passed for you: your own upkeep, draw,
+begin combat, combat damage, end of combat and end step, and an opponent's
+upkeep, draw, begin combat, combat damage, end of combat and main phases.
+Holding an instant does not change this — you will still be offered it at
+every window above, which is where it wants to be cast. Pass
+`auto_pass: false` if you really want to stop at every priority window.
 
 ## Mana
 
@@ -95,16 +112,17 @@ everything.
 ## The loop
 
 1. Call `wait_for_turn`. It returns when you have a real decision to make,
-   saying why, with the state and the numbered legal actions. Moments where
-   you could only pass are passed for you meanwhile. If it times out, the
-   opponent is still thinking: call it again at once. The game only ends
-   when a reply says `game_over`; until then, keep looping without stopping
-   to ask anyone.
+   saying why, with the state and the numbered legal actions. The quiet
+   priority windows listed above are passed for you meanwhile. If it times
+   out, the opponent is still thinking: call it again at once. The game only
+   ends when a reply says `game_over`; until then, keep looping without
+   stopping to ask anyone.
 2. Read the state. Decide.
-3. Call `take_action` with the id of the action you chose and the
-   `state_version` of the list it came from. Ids are only meaningful for
-   that version: if the game has moved on, the call is refused and you
-   fetch a fresh list instead of accidentally doing something else. The
+3. Call `take_action` with the id of the action you chose and, optionally,
+   the `state_version` of the list it came from — the number in that list's
+   `LEGAL ACTIONS (state_version N)` header. Ids are only meaningful for that
+   version: naming it means a stale list is refused rather than turned into
+   some other action by accident, and you fetch a fresh list instead. The
    reply tells you whether you still must act (for example you cast a
    creature and still hold priority) and lists the next legal actions.
 4. Repeat step 3 until it is no longer your turn to act, then go back to 1.
@@ -142,7 +160,20 @@ write the file. `search_cards`, `get_card`, and `deck_stats` (one `N Card Name`
 per line, for curve, colour sources against pips, and legality) work with or
 without an editor open.
 
-Use `say` to talk to the other players; it is a friendly table. You may
-`concede` at any point if the game is clearly lost, but play it out while
-you have outs.
+## Talking to the table
+
+Use `say` to talk to the other players; it is a friendly table. What they say
+back comes to you on its own: `wait_for_turn`, `take_action` and
+`get_game_state` end their reply with a `TABLE CHAT` section holding whatever
+has been said since your last reply, each line once. You do not need to call
+`get_log` to hear it — though `get_log` shows the whole conversation, your own
+lines included, whenever you want to look back.
+
+Chat is live only. It is delivered to whoever is connected at the time and is
+never replayed, so anything said before you sat down is gone, and a greeting
+you send before your opponent has joined will not reach them. Say hello once
+the game has started rather than while the lobby is still filling up.
+
+You may `concede` at any point if the game is clearly lost, but play it out
+while you have outs.
 "#;

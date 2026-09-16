@@ -1,7 +1,7 @@
 //! The MCP server: tools, the play-a-game prompt, and the two resources (§7).
 
 use crate::primer::RULES_PRIMER;
-use crate::render::{outcome_text, reason_text, render_legal, render_state};
+use crate::render::{outcome_text, reason_text, render_chat, render_legal, render_state};
 use crate::session::{describe_client_error, Session, Wait};
 use engine::{Action, GameView, ObjectId, Outcome};
 use protocol::{ClientError, LegalAction};
@@ -77,8 +77,10 @@ pub struct TakeActionParams {
     /// A full action object instead of an id (the `action` field of a legal action entry).
     #[serde(default)]
     pub action: Option<serde_json::Value>,
-    /// The `state_version` the action list came from. If the game has moved on, the action is
-    /// refused instead of being applied to a different situation. Recommended with `action_id`.
+    /// Optional. The `state_version` the action list you took this id from came from — the
+    /// number in its `LEGAL ACTIONS (state_version N)` header, not the game's current version.
+    /// Given, a list that has gone stale is refused instead of being applied to a different
+    /// situation; omitted, the id is taken at face value. Recommended with `action_id`.
     #[serde(default)]
     pub state_version: Option<u64>,
 }
@@ -88,8 +90,9 @@ pub struct WaitParams {
     /// Give up after this many seconds and return `{ "timed_out": true }`. Default 45.
     #[serde(default)]
     pub timeout_seconds: Option<u32>,
-    /// Pass priority for you whenever passing (or conceding) is your only option, and keep
-    /// waiting, so you are only woken when there is a real decision. Default true.
+    /// Pass priority for you through the quiet windows — the ones with an empty stack where
+    /// no instant could matter — and keep waiting, so you are only woken for a real decision.
+    /// Set false to be woken at every priority window instead. Default true.
     #[serde(default)]
     pub auto_pass: Option<bool>,
 }
@@ -284,7 +287,6 @@ fn text_and_json(text: String, json: serde_json::Value) -> CallToolResult {
     r
 }
 
-/// Priority with nothing to do: every legal action is a pass or a concession.
 fn superseded(auto_passed: u32) -> CallToolResult {
     text_and_json(
         "This wait was superseded by a newer call and did nothing further.".to_string(),
@@ -292,8 +294,60 @@ fn superseded(auto_passed: u32) -> CallToolResult {
     )
 }
 
+/// Priority with nothing to do: every legal action is a pass or a concession.
 fn nothing_to_do(legal: &[LegalAction]) -> bool {
     !legal.is_empty() && legal.iter().all(|l| matches!(l.action, Action::PassPriority | Action::Concede))
+}
+
+/// Is this priority window one an instant could matter in?
+///
+/// A seat holding a Lightning Bolt has a legal non-pass action at every one of
+/// the dozen priority windows in a turn cycle, and waking for each of them
+/// cost the agents six to twelve round trips a turn for nothing. The windows
+/// worth stopping at are the classic ones:
+///
+/// * something is on the stack — there is a spell or trigger to respond to;
+/// * your own main phase — your sorcery-speed window, where the land drop and
+///   the creatures live;
+/// * your own declare attackers — your attack;
+/// * an opponent's declare attackers once attackers are in — the moment to
+///   shoot one down before blocks;
+/// * an opponent's declare blockers — after blocks are known, before damage;
+/// * an opponent's end step — the last moment that is still "their turn".
+///
+/// Everything else (either player's upkeep, draw, begin combat, combat damage
+/// and end of combat with an empty stack, your own end step, an opponent's
+/// main phases) is quiet and gets passed for you. Non-priority reasons —
+/// attackers, blockers, a choice, a mulligan, a discard — are never quiet:
+/// only `ActReason::Priority` reaches this function.
+fn wake_at_priority(view: &GameView, me: engine::Seat) -> bool {
+    use engine::Phase;
+    if !view.stack.is_empty() {
+        return true;
+    }
+    if view.active_player == me {
+        return matches!(view.phase, Phase::Main1 | Phase::Main2 | Phase::DeclareAttackers);
+    }
+    match view.phase {
+        Phase::DeclareAttackers => view.objects.values().any(|o| o.attacking.is_some()),
+        Phase::DeclareBlockers | Phase::End => true,
+        _ => false,
+    }
+}
+
+/// Whether `wait_for_turn` should pass this window for the agent rather than
+/// wake it. Only plain priority is ever auto-passed, and only when the window
+/// is quiet (or there was never anything but a pass to make anyway).
+fn auto_passable(view: &GameView, me: engine::Seat, reason: Option<engine::ActReason>, legal: &[LegalAction]) -> bool {
+    if reason != Some(engine::ActReason::Priority) {
+        return false;
+    }
+    // Something has to be passed with; a list without a pass in it is a
+    // situation this rule does not understand, so leave it to the agent.
+    if !legal.iter().any(|l| matches!(l.action, Action::PassPriority)) {
+        return false;
+    }
+    nothing_to_do(legal) || !wake_at_priority(view, me)
 }
 
 /// The reply for game tools when no game is published to sit down at.
@@ -634,12 +688,15 @@ impl McpServer {
     }
 
     fn state_result(&self, session: &Session, view: &GameView, legal: &[LegalAction], extra: Option<serde_json::Value>) -> CallToolResult {
-        let text = render_state(session, view, legal);
+        let mut text = render_state(session, view, legal);
+        let chat = session.undelivered_chat();
+        text.push_str(&render_chat(&chat));
         let mut json = serde_json::json!({
             "state": view,
             "legal_actions": legal,
             "your_seat": session.me,
             "must_act": view.must_act.get(&session.me).map(|r| serde_json::to_value(r).unwrap()),
+            "chat": chat,
         });
         if let Some(extra) = extra {
             if let (Some(obj), Some(e)) = (json.as_object_mut(), extra.as_object()) {
@@ -726,7 +783,7 @@ impl McpServer {
                     format!(
                         "Your turn to act: {}.\n{}",
                         reason.map(reason_text).unwrap_or("act"),
-                        render_legal(&legal)
+                        render_legal(&legal, version)
                     )
                 };
                 Ok(text_and_json(
@@ -740,7 +797,7 @@ impl McpServer {
 
     #[tool(
         name = "take_action",
-        description = "Take one of your legal actions, by id from the last list (pass the list's state_version too, so a stale id is refused rather than applied to a different situation), or pass a full `action` object. For a cast or activation you may edit `payment.tap` to any set of your untapped mana sources that covers the cost (e.g. tap a big mana creature instead of lands); the listed payments are just the common choices. The reply says whether you still must act and lists the next legal actions if so."
+        description = "Take one of your legal actions, by id from the last list, or by passing a full `action` object. `state_version` is optional: when you give it, it must be the version the list you took the id from came from — the number in that list's `LEGAL ACTIONS (state_version N)` header — and a list that has gone stale is refused rather than applied to a different situation. For a cast or activation you may edit `payment.tap` to any set of your untapped mana sources that covers the cost (e.g. tap a big mana creature instead of lands); the listed payments are just the common choices. The reply says whether you still must act and lists the next legal actions if so."
     )]
     pub async fn take_action(&self, Parameters(p): Parameters<TakeActionParams>) -> Result<CallToolResult, ErrorData> {
         let session = match self.ensure_seated().await {
@@ -759,7 +816,11 @@ impl McpServer {
             },
             _ => return Ok(tool_error("pass exactly one of action_id or action")),
         };
-        match session.act(action.clone(), version).await {
+        let acted = match session.bounded(session.act(action.clone(), version)).await {
+            Ok(r) => r,
+            Err(e) => return Ok(tool_error(e.to_string())),
+        };
+        match acted {
             Ok((events, view, legal)) => {
                 let names = |id: ObjectId| format!("{} {id}", session.name_of(id));
                 let seats = |s: engine::Seat| session.seat_name(s);
@@ -779,6 +840,8 @@ impl McpServer {
                     text.push('\n');
                 }
                 text.push_str(&render_state(&session, &view, &legal));
+                let chat = session.undelivered_chat();
+                text.push_str(&render_chat(&chat));
                 let json = serde_json::json!({
                     "applied": action,
                     "events": events,
@@ -786,6 +849,7 @@ impl McpServer {
                     "state_version": view.state_version,
                     "legal_actions": legal,
                     "still_your_turn": view.must_act.contains_key(&session.me),
+                    "chat": chat,
                 });
                 Ok(text_and_json(text, json))
             }
@@ -799,7 +863,7 @@ impl McpServer {
 
     #[tool(
         name = "wait_for_turn",
-        description = "Block until you have a real decision to make (a spell or ability you can afford, a land drop, attackers, blockers, a mulligan, a choice) or the game ends. Priority moments where passing is your only option are passed for you while you wait (set auto_pass=false to be woken at every one). Returns the state, its state_version, why you must act, and your legal actions; `auto_passed` counts the passes made for you. A { \"timed_out\": true } reply means the opponent is still thinking: the game is NOT over and you must call wait_for_turn again straight away, without stopping or asking anyone."
+        description = "Block until you have a real decision to make or the game ends. Quiet priority windows are passed for you while you wait, so you are woken only for: attackers, blockers, a choice, a mulligan or a discard; any window with something on the stack to respond to; your own main phases and your own declare attackers; and, on an opponent's turn, their declare attackers once attackers are in, their declare blockers, and their end step. Your own upkeep, draw, begin combat, combat damage, end of combat and end step, and an opponent's upkeep, draw, begin combat, combat damage, end of combat and main phases, are all passed for you when the stack is empty — holding an instant does not change that, and you still get the instant windows above. Set auto_pass=false to be woken at every priority window instead. Returns the state, its state_version, why you must act, and your legal actions; `auto_passed` counts the passes made for you. A { \"timed_out\": true } reply means the opponent is still thinking: the game is NOT over and you must call wait_for_turn again straight away, without stopping or asking anyone."
     )]
     pub async fn wait_for_turn(&self, Parameters(p): Parameters<WaitParams>) -> Result<CallToolResult, ErrorData> {
         let session = match self.ensure_seated().await {
@@ -830,14 +894,17 @@ impl McpServer {
                 }
                 Wait::Ready(view) => {
                     if let Some(o) = view.outcome {
-                        let text = format!(
+                        let mut text = format!(
                             "The game is over: {}.\n\n{}",
                             outcome_text(&session, o),
                             render_state(&session, &view, &[])
                         );
+                        // A "gg" said as the game ended still deserves to arrive.
+                        let chat = session.undelivered_chat();
+                        text.push_str(&render_chat(&chat));
                         return Ok(text_and_json(
                             text,
-                            serde_json::json!({ "game_over": true, "outcome": o, "state": view, "auto_passed": auto_passed }),
+                            serde_json::json!({ "game_over": true, "outcome": o, "state": view, "auto_passed": auto_passed, "chat": chat }),
                         ));
                     }
                     let Ok((legal, version, reason)) = session.legal_actions().await else {
@@ -853,9 +920,15 @@ impl McpServer {
                         tokio::time::sleep(Duration::from_millis(100)).await;
                         continue;
                     }
-                    if auto_pass && nothing_to_do(&legal) {
-                        // Only pass and concede: pass on the agent's behalf and keep waiting.
-                        match session.act(Action::PassPriority, version).await {
+                    if auto_pass && auto_passable(&view, session.me, reason, &legal) {
+                        // A quiet priority window: pass for the agent and keep waiting.
+                        // A pass that could not even be sent (the link is down)
+                        // is not a failure: go round again and wait it out.
+                        let passed = match session.bounded(session.act(Action::PassPriority, version)).await {
+                            Ok(r) => r,
+                            Err(_) => continue,
+                        };
+                        match passed {
                             Ok(_) => auto_passed += 1,
                             Err(ClientError::Protocol(e))
                                 if matches!(
@@ -871,12 +944,17 @@ impl McpServer {
                 }
             }
         }
+        // Even a timeout carries the table's chat: it is pushed live and never
+        // replayed, so a reply that drops it drops it for good.
+        let chat = session.undelivered_chat();
+        let mut text = format!(
+            "Still waiting after {secs}s: the game is in progress and the opponent is thinking ({auto_passed} priority passes made for you). \
+             Call wait_for_turn again now. Do not stop, do not end your turn, and do not ask for confirmation: keep waiting until it returns your legal actions or says the game is over."
+        );
+        text.push_str(&render_chat(&chat));
         Ok(text_and_json(
-            format!(
-                "Still waiting after {secs}s: the game is in progress and the opponent is thinking ({auto_passed} priority passes made for you). \
-                 Call wait_for_turn again now. Do not stop, do not end your turn, and do not ask for confirmation: keep waiting until it returns your legal actions or says the game is over."
-            ),
-            serde_json::json!({ "timed_out": true, "game_over": false, "auto_passed": auto_passed }),
+            text,
+            serde_json::json!({ "timed_out": true, "game_over": false, "auto_passed": auto_passed, "chat": chat }),
         ))
     }
 
@@ -1107,16 +1185,17 @@ impl McpServer {
 
     #[tool(
         name = "say",
-        description = "Say something to the table (parameter: text). It appears in the other players' logs."
+        description = "Say something to the table (parameter: text). It appears in the other players' logs and, for an agent, in the TABLE CHAT section of their next tool reply. Chat is live only: it reaches whoever is connected at the time and is never replayed, so anything said before a seat joined is gone."
     )]
     pub async fn say(&self, Parameters(p): Parameters<SayParams>) -> Result<CallToolResult, ErrorData> {
         let session = match self.ensure_seated().await {
             Ok(s) => s,
             Err(e) => return Ok(e),
         };
-        match session.client.chat(&p.text, None).await {
-            Ok(()) => Ok(CallToolResult::success(vec![ContentBlock::text("said")])),
-            Err(e) => Ok(tool_error(describe_client_error(e).to_string())),
+        match session.bounded(session.client.chat(&p.text, None)).await {
+            Ok(Ok(())) => Ok(CallToolResult::success(vec![ContentBlock::text("said")])),
+            Ok(Err(e)) => Ok(tool_error(describe_client_error(e).to_string())),
+            Err(e) => Ok(tool_error(e.to_string())),
         }
     }
 
@@ -1128,7 +1207,11 @@ impl McpServer {
         };
         session.begin_call();
         let version = session.current_version();
-        match session.act(Action::Concede, version).await {
+        let conceded = match session.bounded(session.act(Action::Concede, version)).await {
+            Ok(r) => r,
+            Err(e) => return Ok(tool_error(e.to_string())),
+        };
+        match conceded {
             Ok((_, view, _)) => {
                 let text = match view.outcome {
                     Some(o) => format!("You conceded. {}", outcome_text(&session, o)),
@@ -1371,11 +1454,11 @@ impl McpServer {
         let text = format!(
             "You are playing Magic: The Gathering {seated} at a manaline table. Read the resource `{PRIMER_URI}` first if you have not played before.\n\n\
              Then loop:\n\
-             1. Call `wait_for_turn`. It blocks until you must act. If it returns timed_out, the game is still on and the opponent is thinking: call it again immediately. Never stop looping or ask the user what to do while the game is in progress; only a reply with game_over: true ends the loop.\n\
+             1. Call `wait_for_turn`. It blocks until you must act. It wakes you for attackers, blockers, choices, mulligans and discards; for anything on the stack you could respond to; for your own main phases and declare attackers; and, on an opponent's turn, for their declare attackers once attackers are in, their declare blockers, and their end step. The quiet windows in between are passed for you even when you are holding an instant, so do not expect to be woken at every step. If it returns timed_out, the game is still on and the opponent is thinking: call it again immediately. Never stop looping or ask the user what to do while the game is in progress; only a reply with game_over: true ends the loop.\n\
              2. Read the state and the numbered legal actions it returns. Think about the board.\n\
              3. Call `take_action` with the id you chose and the state_version the list came from. If the reply says it is still your turn, choose again from the new list; when you have nothing worth doing, take the `Pass priority` action.\n\
              4. Go back to step 1.\n\n\
-             Use `say` to greet your opponent and comment on the game now and then. Play to win: develop your mana, cast your best creatures, attack when it is profitable, block to survive. Do not concede unless the game is clearly lost. \
+             Use `say` to greet your opponent and comment on the game now and then; what they say back arrives in the `TABLE CHAT` section at the end of your next reply, so answer it there rather than ignoring it. Chat is live only and never replayed, so greet them once the game has started, not before. Play to win: develop your mana, cast your best creatures, attack when it is profitable, block to survive. Do not concede unless the game is clearly lost. \
              When the game is over, `leave` frees your seat for another agent."
         );
         vec![PromptMessage::new_text(Role::User, text)]
@@ -1500,5 +1583,211 @@ impl McpServer {
     /// For tests and the CLI: the outcome as this seat sees it.
     pub fn outcome(&self) -> Option<Outcome> {
         self.session().and_then(|s| s.outcome())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use engine::{ActReason, Phase, Seat};
+
+    const ME: Seat = Seat(1);
+    const THEM: Seat = Seat(0);
+
+    fn view(active: Seat, phase: Phase, stack: usize, attacking: bool) -> GameView {
+        let mut objects = std::collections::BTreeMap::new();
+        if attacking {
+            objects.insert(
+                ObjectId(9),
+                engine::view::ObjectView {
+                    id: ObjectId(9),
+                    card: 0,
+                    name: "Grizzly Bears".into(),
+                    cost: Default::default(),
+                    types: Vec::new(),
+                    subtypes: Vec::new(),
+                    text: String::new(),
+                    produces: Vec::new(),
+                    owner: active,
+                    controller: active,
+                    zone: engine::Zone::Battlefield,
+                    tapped: true,
+                    summoning_sick: false,
+                    damage: 0,
+                    pt: Some((2, 2)),
+                    attacking: Some(engine::action::AttackTarget::Player(ME)),
+                    blocking: Vec::new(),
+                    castable: false,
+                    keywords: Vec::new(),
+                    attached_to: None,
+                    token: false,
+                    counters: 0,
+                    abilities: Vec::new(),
+                },
+            );
+        }
+        GameView {
+            you: Some(ME),
+            turn: 3,
+            active_player: active,
+            phase,
+            priority: Some(ME),
+            must_act: [(ME, ActReason::Priority)].into_iter().collect(),
+            prompt: None,
+            state_version: 62,
+            outcome: None,
+            stack: (0..stack)
+                .map(|i| engine::view::StackObjectView {
+                    object: ObjectId(100 + i as u32),
+                    name: "Grizzly Bears".into(),
+                    controller: THEM,
+                    targets: Vec::new(),
+                    modes: Vec::new(),
+                    x: 0,
+                    kind: "spell".into(),
+                    description: String::new(),
+                })
+                .collect(),
+            players: Vec::new(),
+            objects,
+        }
+    }
+
+    /// A Lightning Bolt in hand: a pass, and something better than passing.
+    fn bolt_in_hand() -> Vec<LegalAction> {
+        vec![
+            LegalAction {
+                id: 0,
+                action: Action::PassPriority,
+                description: "Pass priority".into(),
+            },
+            LegalAction {
+                id: 1,
+                action: Action::Concede,
+                description: "Concede".into(),
+            },
+            LegalAction {
+                id: 2,
+                action: Action::CastSpell {
+                    object: ObjectId(4),
+                    targets: Vec::new(),
+                    payment: Default::default(),
+                },
+                description: "Cast Lightning Bolt".into(),
+            },
+        ]
+    }
+
+    fn only_a_pass() -> Vec<LegalAction> {
+        vec![LegalAction {
+            id: 0,
+            action: Action::PassPriority,
+            description: "Pass priority".into(),
+        }]
+    }
+
+    /// Would this window be passed for an agent holding a Bolt?
+    fn quiet(active: Seat, phase: Phase) -> bool {
+        auto_passable(&view(active, phase, 0, false), ME, Some(ActReason::Priority), &bolt_in_hand())
+    }
+
+    #[test]
+    fn your_own_turn_stops_only_at_the_sorcery_windows_and_the_attack() {
+        for phase in [Phase::Main1, Phase::Main2, Phase::DeclareAttackers] {
+            assert!(!quiet(ME, phase), "{phase:?} should wake you on your own turn");
+        }
+        for phase in [
+            Phase::Upkeep,
+            Phase::Draw,
+            Phase::BeginCombat,
+            Phase::DeclareBlockers,
+            Phase::CombatDamage,
+            Phase::EndCombat,
+            Phase::End,
+        ] {
+            assert!(quiet(ME, phase), "{phase:?} should be passed for you on your own turn");
+        }
+    }
+
+    #[test]
+    fn an_opponents_turn_stops_at_the_instant_windows_only() {
+        for phase in [Phase::DeclareBlockers, Phase::End] {
+            assert!(!quiet(THEM, phase), "{phase:?} should wake you on their turn");
+        }
+        for phase in [
+            Phase::Upkeep,
+            Phase::Draw,
+            Phase::Main1,
+            Phase::BeginCombat,
+            Phase::CombatDamage,
+            Phase::EndCombat,
+            Phase::Main2,
+        ] {
+            assert!(quiet(THEM, phase), "{phase:?} should be passed for you on their turn");
+        }
+    }
+
+    #[test]
+    fn their_declare_attackers_wakes_you_only_once_attackers_are_in() {
+        let before = view(THEM, Phase::DeclareAttackers, 0, false);
+        let after = view(THEM, Phase::DeclareAttackers, 0, true);
+        assert!(
+            auto_passable(&before, ME, Some(ActReason::Priority), &bolt_in_hand()),
+            "nothing is attacking yet"
+        );
+        assert!(
+            !auto_passable(&after, ME, Some(ActReason::Priority), &bolt_in_hand()),
+            "an attacker is in: this is the window to shoot it down"
+        );
+    }
+
+    #[test]
+    fn anything_on_the_stack_wakes_you_wherever_you_are() {
+        for active in [ME, THEM] {
+            for phase in Phase::ALL {
+                let v = view(active, phase, 1, false);
+                assert!(
+                    !auto_passable(&v, ME, Some(ActReason::Priority), &bolt_in_hand()),
+                    "a spell on the stack in {phase:?} must wake you"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_window_with_nothing_but_a_pass_in_it_is_always_passed() {
+        // Even a wake window: there is no decision to be had there.
+        for phase in Phase::ALL {
+            assert!(auto_passable(
+                &view(ME, phase, 1, true),
+                ME,
+                Some(ActReason::Priority),
+                &only_a_pass()
+            ));
+        }
+    }
+
+    #[test]
+    fn nothing_but_plain_priority_is_ever_passed_for_you() {
+        let v = view(ME, Phase::Upkeep, 0, false);
+        for reason in [
+            ActReason::DeclareAttackers,
+            ActReason::DeclareBlockers,
+            ActReason::AssignDamage,
+            ActReason::Mulligan,
+            ActReason::BottomCards,
+            ActReason::Discard,
+            ActReason::Choice,
+        ] {
+            assert!(!auto_passable(&v, ME, Some(reason), &only_a_pass()), "{reason:?} was auto-passed");
+        }
+        assert!(!auto_passable(&v, ME, None, &only_a_pass()), "an unknown reason was auto-passed");
+        // A list with no pass in it is not this rule's business either.
+        let no_pass = vec![LegalAction {
+            id: 0,
+            action: Action::Concede,
+            description: "Concede".into(),
+        }];
+        assert!(!auto_passable(&v, ME, Some(ActReason::Priority), &no_pass));
     }
 }

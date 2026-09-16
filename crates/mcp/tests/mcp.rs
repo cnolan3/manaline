@@ -220,6 +220,33 @@ async fn human_loop(mut c: Client, seed: u64) -> Client {
     }
 }
 
+/// The human seat, playing to put spells on the stack: cast if it can, else
+/// make its land drop, else pass. Runs until the game ends or it is aborted.
+async fn human_casting_loop(mut c: Client) -> Client {
+    loop {
+        let (acts, version) = c.get_legal_actions().await.unwrap();
+        let pick = acts
+            .iter()
+            .find(|a| a.description.starts_with("Cast "))
+            .or_else(|| acts.iter().find(|a| a.description.starts_with("Play ")))
+            .or_else(|| acts.iter().find(|a| a.description.starts_with("Keep")))
+            .or_else(|| acts.iter().find(|a| matches!(a.action, Action::PassPriority)))
+            .or_else(|| acts.iter().find(|a| !matches!(a.action, Action::Concede)));
+        match pick {
+            Some(a) => match c.act_by_id(a.id, version).await {
+                Ok((_, state, _)) if state.outcome.is_some() => return c,
+                Ok(_) => continue,
+                Err(ClientError::Protocol(e)) if e.retryable => continue,
+                Err(e) => panic!("{e}"),
+            },
+            None => match c.next_push().await {
+                Ok(_) => continue,
+                Err(_) => return c,
+            },
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 struct Played {
     outcome: Option<Outcome>,
@@ -227,17 +254,54 @@ struct Played {
     auto_passed: u64,
     /// Times the agent was woken with nothing but pass/concede to choose from.
     pass_only_wakeups: u32,
+    /// Every moment `wait_for_turn` handed back, for the quiet-window rule.
+    wakes: Vec<Wake>,
+}
+
+/// One `wait_for_turn` return: where in the turn it happened and why.
+#[derive(Debug, Clone)]
+struct Wake {
+    reason: String,
+    view: engine::GameView,
+}
+
+impl Wake {
+    /// The rule `wait_for_turn` promises, written out again from the outside:
+    /// anything but plain priority, anything with a stack, your own sorcery
+    /// windows and attack, and the three instant windows on their turn.
+    fn is_a_window_worth_waking_for(&self, me: Seat) -> bool {
+        use engine::Phase;
+        let v = &self.view;
+        if self.reason != "priority" {
+            return true;
+        }
+        if !v.stack.is_empty() {
+            return true;
+        }
+        if v.active_player == me {
+            return matches!(v.phase, Phase::Main1 | Phase::Main2 | Phase::DeclareAttackers);
+        }
+        match v.phase {
+            Phase::DeclareAttackers => v.objects.values().any(|o| o.attacking.is_some()),
+            Phase::DeclareBlockers | Phase::End => true,
+            _ => false,
+        }
+    }
 }
 
 /// Play a seat to the end through the tools, the way the prompt tells an agent
 /// to: `wait_for_turn`, then the first action that does something.
 async fn agent_loop(server: &mcp::McpServer, timeout_seconds: u32) -> Played {
+    agent_loop_with(server, timeout_seconds, None).await
+}
+
+async fn agent_loop_with(server: &mcp::McpServer, timeout_seconds: u32, auto_pass: Option<bool>) -> Played {
     let mut played = Played::default();
     loop {
         let res = server
             .wait_for_turn(Parameters(WaitParams {
                 timeout_seconds: Some(timeout_seconds),
-                auto_pass: None,
+                auto_pass,
             }))
             .await
             .unwrap();
@@ -251,6 +315,18 @@ async fn agent_loop(server: &mcp::McpServer, timeout_seconds: u32) -> Played {
             panic!("agent waited {timeout_seconds}s without a turn");
         }
         assert!(text_of(&res).contains("IT IS YOUR TURN TO ACT"), "{}", text_of(&res));
+        // The ids are only meaningful for one state version, and the text half
+        // is all an agent reads: the number has to be in the header.
+        let version = sc["state_version"].as_u64().expect("wait_for_turn reports its version");
+        assert!(
+            text_of(&res).contains(&format!("LEGAL ACTIONS (state_version {version})")),
+            "{}",
+            text_of(&res)
+        );
+        played.wakes.push(Wake {
+            reason: sc.get("reason").and_then(|r| r.as_str()).unwrap_or_default().to_string(),
+            view: serde_json::from_value(sc["state"].clone()).expect("the state round trips"),
+        });
         let mut ids = legal_ids(&res);
         if ids.iter().all(|(_, d)| d == "Pass priority" || d == "Concede") {
             played.pass_only_wakeups += 1;
@@ -373,6 +449,14 @@ async fn an_agent_plays_a_whole_game_through_the_tools() {
     // Once over, tools say so instead of erroring.
     let res = server.get_game_state().await.unwrap();
     assert!(text_of(&res).contains("GAME OVER"));
+    // Whoever lost, the reason reads as English from this seat's point of view:
+    // never "you was reduced to 0 life".
+    let over = text_of(&res);
+    assert!(!over.contains("you was"), "{over}");
+    assert!(
+        over.contains("GAME OVER: you won") || over.contains("GAME OVER: Connor won"),
+        "{over}"
+    );
     let res = server
         .wait_for_turn(Parameters(WaitParams {
             timeout_seconds: Some(1),
@@ -708,6 +792,419 @@ async fn action_ids_are_bound_to_their_state_version() {
         .unwrap();
     assert!(is_error(&res), "{}", text_of(&res));
     assert!(text_of(&res).contains("moved on"), "{}", text_of(&res));
+
+    r.handle.shutdown();
+    r.task.await.unwrap();
+}
+
+/// Holding an instant used to mean being woken at every one of the dozen
+/// priority windows in a turn cycle, because a Lightning Bolt gives the seat a
+/// legal non-pass action everywhere. The red deck is nothing but that: play a
+/// whole game with it and check every moment `wait_for_turn` handed back was
+/// one an instant could actually matter in.
+#[tokio::test]
+async fn wait_for_turn_wakes_only_where_an_instant_could_matter() {
+    let r = start(33).await;
+    let server = mcp::connect(SessionConfig {
+        endpoint: r.endpoint.clone(),
+        token: r.tokens[1].clone(),
+        // 3 Shock, 2 Lightning Bolt, 2 Lightning Strike, a Volcanic Hammer and
+        // a Flame Slash: an instant is in hand most of the game.
+        decklist: Some(cards::deck_text("red").unwrap()),
+        name: "Claude 2".into(),
+    })
+    .await
+    .unwrap();
+    let mut human = Client::connect(&r.endpoint).await.unwrap();
+    human.hello(&r.tokens[0], Some("Connor")).await.unwrap();
+    human.subscribe().await.unwrap();
+    human.set_deck(&cards::deck_text("green").unwrap()).await.unwrap().unwrap();
+    human.ready().await.unwrap();
+    let mut status = r.handle.status();
+    status.wait_for(|s| !s.must_act.is_empty()).await.unwrap();
+
+    let human_task = tokio::spawn(human_loop(human, 4));
+    let played = agent_loop(&server, 20).await;
+    human_task.await.unwrap();
+    assert!(matches!(played.outcome, Some(Outcome::Winner(_))), "{:?}", played.outcome);
+
+    let me = Seat(1);
+    for w in &played.wakes {
+        assert!(
+            w.is_a_window_worth_waking_for(me),
+            "woken at a quiet window: turn {} {:?}, active {:?}, reason {}, stack {}",
+            w.view.turn,
+            w.view.phase,
+            w.view.active_player,
+            w.reason,
+            w.view.stack.len()
+        );
+    }
+    // The quiet windows really were passed, not merely absent.
+    assert!(
+        played.auto_passed >= 3,
+        "only {} windows were passed for the agent",
+        played.auto_passed
+    );
+    // Its own sorcery window and its own attack are among them: the rule is a
+    // filter, not a gag.
+    let saw = |f: &dyn Fn(&Wake) -> bool| played.wakes.iter().any(f);
+    assert!(saw(&|w| w.view.active_player == me && w.view.phase.is_main()), "no own main phase");
+    assert!(
+        saw(&|w| w.view.active_player == me && w.view.phase == engine::Phase::DeclareAttackers),
+        "no own declare attackers"
+    );
+
+    r.handle.shutdown();
+    r.task.await.unwrap();
+}
+
+/// A greedy agent taps out every turn, so the stack window never comes up in
+/// the game above. Keep the mana up instead — lands and nothing else — and the
+/// opponent's spell does wake the seat, in a step that would otherwise be quiet.
+#[tokio::test]
+async fn a_spell_on_the_stack_wakes_a_seat_that_kept_its_mana_up() {
+    let r = start(7).await;
+    let server = mcp::connect(SessionConfig {
+        endpoint: r.endpoint.clone(),
+        token: r.tokens[1].clone(),
+        decklist: Some(cards::deck_text("red").unwrap()),
+        name: "Claude 2".into(),
+    })
+    .await
+    .unwrap();
+    let mut human = Client::connect(&r.endpoint).await.unwrap();
+    human.hello(&r.tokens[0], Some("Connor")).await.unwrap();
+    human.subscribe().await.unwrap();
+    human.set_deck(&cards::deck_text("green").unwrap()).await.unwrap().unwrap();
+    human.ready().await.unwrap();
+    let mut status = r.handle.status();
+    status.wait_for(|s| !s.must_act.is_empty()).await.unwrap();
+
+    let human_task = tokio::spawn(human_casting_loop(human));
+
+    let mut stack_wake = None;
+    for _ in 0..60 {
+        let res = server
+            .wait_for_turn(Parameters(WaitParams {
+                timeout_seconds: Some(20),
+                auto_pass: None,
+            }))
+            .await
+            .unwrap();
+        let sc = res.structured_content.clone().unwrap();
+        if sc.get("game_over").and_then(|g| g.as_bool()).unwrap_or(false) {
+            break;
+        }
+        if sc.get("timed_out").and_then(|t| t.as_bool()).unwrap_or(false) {
+            continue;
+        }
+        let view: engine::GameView = serde_json::from_value(sc["state"].clone()).unwrap();
+        if !view.stack.is_empty() && view.active_player != Seat(1) {
+            stack_wake = Some(view);
+            break;
+        }
+        // Lands and mulligan decisions only: everything else is a pass, so the
+        // Mountains stay untapped and the Shocks in hand stay castable.
+        let ids = legal_ids(&res);
+        let (id, _) = ids
+            .iter()
+            .find(|(_, d)| d.starts_with("Keep"))
+            .or_else(|| ids.iter().find(|(_, d)| d.starts_with("Play ")))
+            .or_else(|| ids.iter().find(|(_, d)| *d == "Pass priority"))
+            .or_else(|| ids.iter().find(|(_, d)| d != "Concede"))
+            .cloned()
+            .expect("something to do");
+        let res = server
+            .take_action(Parameters(TakeActionParams {
+                action_id: Some(id),
+                action: None,
+                state_version: None,
+            }))
+            .await
+            .unwrap();
+        assert!(!is_error(&res), "{}", text_of(&res));
+    }
+    human_task.abort();
+
+    let view = stack_wake.expect("never woken with a spell on the stack to respond to");
+    // And it is a step the quiet rule would otherwise have passed straight through.
+    assert!(
+        !matches!(view.phase, engine::Phase::DeclareBlockers | engine::Phase::End),
+        "{:?} wakes on its own anyway",
+        view.phase
+    );
+
+    r.handle.shutdown();
+    r.task.await.unwrap();
+}
+
+/// `auto_pass: false` still means "wake me at every priority window": nothing
+/// is passed for the agent, and it does stop at the quiet ones.
+#[tokio::test]
+async fn auto_pass_false_wakes_at_every_priority_window() {
+    let r = start(31).await;
+    let server = mcp::connect(SessionConfig {
+        endpoint: r.endpoint.clone(),
+        token: r.tokens[1].clone(),
+        decklist: Some(cards::deck_text("red").unwrap()),
+        name: "Claude 2".into(),
+    })
+    .await
+    .unwrap();
+    let mut human = Client::connect(&r.endpoint).await.unwrap();
+    human.hello(&r.tokens[0], Some("Connor")).await.unwrap();
+    human.subscribe().await.unwrap();
+    human.set_deck(&cards::deck_text("green").unwrap()).await.unwrap().unwrap();
+    human.ready().await.unwrap();
+    let mut status = r.handle.status();
+    status.wait_for(|s| !s.must_act.is_empty()).await.unwrap();
+
+    let human_task = tokio::spawn(human_loop(human, 6));
+    let played = agent_loop_with(&server, 20, Some(false)).await;
+    human_task.await.unwrap();
+
+    assert_eq!(played.auto_passed, 0, "auto_pass: false passed {} windows", played.auto_passed);
+    assert!(
+        played.wakes.iter().any(|w| !w.is_a_window_worth_waking_for(Seat(1))),
+        "auto_pass: false never stopped at a window auto_pass would have skipped"
+    );
+    assert!(
+        played.pass_only_wakeups > 0,
+        "auto_pass: false never stopped at a bare priority window"
+    );
+
+    r.handle.shutdown();
+    r.task.await.unwrap();
+}
+
+/// Play one MCP session through the tools until `other` has a decision waiting.
+async fn mcp_until(server: &mcp::McpServer, handle: &DaemonHandle, other: Seat) {
+    let status = handle.status();
+    for _ in 0..30 {
+        if status.borrow().must_act.contains_key(&other) {
+            return;
+        }
+        let res = server
+            .wait_for_turn(Parameters(WaitParams {
+                timeout_seconds: Some(5),
+                auto_pass: None,
+            }))
+            .await
+            .unwrap();
+        let sc = res.structured_content.clone().unwrap();
+        if sc.get("timed_out").and_then(|t| t.as_bool()).unwrap_or(false) {
+            continue;
+        }
+        if sc.get("game_over").and_then(|g| g.as_bool()).unwrap_or(false) {
+            return;
+        }
+        let ids = legal_ids(&res);
+        let Some((id, _)) = ids
+            .iter()
+            .find(|(_, d)| d.starts_with("Keep"))
+            .or_else(|| ids.iter().find(|(_, d)| *d == "Pass priority"))
+            .or_else(|| ids.iter().find(|(_, d)| d != "Concede"))
+            .cloned()
+        else {
+            return;
+        };
+        let res = server
+            .take_action(Parameters(TakeActionParams {
+                action_id: Some(id),
+                action: None,
+                state_version: None,
+            }))
+            .await
+            .unwrap();
+        assert!(!is_error(&res), "{}", text_of(&res));
+    }
+    panic!("seat {other:?} never got a decision");
+}
+
+/// Chat was delivered and then dropped on the floor: it reached the other
+/// session's log, but nothing an agent actually reads. Two agents greeted each
+/// other through a whole game and neither ever saw a word. Now every state
+/// reply carries what has been said since the last one, once.
+#[tokio::test]
+async fn the_table_chat_arrives_in_the_tool_replies_not_only_in_the_log() {
+    let r = start(61).await;
+    let a = mcp::connect(SessionConfig {
+        endpoint: r.endpoint.clone(),
+        token: r.tokens[0].clone(),
+        name: "Claude 1".into(),
+        decklist: Some(cards::deck_text("green").unwrap()),
+    })
+    .await
+    .unwrap();
+    let b = mcp::connect(SessionConfig {
+        endpoint: r.endpoint.clone(),
+        token: r.tokens[1].clone(),
+        name: "Claude 2".into(),
+        decklist: Some(cards::deck_text("red").unwrap()),
+    })
+    .await
+    .unwrap();
+    let mut status = r.handle.status();
+    status.wait_for(|s| !s.must_act.is_empty()).await.unwrap();
+    // Whoever the seed put first, get the game round to A having a decision.
+    mcp_until(&b, &r.handle, Seat(0)).await;
+
+    // B greets the table; A never calls get_log.
+    assert!(!is_error(
+        &b.say(Parameters(SayParams {
+            text: "hello from B".into()
+        }))
+        .await
+        .unwrap()
+    ));
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    let res = a
+        .wait_for_turn(Parameters(WaitParams {
+            timeout_seconds: Some(10),
+            auto_pass: None,
+        }))
+        .await
+        .unwrap();
+    let text = text_of(&res);
+    assert!(text.contains("TABLE CHAT"), "{text}");
+    assert_eq!(text.matches("Claude 2: hello from B").count(), 1, "{text}");
+
+    // Once delivered, it is not repeated on the next reply.
+    let again = text_of(&a.get_game_state().await.unwrap());
+    assert!(!again.contains("hello from B"), "{again}");
+
+    // A second line arrives the same way, through take_action this time.
+    assert!(!is_error(&b.say(Parameters(SayParams { text: "your move".into() })).await.unwrap()));
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let ids = legal_ids(&res);
+    let (id, _) = ids
+        .iter()
+        .find(|(_, d)| d.starts_with("Keep"))
+        .or_else(|| ids.iter().find(|(_, d)| d != "Concede"))
+        .cloned()
+        .unwrap();
+    let acted = a
+        .take_action(Parameters(TakeActionParams {
+            action_id: Some(id),
+            action: None,
+            state_version: None,
+        }))
+        .await
+        .unwrap();
+    let text = text_of(&acted);
+    assert_eq!(text.matches("Claude 2: your move").count(), 1, "{text}");
+    // Your own words are not read back to you.
+    assert!(!is_error(&a.say(Parameters(SayParams { text: "hi".into() })).await.unwrap()));
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let mine = text_of(&a.get_game_state().await.unwrap());
+    assert!(!mine.contains("TABLE CHAT"), "{mine}");
+    // But the log still has the whole conversation, both sides of it.
+    let log = text_of(&a.get_log(Parameters(GetLogParams { since_turn: None })).await.unwrap());
+    assert!(log.contains("Claude 2: hello from B"), "{log}");
+    assert!(log.contains("You: hi"), "{log}");
+
+    r.handle.shutdown();
+    r.task.await.unwrap();
+}
+
+/// The headless `play` exits when the game is over and takes its daemon with
+/// it. The session's reconnecting client used to retry for five minutes and
+/// every request sat behind it; now the first drop after an outcome is final.
+#[tokio::test]
+async fn once_the_game_is_over_a_dead_table_fails_tools_at_once() {
+    let r = start_tcp(41).await;
+    let proxy = Proxy::in_front_of(r.tcp.unwrap()).await;
+    let server = mcp::connect(SessionConfig {
+        endpoint: proxy.endpoint(),
+        token: r.tokens[1].clone(),
+        decklist: Some(cards::deck_text("red").unwrap()),
+        name: "Claude 2".into(),
+    })
+    .await
+    .unwrap();
+    let mut human = Client::connect(&r.endpoint).await.unwrap();
+    human.hello(&r.tokens[0], Some("Connor")).await.unwrap();
+    human.subscribe().await.unwrap();
+    human.set_deck(&cards::deck_text("green").unwrap()).await.unwrap().unwrap();
+    human.ready().await.unwrap();
+    let mut status = r.handle.status();
+    status.wait_for(|s| !s.must_act.is_empty()).await.unwrap();
+
+    // Reach an outcome the short way.
+    let res = server.concede().await.unwrap();
+    assert!(!is_error(&res), "{}", text_of(&res));
+    assert!(server.session().unwrap().outcome().is_some());
+
+    // The table goes away underneath the session, as `play` does when it exits:
+    // the link dies and there is nothing left to reconnect to.
+    drop(human);
+    proxy.task.abort();
+    proxy.cut();
+    let mut conn = server.session().unwrap().client.watch_state();
+    conn.wait_for(|s| !s.is_connected()).await.unwrap();
+
+    let started = std::time::Instant::now();
+    let res = server.say(Parameters(SayParams { text: "gg".into() })).await.unwrap();
+    let took = started.elapsed();
+    assert!(is_error(&res), "{}", text_of(&res));
+    assert!(
+        text_of(&res).contains("the game is over and the table has closed"),
+        "{}",
+        text_of(&res)
+    );
+    assert!(took < std::time::Duration::from_secs(5), "say took {took:?}");
+
+    // The cached final state is still readable; that is what `leave` is for.
+    let started = std::time::Instant::now();
+    let res = server.get_game_state().await.unwrap();
+    assert!(text_of(&res).contains("GAME OVER"), "{}", text_of(&res));
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    assert!(!is_error(
+        &server.get_log(Parameters(GetLogParams { since_turn: None })).await.unwrap()
+    ));
+}
+
+/// A live game whose link is merely down: the tool waits a while and then says
+/// it is reconnecting, instead of blocking for the whole five-minute policy.
+#[tokio::test]
+async fn a_request_on_a_reconnecting_link_gives_up_rather_than_hanging() {
+    let r = start_tcp(51).await;
+    let proxy = Proxy::in_front_of(r.tcp.unwrap()).await;
+    let server = mcp::connect(SessionConfig {
+        endpoint: proxy.endpoint(),
+        token: r.tokens[1].clone(),
+        decklist: Some(cards::deck_text("red").unwrap()),
+        name: "Claude 2".into(),
+    })
+    .await
+    .unwrap();
+    let mut human = Client::connect(&r.endpoint).await.unwrap();
+    human.hello(&r.tokens[0], Some("Connor")).await.unwrap();
+    human.set_deck(&cards::deck_text("green").unwrap()).await.unwrap().unwrap();
+    human.ready().await.unwrap();
+    let mut status = r.handle.status();
+    status.wait_for(|s| !s.must_act.is_empty()).await.unwrap();
+
+    // Stop the proxy answering at all, then cut the live connection: the client
+    // now has nowhere to reconnect to, but the game is very much still on.
+    proxy.task.abort();
+    proxy.cut();
+    let mut conn = server.session().unwrap().client.watch_state();
+    conn.wait_for(|s| !s.is_connected()).await.unwrap();
+
+    let started = std::time::Instant::now();
+    let res = server.say(Parameters(SayParams { text: "still here".into() })).await.unwrap();
+    let took = started.elapsed();
+    assert!(is_error(&res), "{}", text_of(&res));
+    assert!(text_of(&res).contains("put back up"), "{}", text_of(&res));
+    assert!(
+        took < mcp::session::REQUEST_GRACE + std::time::Duration::from_secs(5),
+        "say took {took:?}"
+    );
+    // Not an "it is over" error: the game has no outcome, only a bad link.
+    assert!(!text_of(&res).contains("the table has closed"), "{}", text_of(&res));
 
     r.handle.shutdown();
     r.task.await.unwrap();

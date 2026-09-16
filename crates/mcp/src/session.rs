@@ -17,6 +17,23 @@ use tokio::sync::watch;
 /// How often `wait_for_turn` asks the daemon for the state directly.
 const POLL_EVERY: Duration = Duration::from_secs(3);
 
+/// How long an ordinary request (say, take_action, get_game_state) may sit on
+/// a link that is reconnecting before it comes back and says so. The
+/// reconnect policy runs for five minutes; a tool call that blocked for that
+/// long would look to the agent like a hang. `wait_for_turn` is the
+/// exception — waiting is what it is for — and keeps its own timeout.
+pub const REQUEST_GRACE: Duration = Duration::from_secs(15);
+
+/// What every game tool says once the game has ended and the table has gone.
+pub const TABLE_CLOSED: &str = "the game is over and the table has closed; call leave";
+
+/// What an ordinary request says while the link is down but the game is live.
+/// Careful not to promise nothing happened: a request already written before
+/// the drop is re-sent on reconnect, and the daemon's `state_version` check is
+/// what keeps that from applying twice.
+pub const RECONNECTING: &str =
+    "the connection to the table has dropped and is being put back up; this call went unanswered. Try it again in a moment — fetch the state first, in case it did land. (wait_for_turn waits through a reconnect on its own.)";
+
 pub struct SessionConfig {
     pub endpoint: Endpoint,
     pub token: Token,
@@ -29,6 +46,12 @@ pub struct SessionConfig {
 pub struct LogLine {
     pub turn: u32,
     pub text: String,
+    /// Somebody else talking to the table. The tools push these into their own
+    /// replies, because an agent that never calls `get_log` would otherwise
+    /// never hear a word anyone said to it. Your own chat is not marked: you
+    /// know what you said.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub chat: bool,
 }
 
 pub struct Session {
@@ -45,6 +68,8 @@ pub struct Session {
     /// Bumped by every tool call; a `wait_for_turn` loop whose generation is
     /// behind has been abandoned by the client and must stop acting.
     wait_gen: std::sync::atomic::AtomicU64,
+    /// How far into `log` this session has already been shown the chat.
+    chat_cursor: Mutex<usize>,
     pub cards: engine::CardDb,
 }
 
@@ -99,6 +124,7 @@ impl Session {
             names: Mutex::new(HashMap::new()),
             last_legal: Mutex::new(None),
             wait_gen: std::sync::atomic::AtomicU64::new(0),
+            chat_cursor: Mutex::new(0),
             cards: cards::core(),
         });
         if let Some(state) = welcome.state {
@@ -158,6 +184,53 @@ impl Session {
         self.view()?.outcome
     }
 
+    /// The game has ended *and* the link is gone: the headless `play` exits
+    /// when the game is over and takes its daemon with it, so there is nothing
+    /// left to reconnect to. Says so once, and tells the client to stop trying
+    /// — otherwise every request blocks behind a five-minute retry.
+    pub fn table_closed(&self) -> bool {
+        if self.outcome().is_none() || self.client.conn_state().is_connected() {
+            return false;
+        }
+        self.client.stop_reconnecting();
+        true
+    }
+
+    /// Run one request without letting a broken link swallow it for the whole
+    /// reconnect policy: a finished table fails at once, and a live one that is
+    /// reconnecting gets `REQUEST_GRACE` before the tool comes back and says
+    /// so. The outer error means the request was never sent; the inner one is
+    /// the daemon's own answer, kept whole so callers can still read its code.
+    pub async fn bounded<T>(&self, request: impl std::future::Future<Output = Result<T, ClientError>>) -> Result<Result<T, ClientError>> {
+        if self.table_closed() {
+            bail!("{TABLE_CLOSED}");
+        }
+        let mut conn = self.client.watch_state();
+        let deadline = tokio::time::Instant::now() + REQUEST_GRACE;
+        tokio::pin!(request);
+        loop {
+            tokio::select! {
+                done = &mut request => return Ok(done),
+                // A drop that turns out to be the end of a finished game, or a
+                // client that has given up, is not worth the full grace period.
+                changed = conn.changed() => {
+                    if self.table_closed() {
+                        bail!("{TABLE_CLOSED}");
+                    }
+                    if changed.is_err() || *conn.borrow() == ConnState::GaveUp {
+                        bail!("lost the connection to the game and could not get it back; the game may still be running — try again or rejoin.");
+                    }
+                }
+                _ = tokio::time::sleep_until(deadline) => {
+                    if self.table_closed() {
+                        bail!("{TABLE_CLOSED}");
+                    }
+                    bail!("{RECONNECTING}");
+                }
+            }
+        }
+    }
+
     async fn handle_push(&self, msg: ServerMessage) {
         match msg {
             ServerMessage::Event { event, state_version } => {
@@ -195,8 +268,10 @@ impl Session {
             EventBase::TurnStarted { turn, .. } => *turn,
             _ => self.view().map(|v| v.turn).unwrap_or(0),
         };
+        let mut chat = false;
         let text = match event {
             EventBase::Chat { from, to, text } => {
+                chat = *from != self.me;
                 let who = if *from == self.me {
                     "You".to_string()
                 } else {
@@ -213,15 +288,34 @@ impl Session {
                 describe_event_view(e, &names, &seats)
             }
         };
-        self.log.lock().unwrap().push(LogLine { turn, text });
+        self.log.lock().unwrap().push(LogLine { turn, text, chat });
     }
 
-    /// Fetch the latest state from the daemon.
+    /// What the table has said to this seat since the last tool reply, and
+    /// marks it delivered. The tools append it to their own text: chat is
+    /// pushed live and never replayed, so an agent that only reads tool
+    /// replies would otherwise be talked at and never hear it.
+    pub fn undelivered_chat(&self) -> Vec<String> {
+        let log = self.log.lock().unwrap();
+        let mut cursor = self.chat_cursor.lock().unwrap();
+        let from = (*cursor).min(log.len());
+        let lines = log[from..].iter().filter(|l| l.chat).map(|l| l.text.clone()).collect();
+        *cursor = log.len();
+        lines
+    }
+
+    /// Fetch the latest state from the daemon. Never blocks longer than
+    /// `REQUEST_GRACE`: the cached view is better than a tool that hangs.
     pub async fn refresh(&self) {
-        match self.client.get_state().await {
-            Ok(state) => self.store_view(state),
-            Err(ClientError::Protocol(e)) if e.code == ErrorCode::BadRequest => {} // not started yet
-            Err(e) => tracing::warn!("get_state failed: {e}"),
+        if self.table_closed() {
+            // Nothing to ask: the cached final state is the whole truth now.
+            return;
+        }
+        match tokio::time::timeout(REQUEST_GRACE, self.client.get_state()).await {
+            Ok(Ok(state)) => self.store_view(state),
+            Ok(Err(ClientError::Protocol(e))) if e.code == ErrorCode::BadRequest => {} // not started yet
+            Ok(Err(e)) => tracing::warn!("get_state failed: {e}"),
+            Err(_) => tracing::warn!("get_state gave up after {REQUEST_GRACE:?}: the link is still down"),
         }
     }
 
@@ -297,7 +391,10 @@ impl Session {
 
     /// Legal actions for this seat, remembered for `take_action` by id.
     pub async fn legal_actions(&self) -> Result<(Vec<LegalAction>, u64, Option<ActReason>)> {
-        let (actions, version, reason) = self.client.get_legal_actions().await.map_err(describe_client_error)?;
+        let (actions, version, reason) = self
+            .bounded(self.client.get_legal_actions())
+            .await?
+            .map_err(describe_client_error)?;
         *self.last_legal.lock().unwrap() = Some((actions.clone(), version));
         Ok((actions, version, reason))
     }
