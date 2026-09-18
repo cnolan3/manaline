@@ -18,11 +18,12 @@
 !/decks/red.txt
 !/decks/green.txt
 !/decks/wu-fliers.txt
-!/decks/ub-control.txt
-!/decks/br-goblins.txt
+!/decks/ur-spells.txt
+!/decks/br-sacrifice.txt
 !/decks/rg-stompy.txt
 !/decks/gw-elves.txt
 !/decks/wb-lifegain.txt
+!/decks/ub-reanimator.txt
 
 # Agent worktrees created by Claude Code.
 /.claude/worktrees/

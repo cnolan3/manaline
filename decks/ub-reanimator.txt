@@ -1,21 +1,17 @@
 // Starter: blue-black graveyard. Fill the yard, bring things back, profit when creatures die. 40 cards.
 Deck
-9 Swamp
-8 Island
-2 Stitcher's Supplier
-2 Crow of Dark Tidings
-2 Doomed Dissenter
+10 Swamp
+7 Island
+3 Stitcher's Supplier
 1 Sanitarium Skeleton
+2 Doomed Dissenter
 2 Merfolk Looter
-1 Walking Corpse
+3 Crow of Dark Tidings
 1 Lord of the Undead
 1 Diregraf Captain
-1 Vindictive Vampire
-1 Blood Bairn
+2 Gravedigger
 1 Bogstomper
-1 Mahamoti Djinn
-2 Raise Dead
-1 Disentomb
+2 Mental Note
+1 Raise Dead
+2 Doom Blade
 2 Zombify
-1 Mental Note
-1 Thought Scour

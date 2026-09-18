@@ -1,0 +1,16 @@
+// Starter: black-red sacrifice. Make spare bodies, throw them at the opponent, and buy the good ones back. 40 cards.
+Deck
+9 Swamp
+8 Mountain
+2 Mogg Fanatic
+3 Doomed Dissenter
+2 Bloodthrone Vampire
+2 Goblin Instigator
+2 Fleshbag Marauder
+2 Nantuko Husk
+1 Vindictive Vampire
+2 Dragon Fodder
+1 Krenko's Command
+2 Goblin Bombardment
+2 Doom Blade
+2 Kolaghan's Command
