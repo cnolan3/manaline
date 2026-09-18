@@ -808,8 +808,9 @@ async fn wait_for_turn_wakes_only_where_an_instant_could_matter() {
     let server = mcp::connect(SessionConfig {
         endpoint: r.endpoint.clone(),
         token: r.tokens[1].clone(),
-        // 3 Shock, 2 Lightning Bolt, 2 Lightning Strike, a Volcanic Hammer and
-        // a Flame Slash: an instant is in hand most of the game.
+        // 3 Lightning Bolt, 2 Lightning Strike, a Shock, a Dual Shot, a Falter,
+        // a Heat Ray and a Volcanic Geyser: ten instants, so one is in hand
+        // most of the game.
         decklist: Some(cards::deck_text("red").unwrap()),
         name: "Claude 2".into(),
     })

@@ -1,24 +1,18 @@
-// Starter: green-white elves and soldiers. Go wide, then pump the team. 40 cards.
+// Starter: green-white elves and soldiers. Go wide on cheap white bodies and Elf tokens, then pump the team. 40 cards.
 Deck
 9 Forest
 8 Plains
+3 Loam Lion
 2 Elvish Mystic
-1 Savannah Lions
 2 Elvish Visionary
-1 Imperious Perfect
-2 Attended Knight
-1 Wall of Blossoms
-1 Ajani's Sunstriker
-1 Benalish Marshal
 1 Elvish Archdruid
-1 Angel of the Dawn
+2 Ballynock Cohort
+2 Imperious Perfect
+2 Attended Knight
 1 Briarpack Alpha
-1 Tajuru Pathwarden
+1 Angel of the Dawn
+2 Selesnya Charm
 1 Raise the Alarm
-1 Glorious Charge
-1 Giant Growth
-1 Serra's Embrace
-1 Smite the Monstrous
-1 Plummet
-1 Inspired Charge
+2 Giant Growth
+1 Sunlance
 1 Overrun

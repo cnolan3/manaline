@@ -1,25 +1,17 @@
-// Starter: white-black lifelink and removal. Outlast the opponent. 40 cards.
+// Starter: white-black lifegain. Soul Warden turns every creature into life, and the life turns into counters. 40 cards.
 Deck
-9 Plains
-8 Swamp
+10 Plains
+7 Swamp
+3 Soul Warden
+2 Serra Ascendant
+3 Ajani's Pridemate
+2 Bishop's Soldier
 2 Mesa Unicorn
-1 Suntail Hawk
 2 Child of Night
-1 Lone Missionary
-1 Youthful Knight
-1 Bishop's Soldier
 1 Vampire Nighthawk
-1 Black Cat
 1 Seraph of Dawn
-1 Vampire Envoy
 1 Angel of Mercy
-1 Serra Angel
-1 Doom Blade
-1 Murder
-1 Grasp of Darkness
-1 Divine Verdict
-1 Holy Strength
-1 Unholy Strength
+2 Tandem Tactics
 1 Revitalize
-1 Cruel Edict
-1 Chaplain's Blessing
+2 Doom Blade
+1 Last Gasp
