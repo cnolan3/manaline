@@ -86,7 +86,7 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     draw_opponents(f, app, chunks[0], &opponents, row_h);
     draw_center(f, app, chunks[1]);
-    draw_me(f, app, chunks[2], row_h);
+    draw_near(f, app, chunks[2], row_h);
     draw_hand(f, app, chunks[3]);
     draw_footer(f, app, chunks[4]);
     // Spare rows below the footer (a short terminal drawing chips): recent log lines.
@@ -314,8 +314,9 @@ fn header(app: &App) -> String {
             }
         },
     };
+    let watching = if app.is_spectator() { "Spectating ── " } else { "" };
     format!(
-        " manaline ── {conn}Turn {} · {} · {} ── active: {} ── game {} ",
+        " manaline ── {conn}{watching}Turn {} · {} · {} ── active: {} ── game {} ",
         view.turn,
         view.phase.label(),
         status,
@@ -360,7 +361,7 @@ fn draw_opponents(f: &mut Frame, app: &App, area: Rect, opponents: &[Seat], row_
     if opponents.is_empty() {
         return;
     }
-    let expanded = opponents[app.expanded_opponent.min(opponents.len() - 1)];
+    let expanded = app.expanded_far().unwrap_or(opponents[0]);
     let mut y = area.y;
     for &seat in opponents {
         let p = view.player(seat);
@@ -454,13 +455,13 @@ fn draw_log(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(lines), area);
 }
 
-fn draw_me(f: &mut Frame, app: &App, area: Rect, row_h: u16) {
+fn draw_near(f: &mut Frame, app: &App, area: Rect, row_h: u16) {
     let view = app.view.as_ref().unwrap();
-    let Some(me) = app.me else {
+    let Some(near) = app.near_seat() else {
         f.render_widget(Paragraph::new("Spectating").dim(), area);
         return;
     };
-    let p = view.player(me);
+    let p = view.player(near);
     let highlight = picker_highlight(app);
     let (lands, others) = split_field(app, &p.battlefield);
     let mut y = area.y;
@@ -468,11 +469,14 @@ fn draw_me(f: &mut Frame, app: &App, area: Rect, row_h: u16) {
     y += row_h;
     draw_row(f, app, Rect::new(area.x, y, area.width, row_h), &lands, highlight.as_ref());
     y += row_h;
+    // A spectator's near seat is somebody else's, so it wears their name.
+    let who = if Some(near) == app.me {
+        format!("YOU — {} (seat {})", p.name, near.0)
+    } else {
+        format!("{} (seat {})", p.name, near.0)
+    };
     let line = Line::from(vec![
-        Span::styled(
-            format!("YOU — {} (seat {})", p.name, me.0),
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
+        Span::styled(who, Style::default().add_modifier(Modifier::BOLD)),
         Span::raw(format!(
             "   ♥ {}   Library {}   Graveyard {}   Pool: {}",
             p.life,
@@ -752,9 +756,19 @@ fn fit(s: &str, w: usize) -> String {
 
 fn draw_hand(f: &mut Frame, app: &App, area: Rect) {
     let view = app.view.as_ref().unwrap();
-    let Some(me) = app.me else { return };
-    let HandView::Yours(hand) = &view.player(me).hand else {
-        return;
+    let Some(near) = app.near_seat() else { return };
+    let hand = match &view.player(near).hand {
+        HandView::Yours(hand) => hand,
+        // A spectator's view carries no cards for the near seat, only a count.
+        HandView::Hidden { count } => {
+            let text = if *count == 1 {
+                "Hand: 1 card".to_string()
+            } else {
+                format!("Hand: {count} cards")
+            };
+            f.render_widget(Paragraph::new(Line::from(text).dim()), area);
+            return;
+        }
     };
     let mut spans: Vec<Span> = vec![Span::styled("HAND ", Style::default().add_modifier(Modifier::BOLD))];
     if hand.is_empty() {

@@ -180,7 +180,14 @@ pub struct App {
     /// away: a dropped seat is resumed, not lost, and the user should know which.
     pub conn: ConnState,
     pub waiting_since: Option<Instant>,
-    pub expanded_opponent: usize,
+    /// The seat the near side of the table draws. A player's near side is
+    /// always their own seat; a spectator has none, so they pick one and cycle
+    /// it with `Shift-Tab`.
+    pub near: Seat,
+    /// The far seat drawn expanded, the rest collapsed; `Tab` cycles it.
+    /// Both fields are read through `near_seat()` and `expanded_far()`, which
+    /// clamp them to the table and keep one seat off both sides at once.
+    pub far: Seat,
     pub needs_refresh: bool,
     pub quit: bool,
     /// Text shown in the log at startup (how to connect an agent, a join command).
@@ -220,7 +227,8 @@ impl App {
             status: None,
             conn: ConnState::Connected,
             waiting_since: None,
-            expanded_opponent: 0,
+            near: me.unwrap_or(Seat(0)),
+            far: Seat(0),
             needs_refresh: false,
             quit: false,
             hints: Vec::new(),
@@ -340,10 +348,76 @@ impl App {
             .unwrap_or_else(|| format!("Seat {}", seat.0))
     }
 
-    /// Seats other than mine, in seat order, eliminated ones included.
+    /// How many seats the table has, from the view once there is one.
+    pub fn seat_count(&self) -> usize {
+        self.view.as_ref().map(|v| v.players.len()).unwrap_or(self.lobby.seats.len())
+    }
+
+    /// The seat drawn on the near side: mine when I have one, else the seat a
+    /// spectator has cycled to. `None` only before there are any seats at all.
+    pub fn near_seat(&self) -> Option<Seat> {
+        if let Some(me) = self.me {
+            return Some(me);
+        }
+        let n = self.seat_count();
+        (n > 0).then(|| Seat((self.near.index() % n) as u8))
+    }
+
+    /// Seats on the far side, in seat order, eliminated ones included:
+    /// every seat but the near one.
     pub fn opponents(&self) -> Vec<Seat> {
-        let n = self.view.as_ref().map(|v| v.players.len()).unwrap_or(self.lobby.seats.len());
-        (0..n).map(|i| Seat(i as u8)).filter(|s| Some(*s) != self.me).collect()
+        let near = self.near_seat();
+        (0..self.seat_count()).map(|i| Seat(i as u8)).filter(|s| Some(*s) != near).collect()
+    }
+
+    /// Which far seat is drawn expanded: `far`, or — when that seat is the one
+    /// on the near side — the next seat along that is not.
+    pub fn expanded_far(&self) -> Option<Seat> {
+        let n = self.seat_count();
+        if n == 0 {
+            return None;
+        }
+        let start = self.far.index() % n;
+        let near = self.near_seat();
+        (0..n).map(|k| Seat(((start + k) % n) as u8)).find(|s| Some(*s) != near)
+    }
+
+    /// `Tab`: expand the next far seat. A seat is never on both sides, so the
+    /// cycle skips the near one; with one far seat there is nothing to cycle,
+    /// and the screen stays exactly as it was.
+    fn cycle_far(&mut self) {
+        let far = self.opponents();
+        if far.len() < 2 {
+            return;
+        }
+        let i = self.expanded_far().and_then(|c| far.iter().position(|s| *s == c)).unwrap_or(0);
+        self.far = far[(i + 1) % far.len()];
+    }
+
+    /// `Shift-Tab`: a spectator moves the near side to the next seat, pushing
+    /// the far expansion along if it lands on it. A player's near side is their
+    /// own seat and never moves.
+    fn cycle_near(&mut self) {
+        if !self.is_spectator() {
+            return;
+        }
+        let n = self.seat_count();
+        if n < 3 {
+            if n == 2 {
+                self.set_status("Both players are on screen");
+            }
+            return;
+        }
+        // Pin the expansion where it is drawn now, so that a collision moves it
+        // on from there and not from some older intent.
+        if let Some(f) = self.expanded_far() {
+            self.far = f;
+        }
+        let cur = self.near_seat().map(|s| s.index()).unwrap_or(0);
+        self.near = Seat(((cur + 1) % n) as u8);
+        if let Some(f) = self.expanded_far() {
+            self.far = f;
+        }
     }
 
     pub fn set_status(&mut self, text: impl Into<String>) {
@@ -767,8 +841,8 @@ impl App {
             }
         }
         let mut order: Vec<Seat> = Vec::new();
-        if let Some(m) = me {
-            order.push(m);
+        if let Some(n) = self.near_seat() {
+            order.push(n);
         }
         order.extend(self.opponents());
         for s in order {
@@ -897,10 +971,8 @@ impl App {
             KeyCode::Char('l') => self.show_log = !self.show_log,
             KeyCode::Char('s') => self.show_stack = !self.show_stack,
             KeyCode::Char('x') if self.me.is_some() && self.outcome().is_none() => self.mode = Mode::ConfirmConcede,
-            KeyCode::Tab => {
-                let n = self.opponents().len().max(1);
-                self.expanded_opponent = (self.expanded_opponent + 1) % n;
-            }
+            KeyCode::Tab => self.cycle_far(),
+            KeyCode::BackTab => self.cycle_near(),
             KeyCode::PageUp => {
                 self.show_log = true;
                 self.log_scroll = self.log_scroll.saturating_add(5);
@@ -1475,13 +1547,24 @@ impl App {
         }
     }
 
+    /// The spectator's two table hints, when there is a table to steer: with
+    /// two seats both are already on screen and neither key does anything.
+    fn side_hints(&self) -> &'static str {
+        if self.is_spectator() && self.seat_count() > 2 {
+            "  [Tab] far side  [Shift-Tab] near side"
+        } else {
+            ""
+        }
+    }
+
     pub fn footer(&self) -> String {
         if let (Some(r), Mode::Normal) = (&self.replay, &self.mode) {
             return format!(
-                "REPLAY {}/{}  [→/n] step  [←/p] back  [[/]] turn  [Space] {}  [Home/End]  [l] log  [s] stack  [i] inspect  [q] quit",
+                "REPLAY {}/{}  [→/n] step  [←/p] back  [[/]] turn  [Space] {}  [Home/End]{}  [l] log  [s] stack  [i] inspect  [q] quit",
                 r.index + 1,
                 r.views.len(),
-                if r.playing { "pause" } else { "play" }
+                if r.playing { "pause" } else { "play" },
+                self.side_hints()
             );
         }
         if self.outcome().is_some() {
@@ -1560,7 +1643,11 @@ impl App {
                         waiting.join(", ")
                     )
                 } else {
-                    format!("Waiting on {}…  [i] inspect  [c] chat  [l] log  [?] help", waiting.join(", "))
+                    format!(
+                        "Waiting on {}…{}  [i] inspect  [c] chat  [l] log  [?] help",
+                        waiting.join(", "),
+                        self.side_hints()
+                    )
                 }
             }
         }

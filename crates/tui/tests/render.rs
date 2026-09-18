@@ -14,6 +14,46 @@ fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
 }
 
+/// What a terminal sends for Shift-Tab.
+fn back_tab() -> KeyEvent {
+    KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT)
+}
+
+fn spectator_for(game: &engine::Game) -> App {
+    let mut app = App::new(
+        None,
+        "TEST42".into(),
+        "Scenario".into(),
+        LobbyView {
+            seats: vec![],
+            started: true,
+        },
+    );
+    app.set_view(game.view_spectator());
+    app
+}
+
+/// The line of a rendered frame holding `needle`, trimmed.
+fn line_with<'a>(s: &'a str, needle: &str) -> &'a str {
+    s.lines()
+        // The header names seats too; this wants the table.
+        .find(|l| l.contains(needle) && !l.contains("manaline"))
+        .unwrap_or_else(|| panic!("no line contains {needle:?} in:\n{s}"))
+        .trim_end()
+}
+
+/// Three seats, each with a land and a creature nobody else has.
+fn pod() -> engine::Game {
+    TestGame::new(Arc::new(cards::core()), 3)
+        .battlefield(Seat(0), "Forest")
+        .battlefield(Seat(0), "Grizzly Bears")
+        .battlefield(Seat(1), "Mountain")
+        .battlefield(Seat(1), "Hill Giant")
+        .battlefield(Seat(2), "Forest")
+        .battlefield(Seat(2), "Craw Wurm")
+        .build()
+}
+
 fn app_for(game: &engine::Game, seat: Seat) -> App {
     let mut app = App::new(
         Some(seat),
@@ -158,6 +198,114 @@ fn spectator_and_lobby_render() {
     assert!(s.contains("Connor (you)  —  ready"));
     assert!(s.contains("seat 1  (empty)  —  not connected"));
     assert!(s.contains("Waiting for every seat"));
+}
+
+#[test]
+fn a_two_player_spectator_sees_both_players_at_once() {
+    let game = board();
+    let mut spec = spectator_for(&game);
+    let s = render(&spec, 100, 32);
+    println!("{s}");
+    // Seat 0 is the near side, seat 1 the far one, and both are drawn in full.
+    let near = line_with(&s, "P0 (seat 0)");
+    assert!(near.contains("\u{2665} 20") && near.contains("Pool:"), "{s}");
+    let far = line_with(&s, "P1 (seat 1)");
+    assert!(far.contains("\u{2665} 20") && far.contains("Library"), "{s}");
+    // Nobody is "you", and the near region is no longer a placeholder - only
+    // the header says this is a spectator.
+    assert!(!s.contains("YOU \u{2014} "), "{s}");
+    assert_eq!(s.matches("Spectating").count(), 1, "{s}");
+    assert!(s.lines().next().unwrap().contains("Spectating"), "{s}");
+    // Both battlefields are on screen at the same time.
+    assert!(s.contains("Grizzly") && s.contains("Bears"), "{s}");
+    assert!(s.contains("Giant"), "{s}");
+    // The near seat's hand is hidden from a spectator, so it is only a count.
+    assert!(s.contains("Hand: 3 cards"), "{s}");
+    // Nothing to cycle: no hints, and Tab leaves the frame exactly as it was.
+    assert!(!s.contains("[Tab] far side") && !s.contains("[Shift-Tab]"), "{s}");
+    spec.handle_key(key(KeyCode::Tab));
+    assert_eq!(render(&spec, 100, 32), s, "Tab changed the screen");
+    // Shift-Tab says why it did nothing.
+    spec.handle_key(back_tab());
+    assert_eq!(spec.near_seat(), Some(Seat(0)));
+    assert_eq!(spec.expanded_far(), Some(Seat(1)));
+    assert!(spec.status.as_ref().unwrap().0.contains("Both players are on screen"));
+}
+
+#[test]
+fn a_pod_spectator_cycles_either_side() {
+    let game = pod();
+    let mut spec = spectator_for(&game);
+    // Near seat 0, far seat 1 expanded, seat 2 collapsed to a line.
+    assert_eq!(spec.near_seat(), Some(Seat(0)));
+    assert_eq!(spec.expanded_far(), Some(Seat(1)));
+    let s = render(&spec, 100, 32);
+    assert!(line_with(&s, "P0 (seat 0)").contains("Pool:"), "{s}");
+    assert!(line_with(&s, "P1 (seat 1)").contains("Library"), "{s}");
+    assert!(line_with(&s, "P2 (seat 2)").contains("creatures 1"), "{s}");
+    assert!(s.contains("Grizzly") && s.contains("Giant"), "{s}");
+    assert!(!s.contains("Wurm"), "a collapsed seat shows no cards:\n{s}");
+    // A pod spectator is told about both keys.
+    assert!(s.contains("[Tab] far side  [Shift-Tab] near side"), "{s}");
+
+    // Tab expands the other far seat.
+    spec.handle_key(key(KeyCode::Tab));
+    assert_eq!(spec.expanded_far(), Some(Seat(2)));
+    let s = render(&spec, 100, 32);
+    assert!(line_with(&s, "P2 (seat 2)").contains("Library"), "{s}");
+    assert!(line_with(&s, "P1 (seat 1)").contains("creatures 1"), "{s}");
+    assert!(s.contains("Wurm") && !s.contains("Giant"), "{s}");
+    // Tab again wraps back round, never landing on the near seat.
+    spec.handle_key(key(KeyCode::Tab));
+    assert_eq!(spec.expanded_far(), Some(Seat(1)));
+
+    // Shift-Tab moves the near side along; the far expansion is untouched
+    // when it does not collide.
+    spec.handle_key(key(KeyCode::Tab));
+    assert_eq!(spec.expanded_far(), Some(Seat(2)));
+    spec.handle_key(back_tab());
+    assert_eq!(spec.near_seat(), Some(Seat(1)));
+    assert_eq!(spec.expanded_far(), Some(Seat(2)));
+    let s = render(&spec, 100, 32);
+    assert!(line_with(&s, "P1 (seat 1)").contains("Pool:"), "{s}");
+    assert!(line_with(&s, "P2 (seat 2)").contains("Library"), "{s}");
+    assert!(line_with(&s, "P0 (seat 0)").contains("creatures 1"), "{s}");
+}
+
+#[test]
+fn the_near_seat_pushes_the_far_expansion_off_itself() {
+    let game = pod();
+    let mut spec = spectator_for(&game);
+    // Seat 1 is both the next near seat and the expanded far one.
+    assert_eq!(spec.expanded_far(), Some(Seat(1)));
+    spec.handle_key(back_tab());
+    assert_eq!(spec.near_seat(), Some(Seat(1)));
+    // So the expansion moved on to the next seat that is not the near one.
+    assert_eq!(spec.expanded_far(), Some(Seat(2)));
+    let s = render(&spec, 100, 32);
+    assert!(line_with(&s, "P1 (seat 1)").contains("Pool:"), "{s}");
+    assert!(line_with(&s, "P2 (seat 2)").contains("Library"), "{s}");
+    assert!(line_with(&s, "P0 (seat 0)").contains("creatures 1"), "{s}");
+    assert_eq!(s.matches("P1 (seat 1)").count(), 1, "one seat, one side:\n{s}");
+}
+
+#[test]
+fn a_player_keeps_one_side_and_one_key() {
+    let game = pod();
+    let mut app = app_for(&game, Seat(1));
+    assert_eq!(app.near_seat(), Some(Seat(1)));
+    assert_eq!(app.expanded_far(), Some(Seat(0)));
+    let s = render(&app, 100, 32);
+    assert!(line_with(&s, "YOU \u{2014} P1 (seat 1)").contains("Pool:"), "{s}");
+    // Shift-Tab is not a player's key: their side of the table is their seat.
+    app.handle_key(back_tab());
+    assert_eq!(app.near_seat(), Some(Seat(1)));
+    assert_eq!(render(&app, 100, 32), s, "Shift-Tab changed a player's screen");
+    // Tab still cycles the far expansion, as it always did.
+    app.handle_key(key(KeyCode::Tab));
+    assert_eq!(app.expanded_far(), Some(Seat(2)));
+    app.handle_key(key(KeyCode::Tab));
+    assert_eq!(app.expanded_far(), Some(Seat(0)));
 }
 
 #[test]
@@ -696,6 +844,16 @@ fn replay_stepping_moves_through_a_game() {
     assert_eq!(app.replay.as_ref().unwrap().index, 2);
     app.handle_key(key(KeyCode::Left));
     assert_eq!(app.replay.as_ref().unwrap().index, 1);
+    // A replay is watched through spectator views, so it has a near side too:
+    // the seat keys fall through the replay controls instead of being eaten.
+    assert_eq!(app.near_seat(), Some(Seat(0)));
+    app.handle_key(key(KeyCode::Tab));
+    app.handle_key(back_tab());
+    assert_eq!(app.replay.as_ref().unwrap().index, 1, "a seat key stepped the replay");
+    assert!(app.status.as_ref().unwrap().0.contains("Both players are on screen"));
+    let s = render(&app, 100, 32);
+    assert!(line_with(&s, "A (seat 0)").contains("Pool:"), "{s}");
+    assert!(line_with(&s, "B (seat 1)").contains("Library"), "{s}");
     let t0 = app.view.as_ref().unwrap().turn;
     app.handle_key(key(KeyCode::Char(']')));
     let t1 = app.view.as_ref().unwrap().turn;
